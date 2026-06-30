@@ -1,7 +1,7 @@
 <!doctype html>
 <html lang="ru">
 <head>
-<meta name="app-version" content="1.4.22">
+<meta name="app-version" content="1.4.23">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,maximum-scale=1">
 <meta name="mobile-web-app-capable" content="yes">
@@ -2438,1146 +2438,889 @@ DI.register('Bus', function() {
 <!-- NOOMIUM_MODULE_END AI -->
 
 <!-- NOOMIUM_MODULE_START Net -->
-  /**
-   * @typedef {Object} NostrEvent
-   * @description Nostr-событие согласно NIP-01.
-   * @property {string} id - SHA-256 хеш события (64 hex-символа).
-   * @property {string} pubkey - Публичный ключ автора (64 hex-символа).
-   * @property {number} created_at - Unix timestamp создания.
-   * @property {number} kind - Тип события (kind).
-   * @property {Array<Array<string>>} tags - Массив тегов.
-   * @property {string} content - Содержимое события.
-   * @property {string} sig - Подпись события (Schnorr).
-   */
+/**
+ * Сетевой модуль Nostr P2P.
+ * 
+ * Архитектурные принципы:
+ * - Единая глобальная подписка на все события (без дублирования)
+ * - Ephemeral events (20000-29999): релеи НЕ хранят, только ретранслируют
+ * - Чужие заметки НЕ сохраняются локально
+ * - Сетевые parent/child связи НЕ поддерживаются (только для локальных)
+ * 
+ * Поддерживаемые Kinds:
+ * - 21000 (KQ): поисковый запрос с вектором
+ * - 21001 (KA): ответ на запрос или публикация shared-заметки
+ * 
+ * НЕ поддерживается:
+ * - Kind 21002 (удаление) — бессмысленно для ephemeral
+ * - Двойные подписки (LiveStream) — одна глобальная
+ * - Кэширование ответов между запросами
+ * 
+ * @module Net
+ */
+DI.register('Net', function(cfg, DB, AI, log, bus) {
+
+  /** @type {Object | null} Nostr SimplePool instance */
+  var pool = null;
+
+  /** @type {Uint8Array | null} Секретный ключ (приватный) */
+  var sk = null;
+
+  /** @type {string | null} Публичный ключ (hex) */
+  var pk = null;
+
+  /** @type {string | null} ID последнего отправленного запроса */
+  var queryId = null;
+
+  /** @type {Map<string, number>} Активные пиры: pubkey -> timestamp последнего события */
+  var peers = new Map();
+
+  /** @type {NetworkAnswer[]} Кэш полученных ответов на ТЕКУЩИЙ запрос */
+  var answers = [];
+
+  /** @type {function(): void | null} Колбэк обновления UI */
+  var onUpdate = null;
+
+  /** @type {number | null} ID таймера heartbeat */
+  var hbTimer = null;
+
+  /** @type {number} Timestamp последнего запроса в сеть */
+  var lastQueryTime = 0;
+
+  /** @type {Object | null} Nostr-tools модуль */
+  var nostr = null;
+
+  /** @type {Object | null} Глобальная подписка на события */
+  var subscription = null;
+
+  /** @type {Array<function(number): void>} Подписчики на изменение количества пиров */
+  var peerListeners = [];
+
+  /** @type {boolean} Флаг инициализации сети */
+  var started = false;
+
+  /** @type {boolean} Флаг процесса переподключения */
+  var reconnecting = false;
+
+  /** @type {Set<string>} Множество ID уже обработанных событий (дедупликация) */
+  var seen = new Set();
+
+  /** @type {Map<string, number>} Rate limiting релеев */
+  var rateLimitedUntil = new Map();
+
+  /** @type {number} Счётчик попыток подключения */
+  var connAttempts = 0;
+
+  /** @type {'disconnected' | 'connecting' | 'connected' | 'reconnecting' | 'failed'} */
+  var netStatus = 'disconnected';
+
+  /** @type {Map<string, NostrEvent>} Очередь событий для отправки (offline) */
+  var outbox = new Map();
+
+  /** @type {Map<string, number>} Счётчик ошибок для каждого релея */
+  var relayErrors = new Map();
+
+  /** @type {number | null} ID таймера реконнекта */
+  var reconnectTimer = null;
+
+  /** @type {number} Жёсткий лимит длины текста для P2P-ответов */
+  var MAX_P2P_TEXT_LENGTH = 2000;
+
+  /** @type {number} Текущая версия сетевого протокола */
+  var PROTOCOL_VERSION = 2;
 
   /**
-   * @typedef {Object} NetworkAnswer
-   * @description Ответ от сети на поисковый запрос.
-   * @property {string} id - ID Nostr-события.
-   * @property {string} text - Текст ответа.
-   * @property {Vector} vector - Вектор эмбеддинга.
-   * @property {number} score - Сырой косинус.
-   * @property {number} [z_score] - Z-score (опционально).
-   * @property {string} peer - Короткий ID пира (первые 6 символов pubkey).
-   * @property {string} fullPubkey - Полный публичный ключ автора.
-   * @property {number} createdAt - Timestamp получения ответа.
-   * @property {string} [parentId] - ID родительской заметки.
-   * @property {string} [queryId] - ID поискового запроса, на который получен ответ (для фильтрации).
+   * Выводит AES-GCM ключ из пароля через PBKDF2.
+   * @param {string} password - Пароль пользователя.
+   * @param {Uint8Array} salt - Соль для PBKDF2.
+   * @returns {Promise<CryptoKey>}
    */
+  function deriveKey(password, salt) {
+    var enc = new TextEncoder();
+    return crypto.subtle.importKey('raw', enc.encode(password), 'PBKDF2', false, ['deriveKey']).then(function(keyMaterial) {
+      return crypto.subtle.deriveKey(
+        { name: 'PBKDF2', salt: salt, iterations: 100000, hash: 'SHA-256' },
+        keyMaterial,
+        { name: 'AES-GCM', length: 256 },
+        false,
+        ['encrypt', 'decrypt']
+      );
+    });
+  }
 
   /**
-   * @typedef {Object} QueryPayloadV1
-   * @description Формат поискового запроса v1 (legacy).
-   * @property {Vector} vector - Вектор запроса.
+   * Шифрует hex-ключ паролем с использованием AES-GCM.
+   * @param {string} hexKey - Секретный ключ в hex-формате.
+   * @param {string} password - Пароль.
+   * @returns {Promise<string>} Base64-строка (salt + iv + ciphertext).
    */
-
-  /**
-   * @typedef {Object} QueryPayloadV2
-   * @description Формат поискового запроса v2 (с порогами).
-   * @property {Vector} vector - Вектор запроса.
-   * @property {number} threshold - Порог схожести (0..1).
-   * @property {number} serendipity - Дельта озарений (0..1).
-   * @property {number} protocol_version - Всегда 2.
-   */
-
-  /**
-   * Сетевой модуль: управление Nostr-подключениями, P2P-обмен, шифрование ключей.
-   * 
-   * 🔑 КЛЮЧЕВЫЕ ИЗМЕНЕНИЯ ЭТАПА СТАБИЛИЗАЦИИ v1.4.18:
-   * 
-   * 1. **Протокол удаления (Kind 21002):**
-   *    - Введён новый тип события для уведомления сети об удалении shared-заметок.
-   *    - При получении Kind 21002 заметка удаляется из `answers` и эмитится `net:deletion`.
-   *    - `LiveStreamStrategy` подписан на `net:deletion` и удаляет заметку из `streamData`.
-   * 
-   * 2. **Исправление World-поиска:**
-   *    - `answers` больше НЕ очищается при каждом `Net.send()` — вместо этого
-   *      каждый ответ хранит `queryId`, и `activeAnswers(queryId)` фильтрует по нему.
-   *    - Это предотвращает потерю ответов при повторных поисках с тем же вектором.
-   *    - Проверка `expectedDim` оставлена как защита от мусорных данных с несовместимых
-   *      клиентов, но добавлено подробное логирование для отладки.
-   *    - Удалена избыточная проверка `peers.has(ev.pubkey)` для KA (пир уже добавлен выше).
-   * 
-   * 3. **Метод `publishDeletion(id)`:**
-   *    - Публичный метод для публикации события удаления.
-   *    - Вызывается из `BaseViewComponent` и `StreamViewComponent` при удалении shared-заметок.
-   * 
-   * Принцип "фильтрация на стороне отправителя" (v2) сохранён.
-   * 
-   * @module Net
-   */
-  DI.register('Net', function(cfg, DB, AI, log, bus) {
-
-    /** @type {Object | null} Nostr SimplePool instance */
-    var pool = null;
-
-    /** @type {Uint8Array | null} Секретный ключ (приватный) */
-    var sk = null;
-
-    /** @type {string | null} Публичный ключ (hex) */
-    var pk = null;
-
-    /** @type {string | null} ID последнего отправленного запроса */
-    var queryId = null;
-
-    /** @type {Map<string, number>} Активные пиры: pubkey -> timestamp последнего события */
-    var peers = new Map();
-
-    /** @type {NetworkAnswer[]} Кэш полученных ответов (на наши поисковые запросы) */
-    var answers = [];
-
-    /** @type {function(): void | null} Колбэк обновления UI */
-    var onUpdate = null;
-
-    /** @type {number | null} ID таймера heartbeat */
-    var hbTimer = null;
-
-    /** @type {number | null} ID таймера flush outbox */
-    var flushTimer = null;
-
-    /** @type {number} Timestamp последнего запроса в сеть */
-    var lastQueryTime = 0;
-
-    /** @type {Object | null} Nostr-tools модуль */
-    var nostr = null;
-
-    /** @type {Object | null} Активная подписка на события */
-    var subscription = null;
-
-    /** @type {Array<function(number): void>} Подписчики на изменение количества пиров */
-    var peerListeners = [];
-
-    /** @type {boolean} Флаг инициализации сети */
-    var started = false;
-
-    /** @type {boolean} Флаг процесса переподключения */
-    var reconnecting = false;
-
-    /** @type {Set<string>} Множество ID уже обработанных событий (дедупликация) */
-    var seen = new Set();
-
-    /** @type {Map<string, number>} Rate limiting релеев: relay URL -> timestamp до которого заблокирован */
-    var rateLimitedUntil = new Map();
-
-    /** @type {number} Счётчик попыток подключения */
-    var connAttempts = 0;
-
-    /** @type {'disconnected' | 'connecting' | 'connected' | 'reconnecting' | 'failed'} */
-    var netStatus = 'disconnected';
-
-    /** @type {Map<string, NostrEvent>} Очередь событий для отправки (ключ = ev.id для дедупликации) */
-    var outbox = new Map();
-
-    /** @type {Map<string, number>} Счётчик ошибок для каждого релея */
-    var relayErrors = new Map();
-
-    /** @type {number | null} ID таймера реконнекта (для очистки в stop) */
-    var reconnectTimer = null;
-
-    /** @type {Object | null} Активная подписка для Live Stream */
-    var liveStreamSubscription = null;
-
-    /** @type {number} Жёсткий лимит длины текста для P2P-ответов (защита от OOM) */
-    var MAX_P2P_TEXT_LENGTH = 2000;
-
-    /**
-     * Текущая версия сетевого протокола.
-     * v2 включает пороги threshold/serendipity для фильтрации на стороне отправителя.
-     * @type {number}
-     */
-    var PROTOCOL_VERSION = 2;
-
-    /**
-     * Kind Nostr-события для уведомления об удалении заметки.
-     * 🔑 НОВОЕ в v1.4.18: используется для синхронизации удалений между пирами.
-     * @type {number}
-     */
-    var K_DELETION = 21002;
-
-    /**
-     * Выводит AES-GCM ключ из пароля через PBKDF2 (100k итераций, SHA-256).
-     * @param {string} password - Пароль пользователя.
-     * @param {Uint8Array} salt - Соль для PBKDF2.
-     * @returns {Promise<CryptoKey>}
-     */
-    function deriveKey(password, salt) {
+  function encryptKey(hexKey, password) {
+    var salt = crypto.getRandomValues(new Uint8Array(16));
+    var iv = crypto.getRandomValues(new Uint8Array(12));
+    return deriveKey(password, salt).then(function(key) {
       var enc = new TextEncoder();
-      return crypto.subtle.importKey('raw', enc.encode(password), 'PBKDF2', false, ['deriveKey']).then(function(keyMaterial) {
-        return crypto.subtle.deriveKey(
-          { name: 'PBKDF2', salt: salt, iterations: 100000, hash: 'SHA-256' },
-          keyMaterial,
-          { name: 'AES-GCM', length: 256 },
-          false,
-          ['encrypt', 'decrypt']
-        );
+      return crypto.subtle.encrypt({ name: 'AES-GCM', iv: iv }, key, enc.encode(hexKey)).then(function(ciphertext) {
+        var combined = new Uint8Array(salt.length + iv.length + ciphertext.byteLength);
+        combined.set(salt, 0);
+        combined.set(iv, salt.length);
+        combined.set(new Uint8Array(ciphertext), salt.length + iv.length);
+        return btoa(String.fromCharCode.apply(null, combined));
       });
-    }
+    });
+  }
 
-    /**
-     * Шифрует hex-ключ паролем с использованием AES-GCM.
-     * @param {string} hexKey - Секретный ключ в hex-формате.
-     * @param {string} password - Пароль.
-     * @returns {Promise<string>} Base64-строка (salt + iv + ciphertext).
-     */
-    function encryptKey(hexKey, password) {
-      var salt = crypto.getRandomValues(new Uint8Array(16));
-      var iv = crypto.getRandomValues(new Uint8Array(12));
-      return deriveKey(password, salt).then(function(key) {
-        var enc = new TextEncoder();
-        return crypto.subtle.encrypt({ name: 'AES-GCM', iv: iv }, key, enc.encode(hexKey)).then(function(ciphertext) {
-          var combined = new Uint8Array(salt.length + iv.length + ciphertext.byteLength);
-          combined.set(salt, 0);
-          combined.set(iv, salt.length);
-          combined.set(new Uint8Array(ciphertext), salt.length + iv.length);
-          return btoa(String.fromCharCode.apply(null, combined));
-        });
+  /**
+   * Расшифровывает hex-ключ из Base64-строки.
+   * @param {string} base64Str - Зашифрованная строка.
+   * @param {string} password - Пароль.
+   * @returns {Promise<string>} Расшифрованный hex-ключ.
+   */
+  function decryptKey(base64Str, password) {
+    var combined = Uint8Array.from(atob(base64Str), function(c) { return c.charCodeAt(0); });
+    var salt = combined.slice(0, 16);
+    var iv = combined.slice(16, 28);
+    var ciphertext = combined.slice(28);
+    return deriveKey(password, salt).then(function(key) {
+      return crypto.subtle.decrypt({ name: 'AES-GCM', iv: iv }, key, ciphertext).then(function(dec) {
+        return new TextDecoder().decode(dec);
       });
-    }
+    });
+  }
 
-    /**
-     * Расшифровывает hex-ключ из Base64-строки с использованием пароля.
-     * @param {string} base64Str - Зашифрованная строка.
-     * @param {string} password - Пароль.
-     * @returns {Promise<string>} Расшифрованный hex-ключ.
-     */
-    function decryptKey(base64Str, password) {
-      var combined = Uint8Array.from(atob(base64Str), function(c) { return c.charCodeAt(0); });
-      var salt = combined.slice(0, 16);
-      var iv = combined.slice(16, 28);
-      var ciphertext = combined.slice(28);
-      return deriveKey(password, salt).then(function(key) {
-        return crypto.subtle.decrypt({ name: 'AES-GCM', iv: iv }, key, ciphertext).then(function(dec) {
-          return new TextDecoder().decode(dec);
-        });
-      });
+  /**
+   * Устанавливает статус сети и публикует событие.
+   * @param {'disconnected' | 'connecting' | 'connected' | 'reconnecting' | 'failed'} s
+   * @returns {void}
+   */
+  function setStatus(s) {
+    var wasDisconnected = (netStatus !== 'connected');
+    netStatus = s;
+    if (bus && bus.emit) {
+      try { bus.emit('net:status', { status: s }); } catch (_) {}
     }
+    if (s === 'connected' && wasDisconnected) flushOutbox();
+  }
 
-    /**
-     * Устанавливает статус сети и публикует событие net:status.
-     * @param {'disconnected' | 'connecting' | 'connected' | 'reconnecting' | 'failed'} s
-     * @returns {void}
-     */
-    function setStatus(s) {
-      var wasDisconnected = (netStatus !== 'connected');
-      netStatus = s;
-      if (bus && bus.emit) {
-        try { bus.emit('net:status', { status: s }); } catch (_) {}
-      }
-      if (s === 'connected' && wasDisconnected) flushOutbox();
+  /**
+   * Уведомляет подписчиков об изменении количества пиров.
+   * @returns {void}
+   */
+  function notifyPeers() {
+    var count = peers.size;
+    for (var i = 0; i < peerListeners.length; i++) {
+      try { peerListeners[i](count); } catch (_) {}
     }
-
-    /**
-     * Уведомляет всех подписчиков об изменении количества пиров.
-     * @returns {void}
-     */
-    function notifyPeers() {
-      var count = peers.size;
-      for (var i = 0; i < peerListeners.length; i++) {
-        try { peerListeners[i](count); } catch (_) {}
-      }
-      if (bus && bus.emit) {
-        try { bus.emit('net:peers', { count: count }); } catch (_) {}
-      }
+    if (bus && bus.emit) {
+      try { bus.emit('net:peers', { count: count }); } catch (_) {}
     }
+  }
 
-    /**
-     * Проверяет валидность структуры Nostr-события.
-     * @param {NostrEvent} ev
-     * @returns {boolean}
-     */
-    function isValidEvent(ev) {
-      if (!ev || typeof ev !== 'object') return false;
-      if (typeof ev.id !== 'string' || ev.id.length !== 64) return false;
-      if (typeof ev.pubkey !== 'string' || ev.pubkey.length !== 64) return false;
-      if (typeof ev.kind !== 'number') return false;
-      if (!Array.isArray(ev.tags)) return false;
-      return true;
-    }
+  /**
+   * Проверяет валидность структуры Nostr-события.
+   * @param {NostrEvent} ev
+   * @returns {boolean}
+   */
+  function isValidEvent(ev) {
+    if (!ev || typeof ev !== 'object') return false;
+    if (typeof ev.id !== 'string' || ev.id.length !== 64) return false;
+    if (typeof ev.pubkey !== 'string' || ev.pubkey.length !== 64) return false;
+    if (typeof ev.kind !== 'number') return false;
+    if (!Array.isArray(ev.tags)) return false;
+    return true;
+  }
 
-    /**
-     * Проверяет, является ли событие дубликатом.
-     * @param {NostrEvent} ev
-     * @returns {boolean}
-     */
-    function isDuplicate(ev) {
-      if (!ev || !ev.id) return true;
-      if (seen.has(ev.id)) return true;
-      seen.add(ev.id);
-      if (seen.size > cfg.get('seenMaxSize', 1000)) {
-        var arr = Array.from(seen);
-        seen.clear();
-        for (var i = arr.length - cfg.get('seenKeepSize', 500); i < arr.length; i++) {
-          seen.add(arr[i]);
-        }
-      }
-      return false;
-    }
-
-    /**
-     * Инвалидирует кэш shared-векторов при изменении базы.
-     * @returns {void}
-     */
-    function invalidateSharedCache() {
-      /* reserved for future shared cache logic */
-    }
-    if (bus && bus.on) bus.on('db:change', invalidateSharedCache);
-
-    /**
-     * Эмитит текущий размер outbox в шину событий.
-     * @returns {void}
-     */
-    function emitOutboxCount() {
-      if (bus && bus.emit) {
-        try { bus.emit('net:outbox', { count: outbox.size }); } catch (_) {}
+  /**
+   * Проверяет, является ли событие дубликатом.
+   * @param {NostrEvent} ev
+   * @returns {boolean}
+   */
+  function isDuplicate(ev) {
+    if (!ev || !ev.id) return true;
+    if (seen.has(ev.id)) return true;
+    seen.add(ev.id);
+    if (seen.size > cfg.get('seenMaxSize', 1000)) {
+      var arr = Array.from(seen);
+      seen.clear();
+      for (var i = arr.length - cfg.get('seenKeepSize', 500); i < arr.length; i++) {
+        seen.add(arr[i]);
       }
     }
+    return false;
+  }
 
-    /**
-     * Добавляет событие в offline-очередь с дедупликацией по ID.
-     * @param {NostrEvent} ev
-     * @returns {void}
-     */
-    function addToOutbox(ev) {
-      if (!ev || !ev.id) return;
-      if (outbox.has(ev.id)) return;
-      if (outbox.size >= cfg.get('offlineQueueMaxSize', 100)) {
-        var oldestKey = outbox.keys().next().value;
-        outbox.delete(oldestKey);
-      }
-      outbox.set(ev.id, ev);
-      emitOutboxCount();
+  /**
+   * Эмитит текущий размер outbox.
+   * @returns {void}
+   */
+  function emitOutboxCount() {
+    if (bus && bus.emit) {
+      try { bus.emit('net:outbox', { count: outbox.size }); } catch (_) {}
     }
+  }
 
-    /**
-     * Отправляет порцию событий из outbox через доступные релеи.
-     * @returns {void}
-     */
-    function flushOutbox() {
-      if (outbox.size === 0 || !pool) return;
-      var limit = Math.min(cfg.get('outboxBatchSize', 2), outbox.size);
-      var keys = Array.from(outbox.keys()).slice(0, limit);
-      var toSend = [];
-      for (var i = 0; i < keys.length; i++) {
-        var id = keys[i];
-        toSend.push(outbox.get(id));
-        outbox.delete(id);
-      }
-      toSend.forEach(function(ev) { safePublish(ev); });
-      emitOutboxCount();
+  /**
+   * Добавляет событие в offline-очередь.
+   * @param {NostrEvent} ev
+   * @returns {void}
+   */
+  function addToOutbox(ev) {
+    if (!ev || !ev.id) return;
+    if (outbox.has(ev.id)) return;
+    if (outbox.size >= cfg.get('offlineQueueMaxSize', 100)) {
+      var oldestKey = outbox.keys().next().value;
+      outbox.delete(oldestKey);
     }
+    outbox.set(ev.id, ev);
+    emitOutboxCount();
+  }
 
-    /**
-     * Безопасно публикует событие, обходя rate-limited релеи.
-     * @param {NostrEvent} ev
-     * @returns {Promise<void>}
-     */
-    function safePublish(ev) {
-      var relays = cfg.get('relays', []);
-      var now = Date.now();
-      var goodRelays = [];
-      for (var i = 0; i < relays.length; i++) {
-        var until = rateLimitedUntil.get(relays[i]) || 0;
-        if (until <= now) goodRelays.push(relays[i]);
-      }
-      if (goodRelays.length === 0) {
-        addToOutbox(ev);
-        return Promise.resolve();
-      }
-      try {
-        var pubs = pool.publish(goodRelays, ev);
-        for (var i = 0; i < goodRelays.length; i++) {
-          var relay = goodRelays[i];
-          var p = (pubs && typeof pubs.get === 'function') ? pubs.get(relay) : (Array.isArray(pubs) ? pubs[i] : null);
-          if (p && p.then) {
-            (function(promise, relayUrl) {
-              promise.then(function() {
-                relayErrors.delete(relayUrl);
-              }).catch(function(err) {
-                var count = (relayErrors.get(relayUrl) || 0) + 1;
-                relayErrors.set(relayUrl, count);
-                if (count >= cfg.get('relayErrorThreshold', 5)) {
-                  rateLimitedUntil.set(relayUrl, Date.now() + cfg.get('relayCircuitBreakTime', 120000));
-                  relayErrors.set(relayUrl, 0);
-                  if (log) log.warn('Relay ' + relayUrl + ' circuit broken, 2m backoff');
-                } else {
-                  var backoff = count === 1 ? cfg.get('relayBackoff1', 15000) : cfg.get('relayBackoff2', 30000);
-                  rateLimitedUntil.set(relayUrl, Date.now() + backoff);
-                }
-                if (!outbox.has(ev.id)) {
-                  outbox.set(ev.id, ev);
-                  emitOutboxCount();
-                }
-              });
-            })(p, relay);
-          }
-        }
-      } catch (err) {
-        if (log) log.warn('publish throw', String(err));
-        addToOutbox(ev);
-      }
+  /**
+   * Отправляет порцию событий из outbox.
+   * @returns {void}
+   */
+  function flushOutbox() {
+    if (outbox.size === 0 || !pool) return;
+    var limit = Math.min(cfg.get('outboxBatchSize', 2), outbox.size);
+    var keys = Array.from(outbox.keys()).slice(0, limit);
+    var toSend = [];
+    for (var i = 0; i < keys.length; i++) {
+      var id = keys[i];
+      toSend.push(outbox.get(id));
+      outbox.delete(id);
+    }
+    toSend.forEach(function(ev) { safePublish(ev); });
+    emitOutboxCount();
+  }
+
+  /**
+   * Безопасно публикует событие.
+   * @param {NostrEvent} ev
+   * @returns {Promise<void>}
+   */
+  function safePublish(ev) {
+    var relays = cfg.get('relays', []);
+    var now = Date.now();
+    var goodRelays = [];
+    for (var i = 0; i < relays.length; i++) {
+      var until = rateLimitedUntil.get(relays[i]) || 0;
+      if (until <= now) goodRelays.push(relays[i]);
+    }
+    if (goodRelays.length === 0) {
+      addToOutbox(ev);
       return Promise.resolve();
     }
-
-    /**
-     * 🔑 НОВАЯ ФУНКЦИЯ: Валидация и нормализация входящего запроса.
-     * 
-     * Поддерживает как старый формат v1 `{vector}`, так и новый v2
-     * `{vector, threshold, serendipity, protocol_version}`.
-     * При невалидных данных делает fallback на локальные пороги из Config.
-     * 
-     * @param {Object} raw - Сырой распарсенный объект запроса.
-     * @returns {{vector: Vector, threshold: number, serendipity: number, version: number} | null}
-     */
-    function normalizeQuery(raw) {
-      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
-      if (!Array.isArray(raw.vector) || raw.vector.length === 0) return null;
-
-      var version = 1;
-      if (typeof raw.protocol_version === 'number' && 
-          Number.isInteger(raw.protocol_version) && 
-          raw.protocol_version >= 2) {
-        version = 2;
-      }
-
-      var localThreshold = cfg.get('threshold', 0.7);
-      var localSerendipity = cfg.get('serendipity', 0.3);
-
-      var threshold, serendipity;
-      if (version === 2) {
-        if (typeof raw.threshold === 'number' && 
-            isFinite(raw.threshold) && 
-            raw.threshold >= 0 && raw.threshold <= 1) {
-          threshold = raw.threshold;
-        } else {
-          threshold = localThreshold;
+    try {
+      var pubs = pool.publish(goodRelays, ev);
+      for (var i = 0; i < goodRelays.length; i++) {
+        var relay = goodRelays[i];
+        var p = (pubs && typeof pubs.get === 'function') ? pubs.get(relay) : (Array.isArray(pubs) ? pubs[i] : null);
+        if (p && p.then) {
+          (function(promise, relayUrl) {
+            promise.then(function() {
+              relayErrors.delete(relayUrl);
+            }).catch(function(err) {
+              var count = (relayErrors.get(relayUrl) || 0) + 1;
+              relayErrors.set(relayUrl, count);
+              if (count >= cfg.get('relayErrorThreshold', 5)) {
+                rateLimitedUntil.set(relayUrl, Date.now() + cfg.get('relayCircuitBreakTime', 120000));
+                relayErrors.set(relayUrl, 0);
+                if (log) log.warn('Relay ' + relayUrl + ' circuit broken, 2m backoff');
+              } else {
+                var backoff = count === 1 ? cfg.get('relayBackoff1', 15000) : cfg.get('relayBackoff2', 30000);
+                rateLimitedUntil.set(relayUrl, Date.now() + backoff);
+              }
+              if (!outbox.has(ev.id)) {
+                outbox.set(ev.id, ev);
+                emitOutboxCount();
+              }
+            });
+          })(p, relay);
         }
-
-        if (typeof raw.serendipity === 'number' && 
-            isFinite(raw.serendipity) && 
-            raw.serendipity >= 0 && raw.serendipity <= 1) {
-          serendipity = raw.serendipity;
-        } else {
-          serendipity = localSerendipity;
-        }
-      } else {
-        threshold = localThreshold;
-        serendipity = localSerendipity;
       }
+    } catch (err) {
+      if (log) log.warn('publish throw', String(err));
+      addToOutbox(ev);
+    }
+    return Promise.resolve();
+  }
 
-      return {
-        vector: raw.vector,
-        threshold: threshold,
-        serendipity: serendipity,
-        version: version
-      };
+  /**
+   * Валидация и нормализация входящего запроса.
+   * @param {Object} raw
+   * @returns {{vector: Vector, threshold: number, serendipity: number, version: number} | null}
+   */
+  function normalizeQuery(raw) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+    if (!Array.isArray(raw.vector) || raw.vector.length === 0) return null;
+
+    var version = 1;
+    if (typeof raw.protocol_version === 'number' && 
+        Number.isInteger(raw.protocol_version) && 
+        raw.protocol_version >= 2) {
+      version = 2;
     }
 
-    /**
-     * 🔑 НОВАЯ ФУНКЦИЯ: Построение ответа на входящий запрос.
-     * 
-     * @param {Vector} queryVector - Вектор запроса.
-     * @param {Note[]} sharedNotes - Массив shared-заметок локальной БД.
-     * @param {number} threshold - Порог схожести.
-     * @param {number} serendipity - Дельта озарений.
-     * @param {number} version - Версия протокола (1 или 2).
-     * @returns {Array<Object>} Массив кандидатов для ответа.
-     */
-    function buildAnswerCandidates(queryVector, sharedNotes, threshold, serendipity, version) {
-      var maxAnswers = cfg.get('maxAnswersPerQuery', 5);
+    var localThreshold = cfg.get('threshold', 0.7);
+    var localSerendipity = cfg.get('serendipity', 0.3);
 
-      if (version === 2) {
-        var minScore = threshold - serendipity;
-        var filtered = [];
+    var threshold, serendipity;
+    if (version === 2) {
+      threshold = (typeof raw.threshold === 'number' && isFinite(raw.threshold) && raw.threshold >= 0 && raw.threshold <= 1)
+        ? raw.threshold : localThreshold;
+      serendipity = (typeof raw.serendipity === 'number' && isFinite(raw.serendipity) && raw.serendipity >= 0 && raw.serendipity <= 1)
+        ? raw.serendipity : localSerendipity;
+    } else {
+      threshold = localThreshold;
+      serendipity = localSerendipity;
+    }
 
-        for (var i = 0; i < sharedNotes.length; i++) {
-          var score = AI.cosineSimilarity(queryVector, sharedNotes[i].vector);
-          if (score >= minScore) {
-            filtered.push({
-              id: sharedNotes[i].id,
-              text: sharedNotes[i].text,
-              vector: sharedNotes[i].vector,
-              score: score
-            });
-          }
-        }
+    return { vector: raw.vector, threshold: threshold, serendipity: serendipity, version: version };
+  }
 
-        if (filtered.length === 0) return [];
+  /**
+   * Построение ответа на входящий запрос.
+   * @param {Vector} queryVector
+   * @param {Note[]} sharedNotes
+   * @param {number} threshold
+   * @param {number} serendipity
+   * @param {number} version
+   * @returns {Array<Object>}
+   */
+  function buildAnswerCandidates(queryVector, sharedNotes, threshold, serendipity, version) {
+    var maxAnswers = cfg.get('maxAnswersPerQuery', 5);
 
-        var count = filtered.length;
-        var mean = 0;
-        for (var i = 0; i < count; i++) mean += filtered[i].score;
-        mean /= count;
-
-        var stddev = 0;
-        if (count > 1) {
-          var sumSq = 0;
-          for (var i = 0; i < count; i++) {
-            var diff = filtered[i].score - mean;
-            sumSq += diff * diff;
-          }
-          stddev = Math.sqrt(sumSq / (count - 1));
-        }
-
-        for (var i = 0; i < count; i++) {
-          var raw = filtered[i].score;
-          filtered[i].z_score = stddev > 0 ? (raw - mean) / stddev : 0;
-        }
-
-        filtered.sort(function(a, b) { return b.score - a.score; });
-        return filtered.slice(0, maxAnswers);
-      }
-
-      var rawScores = [];
+    if (version === 2) {
+      var minScore = threshold - serendipity;
+      var filtered = [];
       for (var i = 0; i < sharedNotes.length; i++) {
-        rawScores.push(AI.cosineSimilarity(queryVector, sharedNotes[i].vector));
+        var score = AI.cosineSimilarity(queryVector, sharedNotes[i].vector);
+        if (score >= minScore) {
+          filtered.push({
+            id: sharedNotes[i].id,
+            text: sharedNotes[i].text,
+            vector: sharedNotes[i].vector,
+            score: score
+          });
+        }
       }
+      if (filtered.length === 0) return [];
 
-      var count = rawScores.length;
-      if (count === 0) return [];
-
+      var count = filtered.length;
       var mean = 0;
-      for (var i = 0; i < count; i++) mean += rawScores[i];
+      for (var i = 0; i < count; i++) mean += filtered[i].score;
       mean /= count;
 
       var stddev = 0;
       if (count > 1) {
         var sumSq = 0;
         for (var i = 0; i < count; i++) {
-          var diff = rawScores[i] - mean;
+          var diff = filtered[i].score - mean;
           sumSq += diff * diff;
         }
         stddev = Math.sqrt(sumSq / (count - 1));
       }
 
-      var candidates = [];
       for (var i = 0; i < count; i++) {
-        var raw = rawScores[i];
-        var z = stddev > 0 ? (raw - mean) / stddev : 0;
-        if (z >= 1) {
-          candidates.push({
-            id: sharedNotes[i].id,
-            text: sharedNotes[i].text,
-            vector: sharedNotes[i].vector,
-            score: raw,
-            z_score: z
-          });
-        }
+        filtered[i].z_score = stddev > 0 ? (filtered[i].score - mean) / stddev : 0;
       }
 
-      candidates.sort(function(a, b) { return b.score - a.score; });
-      return candidates.slice(0, maxAnswers);
+      filtered.sort(function(a, b) { return b.score - a.score; });
+      return filtered.slice(0, maxAnswers);
     }
 
-    /**
-     * Обрабатывает входящее Nostr-событие.
-     * 
-     * 🔑 ИЗМЕНЕНИЯ v1.4.18:
-     * - Добавлена обработка Kind 21002 (удаление заметок) с эмитом `net:deletion`.
-     * - В ответах (Kind 21001) сохраняется `queryId` для последующей фильтрации.
-     * - Проверка `expectedDim` оставлена как защита, добавлено логирование.
-     * - Удалена избыточная проверка `peers.has` для KA.
-     * 
-     * @param {NostrEvent} ev
-     * @returns {void}
-     */
-    function onEvent(ev) {
-      try {
-        // 1. Быстрая структурная проверка
-        if (!ev || typeof ev !== 'object' || !Array.isArray(ev.tags)) return;
+    var rawScores = [];
+    for (var i = 0; i < sharedNotes.length; i++) {
+      rawScores.push(AI.cosineSimilarity(queryVector, sharedNotes[i].vector));
+    }
 
-        // 2. Проверка подписи ДО кэширования
-        if (nostr && typeof nostr.verifyEvent === 'function') {
-          if (!nostr.verifyEvent(ev)) return;
-        }
+    var count = rawScores.length;
+    if (count === 0) return [];
 
-        // 3. Полная структурная валидация
-        if (!isValidEvent(ev)) return;
+    var mean = 0;
+    for (var i = 0; i < count; i++) mean += rawScores[i];
+    mean /= count;
 
-        // 4. Дедупликация
-        if (isDuplicate(ev)) return;
+    var stddev = 0;
+    if (count > 1) {
+      var sumSq = 0;
+      for (var i = 0; i < count; i++) {
+        var diff = rawScores[i] - mean;
+        sumSq += diff * diff;
+      }
+      stddev = Math.sqrt(sumSq / (count - 1));
+    }
 
-        // 5. Игнорирование собственных событий
-        if (pk && ev.pubkey === pk) return;
+    var candidates = [];
+    for (var i = 0; i < count; i++) {
+      var z = stddev > 0 ? (rawScores[i] - mean) / stddev : 0;
+      if (z >= 1) {
+        candidates.push({
+          id: sharedNotes[i].id,
+          text: sharedNotes[i].text,
+          vector: sharedNotes[i].vector,
+          score: rawScores[i],
+          z_score: z
+        });
+      }
+    }
 
-        var had = peers.has(ev.pubkey);
-        peers.set(ev.pubkey, Date.now());
-        if (!had) notifyPeers();
-        setStatus('connected');
-        connAttempts = 0;
-        flushOutbox();
+    candidates.sort(function(a, b) { return b.score - a.score; });
+    return candidates.slice(0, maxAnswers);
+  }
 
-        var KQ = cfg.get('kQuery', 21000);
-        var KA = cfg.get('kAnswer', 21001);
-        var room = cfg.get('room', 'noomium-main');
+  /**
+   * Обрабатывает входящее Nostr-событие.
+   * @param {NostrEvent} ev
+   * @returns {void}
+   */
+  function onEvent(ev) {
+    try {
+      if (!ev || typeof ev !== 'object' || !Array.isArray(ev.tags)) return;
 
-        // Извлечение parentId из тега ['e', parentId, '', 'reply']
-        var parentId = null;
-        for (var t = 0; t < ev.tags.length; t++) {
-          var tag = ev.tags[t];
-          if (Array.isArray(tag) && tag[0] === 'e' && tag[3] === 'reply') {
-            parentId = tag[1];
+      if (nostr && typeof nostr.verifyEvent === 'function') {
+        if (!nostr.verifyEvent(ev)) return;
+      }
+
+      if (!isValidEvent(ev)) return;
+      if (isDuplicate(ev)) return;
+      if (pk && ev.pubkey === pk) return;
+
+      var had = peers.has(ev.pubkey);
+      peers.set(ev.pubkey, Date.now());
+      if (!had) notifyPeers();
+      setStatus('connected');
+      connAttempts = 0;
+      flushOutbox();
+
+      var KQ = cfg.get('kQuery', 21000);
+      var KA = cfg.get('kAnswer', 21001);
+      var room = cfg.get('room', 'noomium-main');
+
+      // Обработка поисковых запросов
+      if (ev.kind === KQ) {
+        if (!sk) return;
+        var q;
+        try { q = JSON.parse(ev.content); } catch (_) { return; }
+
+        var normalized = normalizeQuery(q);
+        if (!normalized) return;
+
+        DB.all().then(function(allNotes) {
+          var checkRelays = cfg.get('relays', []);
+          var nowCheck = Date.now();
+          var hasActiveRelay = false;
+          for (var r = 0; r < checkRelays.length; r++) {
+            var until = rateLimitedUntil.get(checkRelays[r]) || 0;
+            if (until <= nowCheck) { hasActiveRelay = true; break; }
+          }
+          if (!hasActiveRelay) return;
+
+          var sharedNotes = [];
+          for (var i = 0; i < allNotes.length; i++) {
+            var n = allNotes[i];
+            if (n && n.shared && n.vector) sharedNotes.push(n);
+          }
+          if (sharedNotes.length === 0) return;
+
+          var limited = buildAnswerCandidates(
+            normalized.vector,
+            sharedNotes,
+            normalized.threshold,
+            normalized.serendipity,
+            normalized.version
+          );
+
+          if (limited.length === 0) return;
+
+          for (var j = 0; j < limited.length; j++) {
+            try {
+              var ans = nostr.finalizeEvent({
+                kind: KA,
+                created_at: Math.floor(Date.now() / 1000),
+                tags: [['t', room], ['e', ev.id]],
+                content: JSON.stringify({
+                  text: limited[j].text,
+                  vector: limited[j].vector,
+                  score: limited[j].score,
+                  z_score: limited[j].z_score
+                })
+              }, sk);
+              (function(answer, delay) {
+                setTimeout(function() { safePublish(answer); }, delay);
+              })(ans, j * cfg.get('answerStaggerDelay', 500));
+            } catch (e) {}
+          }
+        }).catch(function(e) {
+          if (log) log.warn('DB.all fail', String(e));
+        });
+      }
+
+      // Обработка ответов
+      if (ev.kind === KA) {
+        var eTag = null;
+        for (var i = 0; i < ev.tags.length; i++) {
+          var tg = ev.tags[i];
+          if (Array.isArray(tg) && tg[0] === 'e' && !tg[3]) {
+            eTag = tg[1];
             break;
           }
         }
+        var data;
+        try { data = JSON.parse(ev.content); } catch (_) { return; }
+        if (!data || typeof data !== 'object' || Array.isArray(data)) return;
+        if (typeof data.text !== 'string' || !data.text || data.text.length > MAX_P2P_TEXT_LENGTH) return;
+        if (!Array.isArray(data.vector) || typeof data.score !== 'number') return;
 
-        // 🔑 ОБРАБОТКА УДАЛЕНИЙ (Kind 21002)
-        if (ev.kind === K_DELETION) {
-          var delId = null;
-          for (var i = 0; i < ev.tags.length; i++) {
-            if (Array.isArray(ev.tags[i]) && ev.tags[i][0] === 'e') {
-              delId = ev.tags[i][1];
-              break;
-            }
+        var expectedDim = cfg.get('dim', 384);
+        if (data.vector.length !== expectedDim) {
+          if (log) log.warn('Answer rejected: incompatible vector dimension', { 
+            expected: expectedDim, 
+            got: data.vector.length,
+            eventId: ev.id,
+            peer: ev.pubkey.slice(0, 6)
+          });
+          return;
+        }
+
+        // Сохранение как ответ на наш запрос
+        if (eTag && eTag === queryId) {
+          var isDupAnswer = false;
+          for (var j = 0; j < answers.length; j++) {
+            if (answers[j].id === ev.id) { isDupAnswer = true; break; }
           }
-          if (delId) {
-            // Удаляем из answers
-            for (var j = answers.length - 1; j >= 0; j--) {
-              if (answers[j].id === delId) {
-                answers.splice(j, 1);
-              }
-            }
-            // Эмитим событие для LiveStreamStrategy и других слушателей
-            if (bus && bus.emit) {
-              try { bus.emit('net:deletion', { id: delId, peer: ev.pubkey.slice(0, 6) }); } catch (_) {}
-            }
+          if (!isDupAnswer) {
+            if (answers.length >= cfg.get('maxAnswersCache', 100)) answers.shift();
+            answers.push({
+              id: ev.id,
+              text: data.text,
+              vector: data.vector,
+              score: data.score,
+              z_score: data.z_score,
+              peer: ev.pubkey.slice(0, 6),
+              fullPubkey: ev.pubkey,
+              createdAt: Date.now(),
+              queryId: eTag
+            });
             if (typeof onUpdate === 'function') {
               try { onUpdate(); } catch (_) {}
             }
           }
-          return;
         }
 
-        // Обработка поисковых запросов (Kind Query)
-        if (ev.kind === KQ) {
-          if (!sk) return;
-          var q;
-          try { q = JSON.parse(ev.content); } catch (_) { return; }
+        // Эмит в Live Stream (эфемерность)
+        if (Array.isArray(data.vector) && typeof data.text === 'string') {
+          var netNote = {
+            id: ev.id,
+            text: data.text,
+            vector: data.vector,
+            peer: ev.pubkey.slice(0, 6),
+            fullPubkey: ev.pubkey,
+            createdAt: Date.now(),
+            children: []
+          };
 
-          var normalized = normalizeQuery(q);
-          if (!normalized) return;
-
-          DB.all().then(function(allNotes) {
-            var checkRelays = cfg.get('relays', []);
-            var nowCheck = Date.now();
-            var hasActiveRelay = false;
-            for (var r = 0; r < checkRelays.length; r++) {
-              var until = rateLimitedUntil.get(checkRelays[r]) || 0;
-              if (until <= nowCheck) { hasActiveRelay = true; break; }
-            }
-            if (!hasActiveRelay) return;
-
-            var sharedNotes = [];
-            for (var i = 0; i < allNotes.length; i++) {
-              var n = allNotes[i];
-              if (n && n.shared && n.vector) sharedNotes.push(n);
-            }
-            if (sharedNotes.length === 0) return;
-
-            var limited = buildAnswerCandidates(
-              normalized.vector,
-              sharedNotes,
-              normalized.threshold,
-              normalized.serendipity,
-              normalized.version
-            );
-
-            if (limited.length === 0) return;
-
-            for (var j = 0; j < limited.length; j++) {
-              try {
-                var ans = nostr.finalizeEvent({
-                  kind: KA,
-                  created_at: Math.floor(Date.now() / 1000),
-                  tags: [['t', room], ['e', ev.id]],
-                  content: JSON.stringify({
-                    text: limited[j].text,
-                    vector: limited[j].vector,
-                    score: limited[j].score,
-                    z_score: limited[j].z_score
-                  })
-                }, sk);
-                (function(answer, delay) {
-                  setTimeout(function() { safePublish(answer); }, delay);
-                })(ans, j * cfg.get('answerStaggerDelay', 500));
-              } catch (e) {}
-            }
-          }).catch(function(e) {
-            if (log) log.warn('DB.all fail', String(e));
-          });
-        }
-
-        // Обработка ответов (Kind Answer)
-        if (ev.kind === KA) {
-          var eTag = null;
-          for (var i = 0; i < ev.tags.length; i++) {
-            var tg = ev.tags[i];
-            if (Array.isArray(tg) && tg[0] === 'e' && !tg[3]) {
-              eTag = tg[1];
-              break;
-            }
-          }
-          var data;
-          try { data = JSON.parse(ev.content); } catch (_) { return; }
-          if (!data || typeof data !== 'object' || Array.isArray(data)) return;
-          if (typeof data.text !== 'string' || !data.text || data.text.length > MAX_P2P_TEXT_LENGTH) return;
-          if (!Array.isArray(data.vector) || typeof data.score !== 'number') return;
-
-          // 🔑 ПРОВЕРКА РАЗМЕРНОСТИ ВЕКТОРА (оставлена как защита)
-          var expectedDim = cfg.get('dim', 384);
-          if (data.vector.length !== expectedDim) {
-            if (log) log.warn('Answer rejected: incompatible vector dimension', { 
-              expected: expectedDim, 
-              got: data.vector.length,
-              eventId: ev.id,
-              peer: ev.pubkey.slice(0, 6)
-            });
-            return;
-          }
-
-          // 🔑 ИЗМЕНЕНИЕ: Убрана избыточная проверка `peers.has(ev.pubkey)` —
-          // пир уже добавлен выше в этой функции (peers.set)
-
-          // Сохранение как ответ на наш запрос
-          if (eTag && eTag === queryId) {
-            var isDupAnswer = false;
-            for (var j = 0; j < answers.length; j++) {
-              if (answers[j].id === ev.id) { isDupAnswer = true; break; }
-            }
-            if (!isDupAnswer) {
-              if (answers.length >= cfg.get('maxAnswersCache', 100)) answers.shift();
-              answers.push({
-                id: ev.id,
-                text: data.text,
-                vector: data.vector,
-                score: data.score,
-                z_score: data.z_score,
-                peer: ev.pubkey.slice(0, 6),
-                fullPubkey: ev.pubkey,
-                createdAt: Date.now(),
-                parentId: parentId,
-                queryId: eTag  // 🔑 НОВОЕ: сохраняем queryId для фильтрации
-              });
-              if (typeof onUpdate === 'function') {
-                try { onUpdate(); } catch (_) {}
-              }
-            }
-          }
-
-          // Эмит в Live Stream (эфемерность)
-          if (Array.isArray(data.vector) && typeof data.text === 'string') {
-            var netNote = {
-              id: ev.id,
-              text: data.text,
-              vector: data.vector,
-              peer: ev.pubkey.slice(0, 6),
-              fullPubkey: ev.pubkey,
-              createdAt: Date.now(),
-              parentId: parentId,
-              children: []
-            };
-
-            if (parentId) {
-              DB.addChild(parentId, ev.id);
-            }
-
-            if (!eTag || eTag !== queryId) {
-              if (bus && bus.emit) {
-                try { bus.emit('net:stream-event', { note: netNote }); } catch (_) {}
-              }
-            }
+          if (bus && bus.emit) {
+            try { bus.emit('net:stream-event', { note: netNote }); } catch (_) {}
           }
         }
-      } catch (err) {
-        if (log) log.warn('onEvent', String(err));
       }
+    } catch (err) {
+      if (log) log.warn('onEvent', String(err));
     }
+  }
 
-    /**
-     * Запускает heartbeat для очистки устаревших пиров и ответов.
-     * @returns {void}
-     */
-    function startHeartbeat() {
-      if (hbTimer) clearInterval(hbTimer);
-      hbTimer = setInterval(function() {
-        var now = Date.now();
-        var removedPeers = [];
+  /**
+   * Запускает heartbeat для очистки устаревших пиров и ответов.
+   * @returns {void}
+   */
+  function startHeartbeat() {
+    if (hbTimer) clearInterval(hbTimer);
+    hbTimer = setInterval(function() {
+      var now = Date.now();
+      var removedPeers = [];
+      
+      peers.forEach(function(ts, pubkey) {
+        if (now - ts > cfg.get('peerTTL', 60000)) {
+          peers.delete(pubkey);
+          removedPeers.push(pubkey);
+        }
+      });
+      
+      if (removedPeers.length > 0) {
+        notifyPeers();
         
-        peers.forEach(function(ts, pubkey) {
-          if (now - ts > cfg.get('peerTTL', 60000)) {
-            peers.delete(pubkey);
-            removedPeers.push(pubkey);
-          }
-        });
-        
-        if (removedPeers.length > 0) {
-          notifyPeers();
-          
-          for (var i = 0; i < removedPeers.length; i++) {
-            if (bus && bus.emit) {
-              try { 
-                bus.emit('net:peer-offline', { pubkey: removedPeers[i] }); 
-              } catch (_) {}
-            }
-          }
-          
-          if (typeof onUpdate === 'function') {
-            try { onUpdate(); } catch (_) {}
+        for (var i = 0; i < removedPeers.length; i++) {
+          if (bus && bus.emit) {
+            try { 
+              bus.emit('net:peer-offline', { pubkey: removedPeers[i] }); 
+            } catch (_) {}
           }
         }
         
-        var cutoff = now - cfg.get('answersTTL', 300000);
-        for (var i = answers.length - 1; i >= 0; i--) {
-          if (!peers.has(answers[i].fullPubkey) || answers[i].createdAt < cutoff) {
-            answers.splice(i, 1);
-          }
+        if (typeof onUpdate === 'function') {
+          try { onUpdate(); } catch (_) {}
         }
-      }, cfg.get('heartbeat', 30000));
-
-      if (flushTimer) clearInterval(flushTimer);
-      flushTimer = setInterval(function() {
-        if (netStatus === 'connected') flushOutbox();
-      }, cfg.get('offlineFlushInterval', 30000));
-    }
-
-    /**
-     * Планирует попытку переподключения с экспоненциальным backoff.
-     * @returns {void}
-     */
-    function scheduleReconnect() {
-      if (reconnecting || !started) return;
-      if (connAttempts >= cfg.get('reconnectMaxAttempts', 10)) {
-        setStatus('failed');
-        return;
       }
-      reconnecting = true;
-      var delay = Math.min(cfg.get('reconnectMaxDelay', 60000), cfg.get('reconnectBaseDelay', 1000) * Math.pow(2, connAttempts));
-      connAttempts++;
-      setStatus('reconnecting');
-      reconnectTimer = setTimeout(function() {
-        try {
-          if (subscription && typeof subscription.close === 'function') {
-            try { subscription.close(); } catch (_) {}
-          }
-          subscription = null;
-          var room = cfg.get('room', 'noomium-main');
-          var KQ = cfg.get('kQuery', 21000);
-          var KA = cfg.get('kAnswer', 21001);
-          var subWindow = cfg.get('subWindow', 300);
-          var nowSec = Math.floor(Date.now() / 1000);
-          if (pool) {
-            subscription = pool.subscribeMany(cfg.get('relays', []),
-              [{ kinds: [KQ, KA, K_DELETION], '#t': [room], since: nowSec - subWindow }],
-              { onevent: onEvent, onclose: function() { scheduleReconnect(); } });
-            reconnecting = false;
-          } else {
-            throw new Error('Pool not available');
-          }
-        } catch (err) {
-          if (log) log.warn('Reconnect fail', String(err));
-          if (started && connAttempts < cfg.get('reconnectMaxAttempts', 10)) {
-            scheduleReconnect();
-          } else {
-            reconnecting = false;
-            setStatus('failed');
-          }
+      
+      // Очистка устаревших ответов
+      var cutoff = now - cfg.get('answersTTL', 300000);
+      for (var i = answers.length - 1; i >= 0; i--) {
+        if (!peers.has(answers[i].fullPubkey) || answers[i].createdAt < cutoff) {
+          answers.splice(i, 1);
         }
-      }, delay);
+      }
+    }, cfg.get('heartbeat', 30000));
+  }
+
+  /**
+   * Планирует попытку переподключения.
+   * @returns {void}
+   */
+  function scheduleReconnect() {
+    if (reconnecting || !started) return;
+    if (connAttempts >= cfg.get('reconnectMaxAttempts', 10)) {
+      setStatus('failed');
+      return;
     }
-
-    /**
-     * Инициализирует сеть: загружает или создаёт ключ, подключается к релеям.
-     * @param {function(): void} callback - Колбэк обновления UI.
-     * @param {string} password - Пароль для дешифрования ключа.
-     * @returns {Promise<void>}
-     */
-    function init(callback, password) {
-      if (started) return Promise.resolve();
-      onUpdate = callback;
-      connAttempts = 0;
-
-      var loadAndDecrypt = function() {
-        var p = import('https://cdn.jsdelivr.net/npm/nostr-tools@2.7.2/+esm').then(function(mod) {
-          var tools = (mod && mod.default && typeof mod.default.generateSecretKey === 'function')
-            ? mod.default
-            : (typeof mod.generateSecretKey === 'function' ? mod : null);
-          if (!tools || !tools.SimplePool) throw new Error('nostr-tools incompatible');
-          nostr = tools;
-          return tools;
-        });
-
-        if (sk) return p.then(function() { return true; });
-
-        return p.then(function(tools) {
-          var KEY = 'noomium:sk';
-          var stored = localStorage.getItem(KEY);
-          if (stored) {
-            if (/^[0-9a-f]{64}$/i.test(stored)) {
-              return encryptKey(stored, password).then(function(encrypted) {
-                localStorage.setItem(KEY, encrypted);
-                return stored;
-              });
-            } else {
-              return decryptKey(stored, password).catch(function() {
-                throw new Error('WRONG_PASSWORD');
-              });
-            }
-          }
-          var raw = tools.generateSecretKey();
-          var keyHex = Array.from(raw).map(function(b) { return b.toString(16).padStart(2, '0'); }).join('');
-          return encryptKey(keyHex, password).then(function(encrypted) {
-            try { localStorage.setItem(KEY, encrypted); } catch (_) {}
-            return keyHex;
-          });
-        }).then(function(hex) {
-          sk = new Uint8Array(hex.match(/.{1,2}/g).map(function(b) { return parseInt(b, 16); }));
-          pk = nostr.getPublicKey(sk);
-          return true;
-        });
-      };
-
-      return loadAndDecrypt().then(function() {
-        if (!pool && nostr) pool = new nostr.SimplePool();
-        var nowSec = Math.floor(Date.now() / 1000);
+    reconnecting = true;
+    var delay = Math.min(cfg.get('reconnectMaxDelay', 60000), cfg.get('reconnectBaseDelay', 1000) * Math.pow(2, connAttempts));
+    connAttempts++;
+    setStatus('reconnecting');
+    reconnectTimer = setTimeout(function() {
+      try {
+        if (subscription && typeof subscription.close === 'function') {
+          try { subscription.close(); } catch (_) {}
+        }
+        subscription = null;
         var room = cfg.get('room', 'noomium-main');
         var KQ = cfg.get('kQuery', 21000);
         var KA = cfg.get('kAnswer', 21001);
         var subWindow = cfg.get('subWindow', 300);
-        started = true;
-        try {
+        var nowSec = Math.floor(Date.now() / 1000);
+        if (pool) {
           subscription = pool.subscribeMany(cfg.get('relays', []),
-            [{ kinds: [KQ, KA, K_DELETION], '#t': [room], since: nowSec - subWindow }],
+            [{ kinds: [KQ, KA], '#t': [room], since: nowSec - subWindow }],
             { onevent: onEvent, onclose: function() { scheduleReconnect(); } });
-          startHeartbeat();
-        } catch (e) {
-          if (log) log.warn('sub fail', String(e));
+          reconnecting = false;
+        } else {
+          throw new Error('Pool not available');
+        }
+      } catch (err) {
+        if (log) log.warn('Reconnect fail', String(err));
+        if (started && connAttempts < cfg.get('reconnectMaxAttempts', 10)) {
           scheduleReconnect();
+        } else {
+          reconnecting = false;
+          setStatus('failed');
         }
-        notifyPeers();
-        setStatus('connected');
-        if (log) log.info('net started, room=' + room);
-      }).catch(function(err) {
-        if (log && err.message !== 'WRONG_PASSWORD') log.error('nostr load fail', String(err && err.message || err));
-        if (err.message !== 'WRONG_PASSWORD') setStatus('failed');
-        throw err;
+      }
+    }, delay);
+  }
+
+  /**
+   * Инициализирует сеть.
+   * @param {function(): void} callback
+   * @param {string} password
+   * @returns {Promise<void>}
+   */
+  function init(callback, password) {
+    if (started) return Promise.resolve();
+    onUpdate = callback;
+    connAttempts = 0;
+
+    var loadAndDecrypt = function() {
+      var p = import('https://cdn.jsdelivr.net/npm/nostr-tools@2.7.2/+esm').then(function(mod) {
+        var tools = (mod && mod.default && typeof mod.default.generateSecretKey === 'function')
+          ? mod.default
+          : (typeof mod.generateSecretKey === 'function' ? mod : null);
+        if (!tools || !tools.SimplePool) throw new Error('nostr-tools incompatible');
+        nostr = tools;
+        return tools;
       });
-    }
 
-    /**
-     * Запускает подписку на живой поток сетевых заметок.
-     * @returns {void}
-     */
-    function startLiveStream() {
-      if (liveStreamSubscription || !pool || !nostr) return;
-      var room = cfg.get('room', 'noomium-main');
-      var KA = cfg.get('kAnswer', 21001);
-      var nowSec = Math.floor(Date.now() / 1000);
-      try {
-        liveStreamSubscription = pool.subscribeMany(cfg.get('relays', []),
-          [{ kinds: [KA, K_DELETION], '#t': [room], limit: 50, since: nowSec - 3600 }],
-          { onevent: onEvent, onclose: function() { liveStreamSubscription = null; } });
-      } catch (e) {
-        if (log) log.warn('Live stream sub fail', String(e));
-      }
-    }
+      if (sk) return p.then(function() { return true; });
 
-    /**
-     * Останавливает подписку на живой поток.
-     * @returns {void}
-     */
-    function stopLiveStream() {
-      if (liveStreamSubscription && typeof liveStreamSubscription.close === 'function') {
-        try { liveStreamSubscription.close(); } catch (_) {}
-      }
-      liveStreamSubscription = null;
-    }
-
-    /**
-     * Проактивно публикует заметку в сеть с тегом ответа.
-     * @param {Note} note - Объект заметки.
-     * @param {string} [parentId] - ID родительской заметки.
-     * @returns {void}
-     */
-    function publishNote(note, parentId) {
-      if (!sk || !nostr || !note.shared) return;
-      var tags = [['t', cfg.get('room', 'noomium-main')]];
-      if (parentId) tags.push(['e', parentId, '', 'reply']);
-      try {
-        var ev = nostr.finalizeEvent({
-          kind: cfg.get('kAnswer', 21001),
-          created_at: Math.floor(Date.now() / 1000),
-          tags: tags,
-          content: JSON.stringify({
-            text: note.text,
-            vector: note.vector,
-            score: 1.0
-          })
-        }, sk);
-        safePublish(ev);
-      } catch (e) {
-        if (log) log.warn('publishNote fail', String(e));
-      }
-    }
-
-    return {
-      onPeers: function(fn) {
-        if (typeof fn === 'function') peerListeners.push(fn);
-      },
-
-      offPeers: function(fn) {
-        var idx = peerListeners.indexOf(fn);
-        if (idx > -1) peerListeners.splice(idx, 1);
-      },
-
-      getStatus: function() { return netStatus; },
-      getOutboxLength: function() { return outbox.size; },
-      hasKey: function() { return sk !== null; },
-
-      isKeyEncrypted: function() {
-        try {
-          var stored = localStorage.getItem('noomium:sk');
-          return !!(stored && !/^[0-9a-f]{64}$/i.test(stored));
-        } catch (e) { return false; }
-      },
-
-      init: init,
-
-      /**
-       * 🔑 ИЗМЕНЕНИЕ v1.4.18: Отправляет поисковый запрос в сеть.
-       * 
-       * `answers` больше НЕ очищается — вместо этого каждый ответ хранит `queryId`,
-       * и `activeAnswers(queryId)` фильтрует по нему. Это предотвращает потерю
-       * ответов при повторных поисках с тем же вектором (дедупликация).
-       * 
-       * @param {Vector} vector - Вектор запроса.
-       * @returns {void}
-       */
-      send: function(vector) {
-        if (!pool || !nostr || !sk || AI.getMode() === 'demo') return;
-        var now = Date.now();
-        if (now - lastQueryTime < cfg.get('queryRateLimit', 3000)) return;
-        lastQueryTime = now;
-        
-        // 🔑 ИЗМЕНЕНИЕ: НЕ очищаем answers — фильтрация по queryId в activeAnswers()
-        
-        try {
-          var payload = {
-            vector: vector,
-            threshold: cfg.get('threshold', 0.7),
-            serendipity: cfg.get('serendipity', 0.3),
-            protocol_version: PROTOCOL_VERSION
-          };
-
-          var ev = nostr.finalizeEvent({
-            kind: cfg.get('kQuery', 21000),
-            created_at: Math.floor(Date.now() / 1000),
-            tags: [['t', cfg.get('room', 'noomium-main')]],
-            content: JSON.stringify(payload)
-          }, sk);
-          queryId = ev.id;
-          safePublish(ev);
-          if (typeof onUpdate === 'function') {
-            try { onUpdate(); } catch (_) {}
-          }
-        } catch (e) {
-          if (log) log.warn('pub fail', String(e));
-        }
-      },
-
-      /**
-       * 🔑 ИЗМЕНЕНИЕ v1.4.18: Возвращает активные ответы, отфильтрованные по queryId.
-       * 
-       * Если queryId передан — возвращает только ответы для этого запроса.
-       * Если не передан — возвращает все активные ответы (legacy поведение).
-       * 
-       * @param {string} [filterQueryId] - Опциональный ID запроса для фильтрации.
-       * @returns {NetworkAnswer[]}
-       */
-      activeAnswers: function(filterQueryId) {
-        var out = [];
-        for (var i = 0; i < answers.length; i++) {
-          if (peers.has(answers[i].fullPubkey)) {
-            // Фильтрация по queryId, если передан
-            if (!filterQueryId || answers[i].queryId === filterQueryId) {
-              out.push(answers[i]);
-            }
+      return p.then(function(tools) {
+        var KEY = 'noomium:sk';
+        var stored = localStorage.getItem(KEY);
+        if (stored) {
+          if (/^[0-9a-f]{64}$/i.test(stored)) {
+            return encryptKey(stored, password).then(function(encrypted) {
+              localStorage.setItem(KEY, encrypted);
+              return stored;
+            });
+          } else {
+            return decryptKey(stored, password).catch(function() {
+              throw new Error('WRONG_PASSWORD');
+            });
           }
         }
-        return out;
-      },
-
-      peerCount: function() { return peers.size; },
-
-      /**
-       * 🔑 НОВЫЙ МЕТОД v1.4.18: Публикует уведомление об удалении заметки.
-       * 
-       * Создаёт событие kind 21002 с тегом ['e', id], которое другие пиры
-       * используют для удаления заметки из своих streamData и answers.
-       * 
-       * @param {string} id - ID удалённой заметки.
-       * @returns {void}
-       */
-      publishDeletion: function(id) {
-        if (!sk || !nostr || !id) return;
-        try {
-          var ev = nostr.finalizeEvent({
-            kind: K_DELETION,
-            created_at: Math.floor(Date.now() / 1000),
-            tags: [['e', id]],
-            content: ''
-          }, sk);
-          safePublish(ev);
-          if (log) log.info('Published deletion for id=' + id);
-        } catch (e) {
-          if (log) log.warn('publishDeletion fail', String(e));
-        }
-      },
-
-      /**
-       * Возвращает ID последнего отправленного запроса (для фильтрации ответов).
-       * @returns {string | null}
-       */
-      getQueryId: function() {
-        return queryId;
-      },
-
-      stop: function() {
-        if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-        if (hbTimer) { clearInterval(hbTimer); hbTimer = null; }
-        if (flushTimer) { clearInterval(flushTimer); flushTimer = null; }
-        if (subscription && typeof subscription.close === 'function') {
-          try { subscription.close(); } catch (_) {}
-        }
-        if (pool && typeof pool.close === 'function') {
-          try { pool.close(cfg.get('relays', [])); } catch (_) {}
-        }
-        if (bus && bus.off) {
-          try { bus.off('db:change', invalidateSharedCache); } catch (_) {}
-        }
-        stopLiveStream();
-        started = false;
-        subscription = null;
-        pool = null;
-        peers.clear();
-        answers.length = 0;
-        seen.clear();
-        outbox.clear();
-        relayErrors.clear();
-        rateLimitedUntil.clear();
-        reconnecting = false;
-        setStatus('disconnected');
-        emitOutboxCount();
-      },
-
-      restart: function(callback, password) {
-        this.stop();
-        return this.init(callback, password);
-      },
-
-      startLiveStream: startLiveStream,
-      stopLiveStream: stopLiveStream,
-      publishNote: publishNote
+        var raw = tools.generateSecretKey();
+        var keyHex = Array.from(raw).map(function(b) { return b.toString(16).padStart(2, '0'); }).join('');
+        return encryptKey(keyHex, password).then(function(encrypted) {
+          try { localStorage.setItem(KEY, encrypted); } catch (_) {}
+          return keyHex;
+        });
+      }).then(function(hex) {
+        sk = new Uint8Array(hex.match(/.{1,2}/g).map(function(b) { return parseInt(b, 16); }));
+        pk = nostr.getPublicKey(sk);
+        return true;
+      });
     };
-  }, ['Config', 'DB', 'AI', 'Logger', 'Bus']);
+
+    return loadAndDecrypt().then(function() {
+      if (!pool && nostr) pool = new nostr.SimplePool();
+      var nowSec = Math.floor(Date.now() / 1000);
+      var room = cfg.get('room', 'noomium-main');
+      var KQ = cfg.get('kQuery', 21000);
+      var KA = cfg.get('kAnswer', 21001);
+      var subWindow = cfg.get('subWindow', 300);
+      started = true;
+      try {
+        subscription = pool.subscribeMany(cfg.get('relays', []),
+          [{ kinds: [KQ, KA], '#t': [room], since: nowSec - subWindow }],
+          { onevent: onEvent, onclose: function() { scheduleReconnect(); } });
+        startHeartbeat();
+      } catch (e) {
+        if (log) log.warn('sub fail', String(e));
+        scheduleReconnect();
+      }
+      notifyPeers();
+      setStatus('connected');
+      if (log) log.info('net started, room=' + room);
+    }).catch(function(err) {
+      if (log && err.message !== 'WRONG_PASSWORD') log.error('nostr load fail', String(err && err.message || err));
+      if (err.message !== 'WRONG_PASSWORD') setStatus('failed');
+      throw err;
+    });
+  }
+
+  /**
+   * Публикует заметку в сеть.
+   * @param {Note} note
+   * @param {string} [parentId] - ID родительской заметки (только для локальных)
+   * @returns {void}
+   */
+  function publishNote(note, parentId) {
+    if (!sk || !nostr || !note.shared) return;
+    var tags = [['t', cfg.get('room', 'noomium-main')]];
+    if (parentId) tags.push(['e', parentId, '', 'reply']);
+    try {
+      var ev = nostr.finalizeEvent({
+        kind: cfg.get('kAnswer', 21001),
+        created_at: Math.floor(Date.now() / 1000),
+        tags: tags,
+        content: JSON.stringify({
+          text: note.text,
+          vector: note.vector,
+          score: 1.0
+        })
+      }, sk);
+      safePublish(ev);
+    } catch (e) {
+      if (log) log.warn('publishNote fail', String(e));
+    }
+  }
+
+  return {
+    onPeers: function(fn) {
+      if (typeof fn === 'function') peerListeners.push(fn);
+    },
+
+    offPeers: function(fn) {
+      var idx = peerListeners.indexOf(fn);
+      if (idx > -1) peerListeners.splice(idx, 1);
+    },
+
+    getStatus: function() { return netStatus; },
+    getOutboxLength: function() { return outbox.size; },
+    hasKey: function() { return sk !== null; },
+
+    isKeyEncrypted: function() {
+      try {
+        var stored = localStorage.getItem('noomium:sk');
+        return !!(stored && !/^[0-9a-f]{64}$/i.test(stored));
+      } catch (e) { return false; }
+    },
+
+    init: init,
+
+    send: function(vector) {
+      if (!pool || !nostr || !sk || AI.getMode() === 'demo') return;
+      var now = Date.now();
+      if (now - lastQueryTime < cfg.get('queryRateLimit', 3000)) return;
+      lastQueryTime = now;
+      
+      // Очищаем answers перед новым запросом
+      answers.length = 0;
+      
+      try {
+        var payload = {
+          vector: vector,
+          threshold: cfg.get('threshold', 0.7),
+          serendipity: cfg.get('serendipity', 0.3),
+          protocol_version: PROTOCOL_VERSION
+        };
+
+        var ev = nostr.finalizeEvent({
+          kind: cfg.get('kQuery', 21000),
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [['t', cfg.get('room', 'noomium-main')]],
+          content: JSON.stringify(payload)
+        }, sk);
+        queryId = ev.id;
+        safePublish(ev);
+        if (typeof onUpdate === 'function') {
+          try { onUpdate(); } catch (_) {}
+        }
+      } catch (e) {
+        if (log) log.warn('pub fail', String(e));
+      }
+    },
+
+    activeAnswers: function() {
+      var out = [];
+      for (var i = 0; i < answers.length; i++) {
+        if (peers.has(answers[i].fullPubkey)) {
+          out.push(answers[i]);
+        }
+      }
+      return out;
+    },
+
+    peerCount: function() { return peers.size; },
+
+    stop: function() {
+      if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+      if (hbTimer) { clearInterval(hbTimer); hbTimer = null; }
+      if (subscription && typeof subscription.close === 'function') {
+        try { subscription.close(); } catch (_) {}
+      }
+      if (pool && typeof pool.close === 'function') {
+        try { pool.close(cfg.get('relays', [])); } catch (_) {}
+      }
+      started = false;
+      subscription = null;
+      pool = null;
+      peers.clear();
+      answers.length = 0;
+      seen.clear();
+      outbox.clear();
+      relayErrors.clear();
+      rateLimitedUntil.clear();
+      reconnecting = false;
+      setStatus('disconnected');
+      emitOutboxCount();
+    },
+
+    restart: function(callback, password) {
+      this.stop();
+      return this.init(callback, password);
+    },
+
+    publishNote: publishNote
+  };
+}, ['Config', 'DB', 'AI', 'Logger', 'Bus']);
 <!-- NOOMIUM_MODULE_END Net -->
   
 <!-- NOOMIUM_MODULE_START Modal -->
