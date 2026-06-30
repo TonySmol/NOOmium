@@ -4861,8 +4861,390 @@ kbd {
   /* <!-- MODULE: AI --> */
 
   /* <!-- MODULE: Crypto --> */
-  старт
-  энд
+  /**
+   * @module Crypto
+   * @description Криптографические операции через Web Crypto API.
+   * 
+   * Алгоритмы:
+   * - PBKDF2 (100,000 итераций, SHA-256) для вывода ключа из пароля
+   * - AES-GCM (256-bit) для симметричного шифрования
+   * - Формат: Base64(salt[16] + iv[12] + ciphertext[N])
+   * 
+   * Архитектурные принципы:
+   * - Чистый модуль без зависимостей от Config/Store/Bus
+   * - Проверка доступности crypto.subtle при init
+   * - Все операции асинхронные (возвращают Promise)
+   * - Единый формат шифрования для ключей и данных
+   * 
+   * Безопасность:
+   * - crypto.getRandomValues для генерации salt/iv
+   * - Constant-time сравнение не требуется (AES-GCM с аутентификацией)
+   * - При неверном пароле decrypt выбрасывает OperationError
+   * 
+   * @namespace Crypto
+   */
+  DI.register('Crypto', function(Logger) {
+    
+    /**
+     * Константы криптографических параметров.
+     * @type {Object}
+     */
+    var PARAMS = {
+      PBKDF2_ITERATIONS: 100000,
+      SALT_LENGTH: 16,
+      IV_LENGTH: 12,
+      KEY_LENGTH: 256,
+      HASH: 'SHA-256'
+    };
+
+    /**
+     * Флаг доступности Web Crypto API.
+     * Устанавливается при init(), используется для early return.
+     * @type {boolean}
+     */
+    var isAvailable = false;
+
+    /**
+     * Проверяет доступность Web Crypto API.
+     * 
+     * Web Crypto API недоступен в:
+     * - Старых браузерах (IE11, старые мобильные)
+     * - Небезопасных контекстах (http:// вместо https://)
+     * - Некоторых private/incognito режимах
+     * 
+     * @returns {boolean} true если crypto.subtle доступен.
+     */
+    function checkAvailability() {
+      try {
+        return !!(
+          typeof window !== 'undefined' &&
+          window.crypto &&
+          window.crypto.subtle &&
+          typeof window.crypto.subtle.importKey === 'function' &&
+          typeof window.crypto.subtle.deriveKey === 'function' &&
+          typeof window.crypto.subtle.encrypt === 'function' &&
+          typeof window.crypto.subtle.decrypt === 'function'
+        );
+      } catch (e) {
+        return false;
+      }
+    }
+
+    /**
+     * Генерирует криптографически стойкую соль.
+     * 
+     * @returns {Uint8Array} Соль длиной SALT_LENGTH байт.
+     * @throws {Error} Если crypto.getRandomValues недоступен.
+     */
+    function generateSalt() {
+      if (typeof crypto === 'undefined' || !crypto.getRandomValues) {
+        throw new Error('[Crypto] crypto.getRandomValues not available');
+      }
+      return crypto.getRandomValues(new Uint8Array(PARAMS.SALT_LENGTH));
+    }
+
+    /**
+     * Генерирует криптографически стойкий IV (initialization vector).
+     * 
+     * @returns {Uint8Array} IV длиной IV_LENGTH байт.
+     * @throws {Error} Если crypto.getRandomValues недоступен.
+     */
+    function generateIV() {
+      if (typeof crypto === 'undefined' || !crypto.getRandomValues) {
+        throw new Error('[Crypto] crypto.getRandomValues not available');
+      }
+      return crypto.getRandomValues(new Uint8Array(PARAMS.IV_LENGTH));
+    }
+
+    /**
+     * Выводит AES-GCM ключ из пароля через PBKDF2.
+     * 
+     * @param {string} password - Пароль пользователя.
+     * @param {Uint8Array} salt - Соль для PBKDF2.
+     * @returns {Promise<CryptoKey>} Promise с CryptoKey.
+     * @throws {Error} Если Web Crypto API недоступен или входные данные невалидны.
+     */
+    function deriveKey(password, salt) {
+      if (!isAvailable) {
+        return Promise.reject(new Error('[Crypto] Web Crypto API not available'));
+      }
+      
+      if (typeof password !== 'string') {
+        return Promise.reject(new Error('[Crypto] password must be a string'));
+      }
+      
+      if (!(salt instanceof Uint8Array) || salt.length !== PARAMS.SALT_LENGTH) {
+        return Promise.reject(new Error('[Crypto] invalid salt'));
+      }
+
+      var enc = new TextEncoder();
+      var passwordBuffer = enc.encode(password);
+
+      return crypto.subtle.importKey(
+        'raw',
+        passwordBuffer,
+        { name: 'PBKDF2' },
+        false,
+        ['deriveKey']
+      ).then(function(keyMaterial) {
+        return crypto.subtle.deriveKey(
+          {
+            name: 'PBKDF2',
+            salt: salt,
+            iterations: PARAMS.PBKDF2_ITERATIONS,
+            hash: PARAMS.HASH
+          },
+          keyMaterial,
+          {
+            name: 'AES-GCM',
+            length: PARAMS.KEY_LENGTH
+          },
+          false,
+          ['encrypt', 'decrypt']
+        );
+      });
+    }
+
+    /**
+     * Шифрует произвольные данные паролем с использованием AES-GCM.
+     * Формат результата: Base64(salt[16] + iv[12] + ciphertext[N]).
+     * 
+     * @param {string} plaintext - Исходные данные.
+     * @param {string} password - Пароль для шифрования.
+     * @returns {Promise<string>} Promise с Base64-строкой.
+     * @throws {Error} При ошибке шифрования.
+     */
+    function encrypt(plaintext, password) {
+      if (!isAvailable) {
+        return Promise.reject(new Error('[Crypto] Web Crypto API not available'));
+      }
+      
+      if (typeof plaintext !== 'string') {
+        return Promise.reject(new Error('[Crypto] plaintext must be a string'));
+      }
+      
+      if (typeof password !== 'string' || !password) {
+        return Promise.reject(new Error('[Crypto] password must be a non-empty string'));
+      }
+
+      var salt;
+      var iv;
+      try {
+        salt = generateSalt();
+        iv = generateIV();
+      } catch (e) {
+        return Promise.reject(e);
+      }
+
+      var enc = new TextEncoder();
+      var dataBuffer = enc.encode(plaintext);
+
+      return deriveKey(password, salt).then(function(key) {
+        return crypto.subtle.encrypt(
+          { name: 'AES-GCM', iv: iv },
+          key,
+          dataBuffer
+        );
+      }).then(function(ciphertext) {
+        var combined = new Uint8Array(
+          PARAMS.SALT_LENGTH + PARAMS.IV_LENGTH + ciphertext.byteLength
+        );
+        combined.set(salt, 0);
+        combined.set(iv, PARAMS.SALT_LENGTH);
+        combined.set(new Uint8Array(ciphertext), PARAMS.SALT_LENGTH + PARAMS.IV_LENGTH);
+        
+        var binary = '';
+        for (var i = 0; i < combined.length; i++) {
+          binary += String.fromCharCode(combined[i]);
+        }
+        return btoa(binary);
+      }).catch(function(err) {
+        if (Logger) Logger.error('Crypto', 'encrypt failed', err);
+        throw err;
+      });
+    }
+
+    /**
+     * Расшифровывает данные из Base64-строки паролем.
+     * Извлекает salt и iv из первых 28 байт, остальное — ciphertext.
+     * 
+     * @param {string} base64Str - Зашифрованная строка.
+     * @param {string} password - Пароль для дешифрования.
+     * @returns {Promise<string>} Promise с расшифрованным текстом.
+     * @throws {Error} При неверном пароле (OperationError) или повреждённых данных.
+     */
+    function decrypt(base64Str, password) {
+      if (!isAvailable) {
+        return Promise.reject(new Error('[Crypto] Web Crypto API not available'));
+      }
+      
+      if (typeof base64Str !== 'string' || !base64Str) {
+        return Promise.reject(new Error('[Crypto] base64Str must be a non-empty string'));
+      }
+      
+      if (typeof password !== 'string' || !password) {
+        return Promise.reject(new Error('[Crypto] password must be a non-empty string'));
+      }
+
+      var combined;
+      try {
+        var binary = atob(base64Str);
+        combined = new Uint8Array(binary.length);
+        for (var i = 0; i < binary.length; i++) {
+          combined[i] = binary.charCodeAt(i);
+        }
+      } catch (e) {
+        return Promise.reject(new Error('[Crypto] invalid base64'));
+      }
+
+      var minLen = PARAMS.SALT_LENGTH + PARAMS.IV_LENGTH + 1;
+      if (combined.length < minLen) {
+        return Promise.reject(new Error('[Crypto] ciphertext too short'));
+      }
+
+      var salt = combined.slice(0, PARAMS.SALT_LENGTH);
+      var iv = combined.slice(PARAMS.SALT_LENGTH, PARAMS.SALT_LENGTH + PARAMS.IV_LENGTH);
+      var ciphertext = combined.slice(PARAMS.SALT_LENGTH + PARAMS.IV_LENGTH);
+
+      return deriveKey(password, salt).then(function(key) {
+        return crypto.subtle.decrypt(
+          { name: 'AES-GCM', iv: iv },
+          key,
+          ciphertext
+        );
+      }).then(function(decrypted) {
+        return new TextDecoder().decode(decrypted);
+      }).catch(function(err) {
+        // AES-GCM OperationError при неверном пароле или повреждённых данных
+        if (err && err.name === 'OperationError') {
+          throw new Error('[Crypto] wrong password or corrupted data');
+        }
+        if (Logger) Logger.error('Crypto', 'decrypt failed', err);
+        throw err;
+      });
+    }
+
+    /**
+     * Специализированный метод для шифрования hex-ключа Nostr.
+     * Обёртка над encrypt() для семантической ясности.
+     * 
+     * @param {string} hexKey - Секретный ключ в hex-формате (64 символа).
+     * @param {string} password - Пароль.
+     * @returns {Promise<string>} Promise с Base64-строкой.
+     */
+    function encryptKey(hexKey, password) {
+      if (typeof hexKey !== 'string' || !/^[0-9a-f]+$/i.test(hexKey)) {
+        return Promise.reject(new Error('[Crypto] invalid hex key'));
+      }
+      return encrypt(hexKey, password);
+    }
+
+    /**
+     * Специализированный метод для расшифровки hex-ключа Nostr.
+     * Обёртка над decrypt() с валидацией результата.
+     * 
+     * @param {string} base64Str - Зашифрованная строка.
+     * @param {string} password - Пароль.
+     * @returns {Promise<string>} Promise с расшифрованным hex-ключом.
+     */
+    function decryptKey(base64Str, password) {
+      return decrypt(base64Str, password).then(function(hexKey) {
+        if (typeof hexKey !== 'string' || !/^[0-9a-f]+$/i.test(hexKey)) {
+          throw new Error('[Crypto] decrypted key is not valid hex');
+        }
+        return hexKey;
+      });
+    }
+
+    /**
+     * Генерирует криптографически стойкие случайные байты.
+     * 
+     * @param {number} length - Количество байт.
+     * @returns {Uint8Array} Случайные байты.
+     * @throws {Error} Если crypto.getRandomValues недоступен.
+     */
+    function randomBytes(length) {
+      if (typeof length !== 'number' || length <= 0 || length > 65536) {
+        throw new Error('[Crypto] invalid length');
+      }
+      if (typeof crypto === 'undefined' || !crypto.getRandomValues) {
+        throw new Error('[Crypto] crypto.getRandomValues not available');
+      }
+      return crypto.getRandomValues(new Uint8Array(length));
+    }
+
+    /**
+     * Вычисляет SHA-256 хеш строки.
+     * 
+     * @param {string} data - Исходная строка.
+     * @returns {Promise<string>} Promise с hex-строкой хеша.
+     */
+    function sha256(data) {
+      if (!isAvailable) {
+        return Promise.reject(new Error('[Crypto] Web Crypto API not available'));
+      }
+      if (typeof data !== 'string') {
+        return Promise.reject(new Error('[Crypto] data must be a string'));
+      }
+
+      var enc = new TextEncoder();
+      var buffer = enc.encode(data);
+
+      return crypto.subtle.digest('SHA-256', buffer).then(function(hash) {
+        var arr = Array.from(new Uint8Array(hash));
+        return arr.map(function(b) {
+          return b.toString(16).padStart(2, '0');
+        }).join('');
+      });
+    }
+
+    /**
+     * Проверяет доступность криптографических операций.
+     * 
+     * @returns {boolean} true если все операции доступны.
+     */
+    function ready() {
+      return isAvailable;
+    }
+
+    /**
+     * Инициализация модуля.
+     * Проверяет доступность Web Crypto API.
+     * 
+     * @param {AbortSignal} [signal] - Сигнал (не используется).
+     * @returns {void}
+     */
+    function init(signal) {
+      isAvailable = checkAvailability();
+      if (!isAvailable && Logger) {
+        Logger.warn('Crypto', 'Web Crypto API not available');
+      }
+    }
+
+    /**
+     * Уничтожение модуля.
+     * 
+     * @returns {void}
+     */
+    function destroy() {
+      isAvailable = false;
+    }
+
+    return {
+      encrypt: encrypt,
+      decrypt: decrypt,
+      encryptKey: encryptKey,
+      decryptKey: decryptKey,
+      deriveKey: deriveKey,
+      generateSalt: generateSalt,
+      generateIV: generateIV,
+      randomBytes: randomBytes,
+      sha256: sha256,
+      ready: ready,
+      init: init,
+      destroy: destroy
+    };
+  }, ['Logger']);
   /* <!-- MODULE: Crypto --> */
 
   /* <!-- MODULE: NetTransport --> */
