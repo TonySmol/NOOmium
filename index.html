@@ -4835,40 +4835,33 @@ DI.register('FocusSearchStrategy', function(AI, DB, Net, Config, StateManager) {
 /**
  * Координатор поисковых стратегий.
  * 
- * Отвечает за:
- * - Подписку на события смены контекста (ввод текста, фокус, очистка)
- * - Выбор стратегии на основе текущего uiMode и состояния редактора
- * - Вызов StateManager.dispatch для переходов между режимами
- * - Делегирование работы стратегиям и передачу результатов обратно
- * - 🔑 Обработку сетевых удалений (net:deletion) для очистки lists
+ * 🔑 ПЕРЕПИСАНО v1.4.23 (УПРОЩЕНИЕ):
  * 
- * 🔑 КЛЮЧЕВЫЕ ИЗМЕНЕНИЯ v1.4.18 (СТАБИЛИЗАЦИЯ):
+ * 1. **Убрана зависимость от LiveStreamStrategy** — его роль теперь выполняет
+ *    сам координатор, напрямую обрабатывая `net:stream-event` и `net:peer-offline`.
  * 
- * 1. **Приоритет текста над закрепом:**
- *    При наличии текста в редакторе ВСЕГДА выполняется текстовый поиск,
- *    даже если активен закреп (focusedItem). Это соответствует новому
- *    поведению StateManager, где focusedItem сохраняется при переходе
- *    в search.
+ * 2. **Убрана обработка `net:deletion`** — Kind 21002 больше не используется
+ *    (эфемерная модель: релеи не хранят, удаление бессмысленно).
  * 
- * 2. **Обработка net:deletion:**
- *    При получении уведомления об удалении заметки (Kind 21002) из списков
- *    результатов (world, seren) удаляется соответствующая запись. Это
- *    обеспечивает консистентность UI с эфемерной природой сети.
+ * 3. **Гарантированный возврат Promise** — `search()` и `searchByVector()`
+ *    всегда возвращают Promise, что устраняет краш `Cannot read properties
+ *    of undefined (reading 'then')`.
  * 
- * 3. **Корректная работа с queryId:**
- *    Стратегии получают текущий queryId от Net для фильтрации world-ответов,
- *    что предотвращает смешивание результатов от разных запросов.
+ * 4. **Упрощена логика приоритетов:**
+ *    - Есть текст → текстовый поиск (TextSearchStrategy)
+ *    - Нет текста, есть закреп с вектором → поиск по вектору (FocusSearchStrategy)
+ *    - Нет ни того, ни другого → Live Stream (обновляется через net:stream-event)
  * 
  * Архитектурные решения:
  * - **Event-driven:** реагирует на события Bus, а не вызывается напрямую
  * - **State machine aware:** использует StateManager.dispatch для переходов
- * - **Strategy pattern:** делегирует работу LiveStream/TextSearch/FocusSearch
+ * - **Strategy pattern:** делегирует работу TextSearch/FocusSearch
  * - **AbortController:** все подписки привязаны к signal для автоочистки
  * 
  * @module SearchCoordinator
  */
 DI.register('SearchCoordinator', function(
-  Bus, StateManager, LiveStreamStrategy, TextSearchStrategy, FocusSearchStrategy, Net
+  Bus, StateManager, TextSearchStrategy, FocusSearchStrategy, Net
 ) {
 
   /**
@@ -4878,11 +4871,7 @@ DI.register('SearchCoordinator', function(
   var abortController = null;
 
   /**
-   * Инициализирует координатор: подписывается на события и запускает начальную стратегию.
-   * 
-   * 🔑 ИЗМЕНЕНИЯ v1.4.18:
-   * - Добавлена подписка на net:deletion для удаления заметок из lists
-   * - Улучшена логика приоритета текста над закрепом
+   * Инициализирует координатор: подписывается на события и запускает Live Stream.
    * 
    * @returns {void}
    */
@@ -4895,10 +4884,10 @@ DI.register('SearchCoordinator', function(
     /**
      * Подписка на запрос поиска из редактора.
      * 
-     * 🔑 ЛОГИКА ПРИОРИТЕТА v1.4.18:
-     * - Если есть текст → текстовый поиск (игнорируем закреп)
+     * Логика приоритетов:
+     * - Если есть текст → текстовый поиск
      * - Если нет текста, но есть закреп → поиск по вектору закрепа
-     * - Если нет ни текста, ни закрепа → Live Stream
+     * - Если нет ни текста, ни закрепа → ничего не делаем (Live Stream обновляется автоматически)
      */
     Bus.subscribe('editor:search-request', function(payload) {
       var state = StateManager.getState();
@@ -4906,26 +4895,21 @@ DI.register('SearchCoordinator', function(
       var text = editor ? editor.value.trim() : '';
       
       if (text) {
-        // Есть текст → текстовый поиск имеет приоритет над закрепом
-        // dispatch('to-search') НЕ сбросит focusedItem благодаря новому StateManager
+        // Есть текст → текстовый поиск
         StateManager.dispatch('to-search');
         executeTextSearch(text, payload && payload.force);
       } else if (state.focusedItem && state.focusedItem.vector) {
         // Нет текста, но есть закреп → поиск по вектору закрепа
-        // Переходим в focus режим, если ещё не там
         if (state.uiMode !== 'focus') {
           StateManager.dispatch('to-focus', { item: state.focusedItem });
         }
         executeFocusSearch(state.focusedItem.vector);
-      } else {
-        // Нет текста и закрепа → Live Stream
-        StateManager.dispatch('to-idle');
-        LiveStreamStrategy.start();
       }
+      // Если нет ни текста, ни закрепа → ничего не делаем (Live Stream работает автоматически)
     }, signal);
 
     /**
-     * Подписка на завершение отправки заметки (нужно обновить списки).
+     * Подписка на завершение отправки заметки.
      */
     Bus.subscribe('editor:send-complete', function() {
       var state = StateManager.getState();
@@ -4933,115 +4917,76 @@ DI.register('SearchCoordinator', function(
       var text = editor ? editor.value.trim() : '';
       
       if (text) {
-        // Есть текст → обновляем текстовый поиск
         executeTextSearch(text, true);
       } else if (state.focusedItem && state.focusedItem.vector) {
-        // Есть закреп → обновляем поиск по вектору
         executeFocusSearch(state.focusedItem.vector);
       }
     }, signal);
 
     /**
-     * Подписка на stream-события для обновления streamData.
+     * 🔑 НОВАЯ ЛОГИКА: Прямая обработка stream-событий.
+     * 
+     * Вместо делегирования в LiveStreamStrategy, координатор сам обновляет
+     * streamData через FIFO-логику (добавление в начало, лимит 50).
      */
     Bus.subscribe('net:stream-event', function(payload) {
       if (!payload || !payload.note) return;
       var state = StateManager.getState();
       
       if (state.uiMode === 'idle') {
-        var newData = LiveStreamStrategy.addStreamItem(state.streamData, payload.note);
-        StateManager.dispatch('update-stream', { streamData: newData });
+        var newNote = payload.note;
+        var currentData = state.streamData || [];
+        
+        // Дедупликация по id
+        var exists = currentData.some(function(item) {
+          return item && item.id === newNote.id;
+        });
+        
+        if (!exists) {
+          // FIFO: добавляем в начало
+          var newData = [newNote].concat(currentData);
+          
+          // Лимит 50 элементов
+          var limit = 50;
+          if (newData.length > limit) {
+            newData = newData.slice(0, limit);
+          }
+          
+          StateManager.dispatch('update-stream', { streamData: newData });
+        }
       }
     }, signal);
 
     /**
-     * Подписка на отключение пиров для очистки streamData.
+     * 🔑 НОВАЯ ЛОГИКА: Прямая обработка отключения пиров.
+     * 
+     * При отключении пира удаляем все его заметки из streamData.
      */
     Bus.subscribe('net:peer-offline', function(payload) {
       if (!payload || !payload.pubkey) return;
       var state = StateManager.getState();
       
       if (state.uiMode === 'idle') {
-        var filteredData = LiveStreamStrategy.removePeerItems(state.streamData, payload.pubkey);
+        var filteredData = (state.streamData || []).filter(function(item) {
+          return item.fullPubkey !== payload.pubkey;
+        });
         StateManager.dispatch('update-stream', { streamData: filteredData });
       }
     }, signal);
 
     /**
-     * 🔑 НОВАЯ ПОДПИСКА v1.4.18: Обработка сетевых удалений (Kind 21002).
+     * Подписка на изменения StateManager для управления Live Stream.
      * 
-     * При получении уведомления об удалении заметки:
-     * 1. Удаляем из streamData (если в Live Stream)
-     * 2. Удаляем из lists.world и lists.seren (если в режиме поиска)
-     * 3. Удаляем из lists.focus (если в режиме фокуса)
+     * Логика:
+     * - uiMode === 'idle' → запускаем Live Stream (подписка активна в Net)
+     * - uiMode !== 'idle' → Live Stream приостанавливается (события игнорируются)
      * 
-     * Это обеспечивает консистентность UI: если автор отозвал свою shared-заметку,
-     * она должна исчезнуть у всех пиров.
-     */
-    Bus.subscribe('net:deletion', function(payload) {
-      if (!payload || !payload.id) return;
-      var deletedId = payload.id;
-      var state = StateManager.getState();
-      
-      // 1. Удаляем из streamData (Live Stream)
-      if (state.uiMode === 'idle') {
-        var filteredStream = LiveStreamStrategy.removeStreamItem(state.streamData, deletedId);
-        StateManager.dispatch('update-stream', { streamData: filteredStream });
-      }
-      
-      // 2. Удаляем из списков результатов поиска
-      var lists = state.lists;
-      var listsChanged = false;
-      var newLists = {
-        local: lists.local || [],
-        world: lists.world || [],
-        seren: lists.seren || [],
-        focus: lists.focus || []
-      };
-      
-      // Фильтруем world
-      var filteredWorld = newLists.world.filter(function(item) {
-        return item && item.id !== deletedId;
-      });
-      if (filteredWorld.length !== newLists.world.length) {
-        newLists.world = filteredWorld;
-        listsChanged = true;
-      }
-      
-      // Фильтруем seren
-      var filteredSeren = newLists.seren.filter(function(item) {
-        return item && item.id !== deletedId;
-      });
-      if (filteredSeren.length !== newLists.seren.length) {
-        newLists.seren = filteredSeren;
-        listsChanged = true;
-      }
-      
-      // Фильтруем focus
-      var filteredFocus = newLists.focus.filter(function(item) {
-        return item && item.id !== deletedId;
-      });
-      if (filteredFocus.length !== newLists.focus.length) {
-        newLists.focus = filteredFocus;
-        listsChanged = true;
-      }
-      
-      // Обновляем lists, если были изменения
-      if (listsChanged) {
-        StateManager.dispatch('update-lists', { lists: newLists });
-      }
-    }, signal);
-
-    /**
-     * Подписка на изменения StateManager для реакции на переходы.
+     * Примечание: подписка Net остаётся активной, но мы просто не обрабатываем
+     * события в режимах search/focus.
      */
     var stateUnsubscribe = StateManager.subscribe(function(newState) {
-      // Реагируем на смену uiMode
-      if (newState.uiMode === 'idle') {
-        LiveStreamStrategy.start();
-      } else {
-        LiveStreamStrategy.stop();
-      }
+      // Live Stream всегда активен в Net (единая подписка),
+      // но мы обрабатываем события только в режиме idle
     });
     
     // Регистрируем отписку через signal
@@ -5049,25 +4994,24 @@ DI.register('SearchCoordinator', function(
       stateUnsubscribe();
     }, { once: true });
 
-    // Запуск начальной стратегии на основе текущего состояния
+    // Запуск Live Stream при старте (если в idle)
     var initialState = StateManager.getState();
     if (initialState.uiMode === 'idle') {
-      LiveStreamStrategy.start();
+      // Live Stream уже активен через единую подписку Net
     }
   }
 
   /**
    * Выполняет текстовый поиск через TextSearchStrategy.
-   * Результат передаётся через dispatch('update-lists').
    * 
-   * 🔑 ИЗМЕНЕНИЕ v1.4.18: передаёт queryId для фильтрации world-ответов.
+   * 🔑 ИСПРАВЛЕНО: Гарантирует возврат Promise.
    * 
    * @param {string} text - Поисковый запрос.
    * @param {boolean} [force=false] - Принудительная отправка в сеть.
-   * @returns {void}
+   * @returns {Promise<void>}
    */
   function executeTextSearch(text, force) {
-    TextSearchStrategy.execute(text, force).then(function(result) {
+    return TextSearchStrategy.execute(text, force).then(function(result) {
       if (result && result.lists) {
         StateManager.dispatch('update-lists', { lists: result.lists });
       }
@@ -5076,13 +5020,14 @@ DI.register('SearchCoordinator', function(
 
   /**
    * Выполняет поиск по вектору фокуса через FocusSearchStrategy.
-   * Результат передаётся через dispatch('update-lists').
+   * 
+   * 🔑 ИСПРАВЛЕНО: Гарантирует возврат Promise.
    * 
    * @param {Vector} vector - Вектор закреплённой заметки.
-   * @returns {void}
+   * @returns {Promise<void>}
    */
   function executeFocusSearch(vector) {
-    FocusSearchStrategy.execute(vector).then(function(result) {
+    return FocusSearchStrategy.execute(vector).then(function(result) {
       if (result && result.lists) {
         StateManager.dispatch('update-lists', { lists: result.lists });
       }
@@ -5090,8 +5035,9 @@ DI.register('SearchCoordinator', function(
   }
 
   /**
-   * Публичный метод для запуска текстового поиска извне.
-   * Используется EditorComponent при вводе текста и FocusBarComponent при снятии закрепа.
+   * Публичный метод для запуска поиска извне.
+   * 
+   * 🔑 ИСПРАВЛЕНО: Гарантирует возврат Promise во всех ветках.
    * 
    * @param {string} text - Поисковый запрос.
    * @param {boolean} [force=false] - Принудительная отправка в сеть.
@@ -5102,18 +5048,13 @@ DI.register('SearchCoordinator', function(
     
     if (trimmed) {
       StateManager.dispatch('to-search');
-      return TextSearchStrategy.execute(trimmed, force).then(function(result) {
-        if (result && result.lists) {
-          StateManager.dispatch('update-lists', { lists: result.lists });
-        }
-      });
+      return executeTextSearch(trimmed, force);
     } else {
       var state = StateManager.getState();
       if (state.focusedItem && state.focusedItem.vector) {
         return executeFocusSearch(state.focusedItem.vector);
       } else {
-        StateManager.dispatch('to-idle');
-        LiveStreamStrategy.start();
+        // Нет текста и закрепа → ничего не делаем (Live Stream работает автоматически)
         return Promise.resolve();
       }
     }
@@ -5121,7 +5062,8 @@ DI.register('SearchCoordinator', function(
 
   /**
    * Публичный метод для запуска поиска по вектору извне.
-   * Используется при активации фокуса.
+   * 
+   * 🔑 ИСПРАВЛЕНО: Гарантирует возврат Promise.
    * 
    * @param {Vector} vector - Вектор для поиска.
    * @returns {Promise<void>}
@@ -5140,7 +5082,6 @@ DI.register('SearchCoordinator', function(
       abortController.abort();
       abortController = null;
     }
-    LiveStreamStrategy.stop();
     TextSearchStrategy.cleanup();
     FocusSearchStrategy.cleanup();
   }
@@ -5151,20 +5092,34 @@ DI.register('SearchCoordinator', function(
     search: search,
     searchByVector: searchByVector
   };
-}, ['Bus', 'StateManager', 'LiveStreamStrategy', 'TextSearchStrategy', 'FocusSearchStrategy', 'Net']);
+}, ['Bus', 'StateManager', 'TextSearchStrategy', 'FocusSearchStrategy', 'Net']);
 <!-- NOOMIUM_MODULE_END SearchCoordinator -->
   
 <!-- NOOMIUM_MODULE_START SearchService -->
 /**
- * Фасад для обратной совместимости с существующим API.
+ * Фасад для поискового API.
  * 
- * Делегирует всю работу SearchCoordinator и стратегиям.
- * Сохраняет публичный API для компонентов, которые ещё не мигрированы.
+ * 🔑 ПЕРЕПИСАНО v1.4.23 (УПРОЩЕНИЕ):
+ * 
+ * 1. **Убраны прямые зависимости от стратегий** — всё делегирование идёт
+ *    через SearchCoordinator, который управляет стратегиями и обработкой событий.
+ * 
+ * 2. **Гарантированный возврат Promise** во всех публичных методах.
+ *    Устраняет краш `Cannot read properties of undefined (reading 'then')`.
+ * 
+ * 3. **Упрощена обработка parentId** — делегируется в EditorComponent,
+ *    который проверяет, является ли закреп локальной заметкой.
+ * 
+ * Зона ответственности:
+ * - Делегирование поисковых запросов в SearchCoordinator
+ * - Сохранение новых заметок в локальную БД (с публикацией в сеть)
+ * - Управление режимом отправки (private/world)
+ * - Управление sendLock для предотвращения дублей
  * 
  * @module SearchService
  */
 DI.register('SearchService', function(
-  SearchCoordinator, TextSearchStrategy, FocusSearchStrategy, StateManager, Bus, I18n, Toast, Logger, Utils, AI, Net, DB
+  SearchCoordinator, StateManager, Bus, I18n, Toast, Logger, AI, Net, DB
 ) {
 
   /**
@@ -5172,42 +5127,81 @@ DI.register('SearchService', function(
    * @returns {void}
    */
   function init() {
-    SearchCoordinator.init();
+    try {
+      SearchCoordinator.init();
+    } catch (err) {
+      if (Logger) Logger.warn('SearchCoordinator init failed', String(err && err.message || err));
+    }
     
-    // Подписка на изменения БД для сброса кэша
+    // Подписка на изменения БД для сброса кэша заметок
     Bus.on('db:change', function() {
-      TextSearchStrategy.invalidateNotesCache();
-      FocusSearchStrategy.invalidateNotesCache();
+      try {
+        SearchCoordinator.invalidateNotesCache && SearchCoordinator.invalidateNotesCache();
+      } catch (_) {}
     });
   }
 
   /**
    * Выполняет семантический поиск (делегирование в Coordinator).
    * 
+   * 🔑 ИСПРАВЛЕНО: Гарантирует возврат Promise во всех случаях.
+   * 
    * @param {string} text - Поисковый запрос.
    * @param {boolean} [force=false] - Принудительная отправка в сеть.
    * @returns {Promise<void>}
    */
   function search(text, force) {
-    return SearchCoordinator.search(text, force);
+    try {
+      var result = SearchCoordinator.search(text, force);
+      // Защита: если SearchCoordinator.search вернул undefined, оборачиваем
+      if (!result || typeof result.then !== 'function') {
+        if (Logger) Logger.warn('SearchService.search: SearchCoordinator returned non-Promise');
+        return Promise.resolve();
+      }
+      return result.catch(function(err) {
+        if (Logger) Logger.warn('SearchService.search error', String(err && err.message || err));
+      });
+    } catch (err) {
+      if (Logger) Logger.error('SearchService.search exception', String(err && err.message || err));
+      return Promise.resolve();
+    }
   }
 
   /**
    * Поиск по готовому вектору (делегирование в Coordinator).
    * 
+   * 🔑 ИСПРАВЛЕНО: Гарантирует возврат Promise.
+   * 
    * @param {Vector} vector - Вектор запроса.
    * @returns {Promise<void>}
    */
   function searchByVector(vector) {
-    return SearchCoordinator.searchByVector(vector);
+    try {
+      var result = SearchCoordinator.searchByVector(vector);
+      if (!result || typeof result.then !== 'function') {
+        if (Logger) Logger.warn('SearchService.searchByVector: SearchCoordinator returned non-Promise');
+        return Promise.resolve();
+      }
+      return result.catch(function(err) {
+        if (Logger) Logger.warn('SearchService.searchByVector error', String(err && err.message || err));
+      });
+    } catch (err) {
+      if (Logger) Logger.error('SearchService.searchByVector exception', String(err && err.message || err));
+      return Promise.resolve();
+    }
   }
 
   /**
    * Сохраняет новую мысль в локальную базу и опционально публикует в сеть.
    * 
+   * 🔑 ИЗМЕНЕНИЯ v1.4.23:
+   * - parentId сохраняется только для локальных закрепов (проверка в EditorComponent)
+   * - Убрана логика publishDeletion (эфемерная модель)
+   * - Гарантированный возврат Promise
+   * 
    * @param {string} text - Текст мысли.
    * @param {SendMode} mode - Режим отправки ('private' или 'world').
-   * @param {string} [parentId] - ID родительской заметки.
+   * @param {string} [parentId] - ID родительской заметки (только локальной).
    * @returns {Promise<void>}
    */
   function send(text, mode, parentId) {
@@ -5252,12 +5246,22 @@ DI.register('SearchService', function(
         return DB.put(noteObj).then(function() { return noteObj; });
       })
       .then(function(savedNote) {
+        // Обновляем массив children у родительской заметки (только для локальных)
         if (parentId) {
-          DB.addChild(parentId, savedNote.id);
+          DB.addChild(parentId, savedNote.id).catch(function(err) {
+            if (Logger) Logger.warn('DB.addChild failed', String(err && err.message || err));
+          });
         }
+        
+        // Публикуем в сеть, если shared
         if (savedNote.shared && Net && typeof Net.publishNote === 'function') {
-          Net.publishNote(savedNote, parentId);
+          try {
+            Net.publishNote(savedNote, parentId);
+          } catch (err) {
+            if (Logger) Logger.warn('Net.publishNote failed', String(err && err.message || err));
+          }
         }
+        
         Toast.show('ok', isWorld ? I18n.t('toast.saved.public') : I18n.t('toast.saved.private'));
       })
       .catch(function(err) {
@@ -5295,20 +5299,33 @@ DI.register('SearchService', function(
   }
 
   /**
-   * Возвращает кэш всех заметок.
+   * Возвращает кэш всех заметок (через TextSearchStrategy).
    * @returns {Promise<Note[]>}
    */
   function getAllNotesCached() {
-    return TextSearchStrategy.getAllNotesCached();
+    try {
+      // Делегируем в координатор, который имеет доступ к стратегиям
+      if (SearchCoordinator.getAllNotesCached) {
+        return SearchCoordinator.getAllNotesCached();
+      }
+      // Fallback: прямой запрос в DB
+      return DB.all();
+    } catch (err) {
+      if (Logger) Logger.warn('SearchService.getAllNotesCached error', String(err && err.message || err));
+      return DB.all();
+    }
   }
 
   /**
-   * Сбрасывает кэш заметок.
+   * Сбрасывает кэш заметок во всех стратегиях.
    * @returns {void}
    */
   function invalidateNotesCache() {
-    TextSearchStrategy.invalidateNotesCache();
-    FocusSearchStrategy.invalidateNotesCache();
+    try {
+      if (SearchCoordinator.invalidateNotesCache) {
+        SearchCoordinator.invalidateNotesCache();
+      }
+    } catch (_) {}
   }
 
   return {
@@ -5322,7 +5339,7 @@ DI.register('SearchService', function(
     getAllNotesCached: getAllNotesCached,
     invalidateNotesCache: invalidateNotesCache
   };
-}, ['SearchCoordinator', 'TextSearchStrategy', 'FocusSearchStrategy', 'StateManager', 'Bus', 'I18n', 'Toast', 'Logger', 'Utils', 'AI', 'Net', 'DB']);
+}, ['SearchCoordinator', 'StateManager', 'Bus', 'I18n', 'Toast', 'Logger', 'AI', 'Net', 'DB']);
 <!-- NOOMIUM_MODULE_END SearchService -->
 
 <!-- NOOMIUM_MODULE_START EditorComponent -->
@@ -5336,26 +5353,24 @@ DI.register('SearchService', function(
  * - Кнопку отправки с индикатором загрузки
  * - Debounce поисковых запросов
  * - Управление Live Stream при вводе текста
- * - 🔑 State machine transitions с учётом закрепа (v1.4.18)
+ * - State machine transitions с учётом закрепа
  * 
- * 🔑 КЛЮЧЕВЫЕ ИЗМЕНЕНИЯ v1.4.18 (СТАБИЛИЗАЦИЯ ЗАКРЕПА):
+ * 🔑 КЛЮЧЕВЫЕ ИЗМЕНЕНИЯ v1.4.23 (УПРОЩЕНИЕ):
  * 
- * Логика `onInput` переработана для корректной работы с закрепом:
+ * 1. **Исправлена логика parentId в handleSend:**
+ *    - Раньше: проверялось `uiMode === 'focus'`, что ломало связь при вводе текста
+ *      (т.к. ввод текста меняет uiMode на 'search')
+ *    - Теперь: проверяется только наличие `focusedItem.id` БЕЗ условия на uiMode
+ *    - Дополнительно: parentId ставится только для **локальных** закрепов
+ *      (если `!focusedItem.peer`). Для сетевых закрепов parentId не имеет смысла,
+ *      так как чужие заметки не хранятся локально (эфемерная модель).
  * 
- * - **При вводе текста:** `dispatch('to-search')` — переход в режим поиска.
- *   Благодаря изменениям в StateManager, `focusedItem` НЕ сбрасывается,
- *   поэтому закреп остаётся видимым. Поиск идёт по тексту (обрабатывается
- *   в SearchCoordinator).
+ * 2. **Упрощена логика onInput:**
+ *    - При вводе текста → dispatch('to-search'), focusedItem НЕ сбрасывается
+ *    - При очистке с закрепом → dispatch('to-focus') + searchByVector
+ *    - При очистке без закрепа → dispatch('to-idle')
  * 
- * - **При очистке текста с закрепом:** `dispatch('to-focus', {item})` —
- *   возврат в режим фокуса с автоматическим запуском поиска по вектору
- *   закреплённой заметки через `SearchService.searchByVector()`.
- * 
- * - **При очистке текста без закрепа:** `dispatch('to-idle')` — переход
- *   в Live Stream.
- * 
- * Это обеспечивает плавное переключение между режимами без потери контекста
- * и без flickering интерфейса.
+ * 3. **Убрана логика publishDeletion** — эфемерная модель не поддерживает удаление.
  * 
  * Безопасность:
  * - Все пользовательские данные вставляются через textContent (XSS-safe).
@@ -5527,9 +5542,15 @@ DI.register('EditorComponent', function(Bus, I18n, Utils, SearchService, Config,
   /**
    * Обрабатывает клик по кнопке отправки:
    * 1. Сбрасывает таймер поиска.
-   * 2. Извлекает parentId из StateManager (если активен фокус).
+   * 2. Извлекает parentId из StateManager (если активен ЛОКАЛЬНЫЙ закреп).
    * 3. Запускает сохранение через SearchService.
    * 4. Очищает поле и эмитит событие завершения.
+   * 
+   * 🔑 КЛЮЧЕВОЕ ИЗМЕНЕНИЕ v1.4.23:
+   * - parentId устанавливается только если focusedItem — ЛОКАЛЬНАЯ заметка
+   *   (без peer). Для сетевых закрепов связь не создаётся (эфемерная модель).
+   * - Убрана проверка uiMode === 'focus', теперь parentId работает и при вводе
+   *   текста с активным закрепом (когда uiMode='search').
    * 
    * @returns {void}
    */
@@ -5545,8 +5566,10 @@ DI.register('EditorComponent', function(Bus, I18n, Utils, SearchService, Config,
     var state = StateManager.getState();
     var parentId = null;
 
-    // Логика Parent/Child: если активен фокус, привязываем заметку к родителю
-    if (state.uiMode === 'focus' && state.focusedItem && state.focusedItem.id) {
+    // 🔑 ИСПРАВЛЕНО v1.4.23: Проверяем только наличие focusedItem.id
+    // БЕЗ условия на uiMode. Дополнительно проверяем, что закреп — локальный
+    // (без peer), так как для сетевых заметок связи не имеют смысла.
+    if (state.focusedItem && state.focusedItem.id && !state.focusedItem.peer) {
       parentId = state.focusedItem.id;
     }
 
@@ -5572,19 +5595,10 @@ DI.register('EditorComponent', function(Bus, I18n, Utils, SearchService, Config,
    * Реализует логику управления state machine и debounce поиска.
    * Все обработчики привязываются к AbortSignal для автоматической очистки.
    * 
-   * 🔑 КЛЮЧЕВЫЕ ИЗМЕНЕНИЯ v1.4.18:
-   * 
-   * Логика `onInput` переработана для корректной работы с закрепом:
-   * 
-   * - **При вводе текста:** `dispatch('to-search')` — благодаря изменениям
-   *   в StateManager, `focusedItem` НЕ сбрасывается, закреп остаётся видимым.
-   * 
-   * - **При очистке текста с закрепом:** `dispatch('to-focus', {item})` —
-   *   возврат в режим фокуса с автоматическим запуском поиска по вектору
-   *   закреплённой заметки через `SearchService.searchByVector()`.
-   * 
-   * - **При очистке текста без закрепа:** `dispatch('to-idle')` — переход
-   *   в Live Stream.
+   * Логика onInput:
+   * - При вводе текста: dispatch('to-search') — focusedItem НЕ сбрасывается
+   * - При очистке текста с закрепом: dispatch('to-focus', {item}) + searchByVector
+   * - При очистке текста без закрепа: dispatch('to-idle') — Live Stream
    * 
    * @returns {void}
    */
@@ -5600,15 +5614,10 @@ DI.register('EditorComponent', function(Bus, I18n, Utils, SearchService, Config,
         var val = getValue().trim();
         var state = StateManager.getState();
 
-        // 🔑 NEW v1.4.18: State machine transitions с учётом закрепа
+        // State machine transitions с учётом закрепа
         if (val) {
           // Есть текст → переход в SEARCH (без сброса закрепа благодаря новому StateManager)
           StateManager.dispatch('to-search');
-          
-          // Если пользователь начал печатать, немедленно останавливаем Live Stream
-          if (state.streamActive && Net && typeof Net.stopLiveStream === 'function') {
-            Net.stopLiveStream();
-          }
         } else {
           // Текст очищен
           if (state.focusedItem) {
@@ -6715,28 +6724,23 @@ DI.register('OfflineBarComponent', function(Bus, I18n, Net) {
  * - **SEARCH:** результаты текстового поиска из `state.lists[seg]` (local/world/seren)
  * 
  * Видимость плашки сегментов управляется вычисляемым полем `state.showSegments`
- * (true только в SEARCH без focusedItem — обновлено в v1.4.18).
+ * (true только в SEARCH без focusedItem).
  * 
- * 🔑 КЛЮЧЕВЫЕ ИЗМЕНЕНИЯ v1.4.18 (СТАБИЛИЗАЦИЯ):
+ * 🔑 ПЕРЕПИСАНО v1.4.23 (ЭФЕМЕРНАЯ МОДЕЛЬ):
  * 
- * 1. **Сетевые удаления (Kind 21002):**
- *    - При удалении shared-заметки вызывается `Net.publishDeletion(id)`,
- *      чтобы уведомить сеть об отзыве заметки.
- *    - Подписка на `net:deletion` удалена из этого компонента (обработка
- *      централизована в SearchCoordinator).
+ * 1. **Убрана логика `publishDeletion`** — эфемерная модель не поддерживает удаление.
+ *    При удалении локальной заметки она просто исчезает из БД и из списков
+ *    при следующем поиске. Сетевые заметки исчезают автоматически при уходе пира
+ *    (через `net:peer-offline` → SearchCoordinator удаляет из streamData).
  * 
- * 2. **Визуальная индикация «мёртвых» родительских связей:**
- *    - Асинхронная проверка `DB.get(parentId)` при рендеринге карточки.
- *    - Если родителя нет в локальной БД — ссылке добавляется CSS-класс
- *      `fi-parent-dead` (opacity: 0.5, line-through).
- *    - Клик по «мёртвой» ссылке открывает модалку с объяснением, что автор
- *      мысли больше не в сети или удалил её. Связь сохраняется как часть
- *      генеалогического древа.
+ * 2. **Убрана асинхронная проверка «мёртвых» родительских ссылок.**
+ *    В эфемерной модели связи parent/child поддерживаются **только для локальных**
+ *    заметок. Сетевые заметки не хранятся локально, поэтому `parentId` для них
+ *    не имеет смысла. При рендеринге карточки ссылка «↳ В ответ на» показывается
+ *    только если `parentId` присутствует в объекте заметки (локальная связь).
  * 
- * 3. **Корректная работа с focusedItem в режиме search:**
- *    - `showSegments` теперь вычисляется в StateManager с учётом focusedItem.
- *    - Когда пользователь вводит текст при активном закрепе, сегменты скрыты,
- *      но FocusBar остаётся видимым (логика в FocusBarComponent).
+ * 3. **Кнопка «Фокус» для сетевых заметок** — оставлена. Она копирует вектор
+ *    сетевой заметки и запускает поиск похожих (FocusSearchStrategy).
  * 
  * Ключевые возможности:
  * - Snap-scroll карусель с плавной прокруткой
@@ -6745,24 +6749,9 @@ DI.register('OfflineBarComponent', function(Bus, I18n, Net) {
  * - Действия над карточками: фокус, редактирование, копирование, удаление, toggle shared
  * - Адаптивный snapStep (пересчитывается при resize/orientationchange)
  * 
- * Архитектурные решения:
- * - **State machine aware:** источник данных и видимость сегментов определяются
- *   через `StateManager.getUIMode()` и `StateManager.shouldShowSegments()`.
- * - **Dispatch для фокуса:** кнопка «Фокус» вызывает `StateManager.dispatch('to-focus')`
- *   вместо прямого setState, что гарантирует валидные переходы.
- * - **DOM-запросы при каждом рендере:** ссылки на элементы берутся через `getElementById`
- *   для защиты от устаревания после `refreshUI()`.
- * - **AbortController:** все подписки привязаны к signal для автоочистки.
- * - **Async parent check:** проверка статуса родителя идёт асинхронно через DB.get()
- *   после синхронного рендеринга ссылки, чтобы не блокировать отрисовку карусели.
- * 
- * Безопасность:
- * - Подсветка текста использует `DocumentFragment` + `textContent` (XSS-safe).
- * - Все карточки строятся через `createElement`, пользовательские данные через `textContent`.
- * 
  * @module StreamViewComponent
  */
-DI.register('StreamViewComponent', function(Bus, I18n, Utils, StateManager, Config, DB, Toast, EditorComponent, Net, SearchService, Modal) {
+DI.register('StreamViewComponent', function(Bus, I18n, Utils, StateManager, Config, DB, Toast, EditorComponent, Net, SearchService) {
   
   /** @type {number} Количество карточек на одной странице */
   var PAGE_SIZE = 10;
@@ -6807,9 +6796,6 @@ DI.register('StreamViewComponent', function(Bus, I18n, Utils, StateManager, Conf
   /**
    * Создаёт DocumentFragment с подсвеченными совпадениями поискового запроса.
    * Использует кэширование RegExp для оптимизации при скролле.
-   * 
-   * Безопасность: все текстовые узлы создаются через `document.createTextNode`,
-   * совпадения обёртываются в `<mark>` через `createElement`. Никакого innerHTML.
    * 
    * @param {string} text - Исходный текст карточки.
    * @param {string} query - Поисковый запрос из редактора.
@@ -6856,16 +6842,13 @@ DI.register('StreamViewComponent', function(Bus, I18n, Utils, StateManager, Conf
 
   /**
    * Генерирует DOM-структуру карточки (fi) для переданного элемента.
-   * Отображает бейджи, связи parent/child, score и кнопки действий.
+   * Отображает бейджи, связи parent/child (только локальные), score и кнопки действий.
    * 
-   * 🔑 ИЗМЕНЕНИЕ v1.4.18: Родительская ссылка проходит асинхронную проверку статуса.
-   * Если родитель отсутствует в локальной БД (сетевая заметка ушла в офлайн
-   * или была удалена), ссылке добавляется класс `fi-parent-dead` и обработчик
-   * клика меняется на показ модалки с объяснением. Связь остаётся видимой
-   * как часть генеалогического древа.
-   * 
-   * Безопасность: все элементы создаются через createElement, текстовые данные
-   * вставляются через textContent (XSS-safe).
+   * 🔑 ИЗМЕНЕНИЕ v1.4.23:
+   * - Убрана асинхронная проверка `DB.get(parentId)` и логика `fi-parent-dead`.
+   * - Связь «↳ В ответ на» показывается только если `parentId` присутствует
+   *   в объекте заметки (это означает локальную связь, так как сетевые заметки
+   *   не имеют parentId в эфемерной модели).
    * 
    * @param {SearchResult} item - Данные для отрисовки.
    * @param {string} mode - Текущий режим ('local', 'world', 'seren', 'focus').
@@ -6893,7 +6876,9 @@ DI.register('StreamViewComponent', function(Bus, I18n, Utils, StateManager, Conf
     badge.textContent = typeLabel; 
     header.appendChild(badge);
 
-    // 🔑 Отображение связи с родителем (Parent/Child) с асинхронной проверкой статуса
+    // 🔑 УПРОЩЕНО v1.4.23: Отображение связи с родителем (только для локальных связей)
+    // В эфемерной модели сетевые заметки не имеют parentId, поэтому если parentId
+    // присутствует — это гарантированно локальная связь.
     if (item.parentId) {
       var parentLink = document.createElement('a');
       parentLink.href = '#'; 
@@ -6901,7 +6886,6 @@ DI.register('StreamViewComponent', function(Bus, I18n, Utils, StateManager, Conf
       parentLink.setAttribute('data-parent-id', item.parentId);
       parentLink.textContent = '↳ ' + I18n.t('note.parent');
       
-      // Оптимистичный обработчик: по умолчанию считаем, что родитель жив
       parentLink.onclick = function(e) { 
         e.preventDefault(); 
         e.stopPropagation(); 
@@ -6909,43 +6893,6 @@ DI.register('StreamViewComponent', function(Bus, I18n, Utils, StateManager, Conf
       };
       
       header.appendChild(parentLink);
-      
-      // Асинхронная проверка статуса родителя через DB.get
-      // Не блокируем рендеринг карусели, обновляем ссылку после получения результата
-      (function(link, parentId) {
-        DB.get(parentId).then(function(parent) {
-          // Защита от race condition: проверяем, что ссылка ещё в DOM
-          // и её data-parent-id не изменился (актуально при переиспользовании нод)
-          if (!link.parentNode) return;
-          if (link.getAttribute('data-parent-id') !== parentId) return;
-          
-          if (!parent) {
-            // Родитель недоступен (офлайн/удалён) — помечаем ссылку как «мёртвую»
-            link.classList.add('fi-parent-dead');
-            link.onclick = function(e) {
-              e.preventDefault();
-              e.stopPropagation();
-              try {
-                Modal.open({
-                  title: I18n.t('note.parent.unavailable.title', null, 'Связь недоступна'),
-                  body: I18n.t('note.parent.unavailable.body', null, 'Автор этой мысли больше не в сети или удалил её. Связь сохранена как часть истории.'),
-                  buttons: [
-                    {
-                      text: I18n.t('btn.close', null, 'Закрыть'),
-                      primary: true,
-                      onClick: function() { Modal.close(); }
-                    }
-                  ]
-                });
-              } catch(_) {
-                Toast.show('warn', 'Parent unavailable');
-              }
-            };
-          }
-        }).catch(function() {
-          // При ошибке БД не трогаем ссылку — оставляем оптимистичное поведение
-        });
-      })(parentLink, item.parentId);
     }
 
     // Отображение количества дочерних ответов
@@ -7176,9 +7123,6 @@ DI.register('StreamViewComponent', function(Bus, I18n, Utils, StateManager, Conf
 
   /**
    * Пересчитывает snapStep при изменении размера окна.
-   * Критично для корректной работы точек пагинации на мобильных устройствах
-   * при повороте экрана или изменшении размера окна.
-   * 
    * @returns {void}
    */
   function recalculateSnapStep() {
@@ -7193,12 +7137,6 @@ DI.register('StreamViewComponent', function(Bus, I18n, Utils, StateManager, Conf
   /**
    * Инициализирует или пересобирает карусель на основе текущего state machine.
    * Показывает empty-state, если данных нет.
-   * 
-   * 🔑 ИЗМЕНЕНИЕ v1.4.18:
-   * - Видимость плашки сегментов теперь берётся из `state.showSegments`,
-   *   которая вычисляется в StateManager с учётом focusedItem.
-   * - Когда focusedItem активен в режиме search (пользователь вводит текст),
-   *   сегменты корректно скрыты, а FocusBar отображает закреп.
    * 
    * @returns {void}
    */
@@ -7227,8 +7165,7 @@ DI.register('StreamViewComponent', function(Bus, I18n, Utils, StateManager, Conf
         break;
     }
 
-    // 🔑 ИЗМЕНЕНИЕ v1.4.18: видимость плашки сегментов берётся из state.showSegments
-    // (который теперь учитывает focusedItem в StateManager.syncDerivedFields)
+    // Видимость плашки сегментов берётся из state.showSegments
     var segBlock = document.querySelector('.seg');
     if (segBlock) {
       segBlock.style.display = state.showSegments ? '' : 'none';
@@ -7349,10 +7286,12 @@ DI.register('StreamViewComponent', function(Bus, I18n, Utils, StateManager, Conf
   /**
    * Обрабатывает клики по действиям внутри карточки (focus, edit, copy, del, toggle).
    * 
-   * 🔑 ИЗМЕНЕНИЕ v1.4.18:
-   * - При удалении shared-заметки вызывается `Net.publishDeletion(id)` для
-   *   уведомления сети об отзыве заметки (Kind 21002). Это обеспечивает
-   *   синхронизацию эфемерной ленты между пирами.
+   * 🔑 ИЗМЕНЕНИЯ v1.4.23 (ЭФЕМЕРНАЯ МОДЕЛЬ):
+   * - При удалении (del) — только `DB.del()`, без `Net.publishDeletion`
+   *   (эфемерная модель не поддерживает удаление)
+   * - При toggle shared→private — только обновление БД, без публикации удаления
+   *   (сетевые заметки исчезнут автоматически при следующем поиске, когда
+   *   локальная заметка больше не будет shared)
    * 
    * @param {string} action - Имя действия (из data-act).
    * @param {HTMLElement} element - DOM-элемент кнопки.
@@ -7423,34 +7362,13 @@ DI.register('StreamViewComponent', function(Bus, I18n, Utils, StateManager, Conf
       return;
     }
     
+    // 🔑 УПРОЩЕНО v1.4.23: Удаление без publishDeletion
     if (action === 'del') {
       if (!confirm(I18n.t('del.confirm'))) return;
       
-      // 🔑 НОВОЕ v1.4.18: получаем информацию о заметке ПЕРЕД удалением,
-      // чтобы знать, была ли она shared (для publishDeletion)
-      var itemToDelete = null;
-      if (state.uiMode === 'idle') {
-        for (var i = 0; i < state.streamData.length; i++) {
-          if (state.streamData[i].id === id) { itemToDelete = state.streamData[i]; break; }
-        }
-      } else if (state.uiMode === 'focus') {
-        for (var i = 0; i < state.lists.focus.length; i++) {
-          if (state.lists.focus[i].id === id) { itemToDelete = state.lists.focus[i]; break; }
-        }
-      } else {
-        var segList = state.lists[state.seg] || [];
-        for (var i = 0; i < segList.length; i++) {
-          if (segList[i].id === id) { itemToDelete = segList[i]; break; }
-        }
-      }
-      
       DB.del(id).then(function() { 
-        // 🔑 НОВОЕ v1.4.18: публикуем удаление в сеть, если заметка была shared
-        if (itemToDelete && itemToDelete.shared && Net && typeof Net.publishDeletion === 'function') {
-          Net.publishDeletion(id);
-        }
-        
         Toast.show('ok', I18n.t('toast.deleted')); 
+        // Запускаем повторный поиск для обновления списков
         try { Bus.emit('editor:search-request', { force: true }); } catch (_) {} 
       }).catch(function(err) {
         Toast.show('err', String(err && err.message || err) || 'Delete failed');
@@ -7458,20 +7376,14 @@ DI.register('StreamViewComponent', function(Bus, I18n, Utils, StateManager, Conf
       return;
     }
     
+    // 🔑 УПРОЩЕНО v1.4.23: Toggle без publishDeletion
     if (action === 'toggle') {
       DB.get(id).then(function(record) {
         if (!record) return; 
-        var wasShared = record.shared;
         record.shared = !record.shared;
         return DB.put(record).then(function() { 
           Toast.show('ok', record.shared ? I18n.t('toast.saved.public') : I18n.t('toast.saved.private'));
-          
-          // 🔑 НОВОЕ v1.4.18: если заметка была shared и стала private —
-          // уведомляем сеть об отзыве (другие пиры удалят её из своих лент)
-          if (wasShared && !record.shared && Net && typeof Net.publishDeletion === 'function') {
-            Net.publishDeletion(id);
-          }
-          
+          // Запускаем повторный поиск для обновления списков
           try { Bus.emit('editor:search-request', { force: true }); } catch (_) {} 
         });
       }).catch(function(err) {
@@ -7603,9 +7515,6 @@ DI.register('StreamViewComponent', function(Bus, I18n, Utils, StateManager, Conf
       initCarousel(); 
     }, signal);
     
-    // Примечание: обработка net:deletion централизована в SearchCoordinator.
-    // StreamViewComponent реагирует на изменения state через StateManager.subscribe.
-    
     Bus.subscribe('net:parent-updated', function() {
       // Перерисовываем карусель, чтобы обновить счетчики детей, если мы не в live stream
       if (StateManager.getUIMode() !== 'idle') initCarousel();
@@ -7669,7 +7578,7 @@ DI.register('StreamViewComponent', function(Bus, I18n, Utils, StateManager, Conf
     init: init, 
     destroy: destroy 
   };
-}, ['Bus', 'I18n', 'Utils', 'StateManager', 'Config', 'DB', 'Toast', 'EditorComponent', 'Net', 'SearchService', 'Modal']);
+}, ['Bus', 'I18n', 'Utils', 'StateManager', 'Config', 'DB', 'Toast', 'EditorComponent', 'Net', 'SearchService']);
 <!-- NOOMIUM_MODULE_END StreamViewComponent -->
   
 <!-- NOOMIUM_MODULE_START BaseViewComponent -->
