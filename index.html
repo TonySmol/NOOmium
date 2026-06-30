@@ -1,7 +1,7 @@
 <!doctype html>
 <html lang="ru">
 <head>
-<meta name="app-version" content="1.4.23">
+<meta name="app-version" content="1.4.24">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,maximum-scale=1">
 <meta name="mobile-web-app-capable" content="yes">
@@ -3099,7 +3099,7 @@ DI.register('Net', function(cfg, DB, AI, log, bus) {
         var nowSec = Math.floor(Date.now() / 1000);
         if (pool) {
           subscription = pool.subscribeMany(cfg.get('relays', []),
-            [{ kinds: [KQ, KA], '#t': [room], since: nowSec - subWindow }],
+            [{ kinds: [KQ, KA], '#t': [room], since: nowSec }],
             { onevent: onEvent, onclose: function() { scheduleReconnect(); } });
           reconnecting = false;
         } else {
@@ -3178,7 +3178,7 @@ DI.register('Net', function(cfg, DB, AI, log, bus) {
       started = true;
       try {
         subscription = pool.subscribeMany(cfg.get('relays', []),
-          [{ kinds: [KQ, KA], '#t': [room], since: nowSec - subWindow }],
+          [{ kinds: [KQ, KA], '#t': [room], since: nowSec }],
           { onevent: onEvent, onclose: function() { scheduleReconnect(); } });
         startHeartbeat();
       } catch (e) {
