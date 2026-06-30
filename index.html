@@ -6968,8 +6968,373 @@ kbd {
   /* <!-- MODULE: NetTransport --> */
 
   /* <!-- MODULE: EventRouter --> */
-  старт
-  энд
+  /**
+   * @module EventRouter
+   * @description Маршрутизатор Nostr-событий из NetTransport в сервисы.
+   * 
+   * Архитектурная роль:
+   * - Тонкий диспетчер между транспортом и бизнес-логикой
+   * - НЕ содержит логики обработки событий (это делают QueryHandler, LiveStreamService)
+   * - НЕ знает о заметках, поиске, фокусе
+   * - Только классификация событий по kind и маршрутизация
+   * 
+   * Архитектурные принципы:
+   * - Слушает `net:event` от NetTransport
+   * - Эмитит специализированные события для сервисов
+   * - Валидация kind перед маршрутизацией (whitelist)
+   * - Игнорирование неизвестных kinds (future-proof)
+   * - AbortSignal для автоматической отписки при destroy
+   * 
+   * Слушает события:
+   * - `net:event` — сырое Nostr-событие от NetTransport
+   * 
+   * Эмитит события:
+   * - `query:inbound` — входящий поисковый запрос (Kind 21000)
+   *   payload: {event: NostrEvent, parsed: {vector, threshold, serendipity, version}}
+   * - `answer:inbound` — входящий ответ (Kind 21001 с тегом 'e')
+   *   payload: {event: NostrEvent, parsed: {text, vector, score, z_score}, queryId: string}
+   * - `publish:inbound` — входящая публикация shared-заметки (Kind 21001 без тега 'e')
+   *   payload: {event: NostrEvent, parsed: {text, vector, score}}
+   * - `router:unknown-kind` — событие с неизвестным kind (для мониторинга)
+   *   payload: {kind: number, eventId: string, pubkey: string}
+   * 
+   * @namespace EventRouter
+   */
+  DI.register('EventRouter', function(Config, Logger, Bus) {
+    
+    /**
+     * Контроллер для управления подпиской на net:event.
+     * Используется для автоматической отписки при destroy().
+     * @type {AbortController | null}
+     */
+    var abortController = null;
+
+    /**
+     * Whitelist поддерживаемых kinds для маршрутизации.
+     * Все остальные kinds игнорируются с логированием.
+     * @type {Set<number>}
+     */
+    var supportedKinds = new Set();
+
+    /**
+     * Счётчик маршрутизированных событий (для мониторинга).
+     * @type {{query: number, answer: number, publish: number, unknown: number}}
+     */
+    var stats = {
+      query: 0,
+      answer: 0,
+      publish: 0,
+      unknown: 0
+    };
+
+    /**
+     * Инициализирует whitelist поддерживаемых kinds из Config.
+     * @returns {void}
+     */
+    function initSupportedKinds() {
+      supportedKinds.clear();
+      var KQ = Config ? Config.get('kQuery', 21000) : 21000;
+      var KA = Config ? Config.get('kAnswer', 21001) : 21001;
+      supportedKinds.add(KQ);
+      supportedKinds.add(KA);
+    }
+
+    /**
+     * Извлекает ID связанного события из тега 'e'.
+     * Ищет тег вида ['e', eventId] или ['e', eventId, relay, marker].
+     * 
+     * @param {Array} tags - Массив тегов события.
+     * @returns {string | null} ID связанного события или null.
+     */
+    function extractETag(tags) {
+      if (!Array.isArray(tags)) return null;
+      for (var i = 0; i < tags.length; i++) {
+        var tag = tags[i];
+        if (Array.isArray(tag) && tag[0] === 'e' && typeof tag[1] === 'string') {
+          return tag[1];
+        }
+      }
+      return null;
+    }
+
+    /**
+     * Безопасно парсит JSON-содержимое события.
+     * Возвращает null при ошибке парсинга.
+     * 
+     * @param {string} content - JSON-строка.
+     * @returns {Object | null} Распарсенный объект или null.
+     */
+    function safeParse(content) {
+      if (typeof content !== 'string' || !content) return null;
+      try {
+        var parsed = JSON.parse(content);
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          return null;
+        }
+        return parsed;
+      } catch (e) {
+        return null;
+      }
+    }
+
+    /**
+     * Валидирует структуру входящего поискового запроса.
+     * 
+     * @param {Object} parsed - Распарсенный content.
+     * @returns {boolean} true если структура валидна.
+     */
+    function isValidQuery(parsed) {
+      if (!parsed) return false;
+      if (!Array.isArray(parsed.vector) || parsed.vector.length === 0) return false;
+      return true;
+    }
+
+    /**
+     * Валидирует структуру входящего ответа/публикации.
+     * 
+     * @param {Object} parsed - Распарсенный content.
+     * @returns {boolean} true если структура валидна.
+     */
+    function isValidAnswer(parsed) {
+      if (!parsed) return false;
+      if (typeof parsed.text !== 'string' || !parsed.text) return false;
+      if (!Array.isArray(parsed.vector) || parsed.vector.length === 0) return false;
+      if (typeof parsed.score !== 'number') return false;
+      return true;
+    }
+
+    /**
+     * Маршрутизирует входящее событие Kind 21000 (Query).
+     * Эмитит `query:inbound` для QueryHandler.
+     * 
+     * @param {NostrEvent} event - Входящее событие.
+     * @param {Object} parsed - Распарсенный content.
+     * @returns {void}
+     */
+    function routeQuery(event, parsed) {
+      if (!isValidQuery(parsed)) {
+        if (Logger) Logger.warn('EventRouter', 'Invalid query structure', {
+          eventId: event.id,
+          pubkey: event.pubkey.slice(0, 6)
+        });
+        return;
+      }
+
+      stats.query++;
+
+      if (Bus && Bus.emit) {
+        try {
+          Bus.emit('query:inbound', {
+            event: event,
+            parsed: {
+              vector: parsed.vector,
+              threshold: typeof parsed.threshold === 'number' ? parsed.threshold : null,
+              serendipity: typeof parsed.serendipity === 'number' ? parsed.serendipity : null,
+              version: typeof parsed.protocol_version === 'number' ? parsed.protocol_version : 1
+            }
+          });
+        } catch (e) {
+          if (Logger) Logger.error('EventRouter', 'Bus.emit query:inbound failed', e);
+        }
+      }
+    }
+
+    /**
+     * Маршрутизирует входящее событие Kind 21001 (Answer/Publish).
+     * Различает ответ на запрос (с тегом 'e') и публикацию (без тега).
+     * 
+     * @param {NostrEvent} event - Входящее событие.
+     * @param {Object} parsed - Распарсенный content.
+     * @returns {void}
+     */
+    function routeAnswer(event, parsed) {
+      if (!isValidAnswer(parsed)) {
+        if (Logger) Logger.warn('EventRouter', 'Invalid answer structure', {
+          eventId: event.id,
+          pubkey: event.pubkey.slice(0, 6)
+        });
+        return;
+      }
+
+      var eTag = extractETag(event.tags);
+
+      if (eTag) {
+        // Это ответ на поисковый запрос
+        stats.answer++;
+
+        if (Bus && Bus.emit) {
+          try {
+            Bus.emit('answer:inbound', {
+              event: event,
+              parsed: {
+                text: parsed.text,
+                vector: parsed.vector,
+                score: parsed.score,
+                z_score: typeof parsed.z_score === 'number' ? parsed.z_score : null
+              },
+              queryId: eTag
+            });
+          } catch (e) {
+            if (Logger) Logger.error('EventRouter', 'Bus.emit answer:inbound failed', e);
+          }
+        }
+      } else {
+        // Это публикация shared-заметки (Live Stream)
+        stats.publish++;
+
+        if (Bus && Bus.emit) {
+          try {
+            Bus.emit('publish:inbound', {
+              event: event,
+              parsed: {
+                text: parsed.text,
+                vector: parsed.vector,
+                score: parsed.score
+              }
+            });
+          } catch (e) {
+            if (Logger) Logger.error('EventRouter', 'Bus.emit publish:inbound failed', e);
+          }
+        }
+      }
+    }
+
+    /**
+     * Логирует событие с неизвестным kind.
+     * 
+     * @param {NostrEvent} event - Входящее событие.
+     * @returns {void}
+     */
+    function routeUnknown(event) {
+      stats.unknown++;
+
+      if (Logger) Logger.debug('EventRouter', 'Unknown kind, ignoring', {
+        kind: event.kind,
+        eventId: event.id,
+        pubkey: event.pubkey.slice(0, 6)
+      });
+
+      if (Bus && Bus.emit) {
+        try {
+          Bus.emit('router:unknown-kind', {
+            kind: event.kind,
+            eventId: event.id,
+            pubkey: event.pubkey
+          });
+        } catch (e) {
+          // Игнорируем ошибки эмиссии для неизвестных kinds
+        }
+      }
+    }
+
+    /**
+     * Главный обработчик входящих событий от NetTransport.
+     * Классифицирует событие по kind и делегирует в соответствующий роутер.
+     * 
+     * @param {Object} payload - Payload события `net:event`.
+     * @param {NostrEvent} payload.event - Входящее событие.
+     * @returns {void}
+     */
+    function handleNetEvent(payload) {
+      if (!payload || !payload.event) return;
+      
+      var event = payload.event;
+      if (!event || typeof event.kind !== 'number') return;
+
+      if (!supportedKinds.has(event.kind)) {
+        routeUnknown(event);
+        return;
+      }
+
+      var KQ = Config ? Config.get('kQuery', 21000) : 21000;
+      var KA = Config ? Config.get('kAnswer', 21001) : 21001;
+
+      var parsed = safeParse(event.content);
+
+      if (event.kind === KQ) {
+        routeQuery(event, parsed);
+      } else if (event.kind === KA) {
+        routeAnswer(event, parsed);
+      }
+    }
+
+    /**
+     * Возвращает статистику маршрутизации.
+     * 
+     * @returns {{query: number, answer: number, publish: number, unknown: number}}
+     */
+    function getStats() {
+      return {
+        query: stats.query,
+        answer: stats.answer,
+        publish: stats.publish,
+        unknown: stats.unknown
+      };
+    }
+
+    /**
+     * Сбрасывает статистику маршрутизации.
+     * 
+     * @returns {void}
+     */
+    function resetStats() {
+      stats.query = 0;
+      stats.answer = 0;
+      stats.publish = 0;
+      stats.unknown = 0;
+    }
+
+    /**
+     * Инициализация модуля.
+     * Подписывается на `net:event` с AbortSignal для автоматической отписки.
+     * 
+     * @param {AbortSignal} [signal] - Сигнал для автоочистки.
+     * @returns {void}
+     */
+    function init(signal) {
+      if (abortController) {
+        abortController.abort();
+      }
+
+      abortController = new AbortController();
+      var internalSignal = abortController.signal;
+
+      initSupportedKinds();
+
+      if (Bus && typeof Bus.subscribe === 'function') {
+        Bus.subscribe('net:event', handleNetEvent, internalSignal);
+      }
+
+      if (Logger) {
+        Logger.info('EventRouter', 'Initialized', {
+          supportedKinds: Array.from(supportedKinds)
+        });
+      }
+    }
+
+    /**
+     * Уничтожение модуля.
+     * Отписывается от `net:event`, очищает статистику.
+     * 
+     * @returns {void}
+     */
+    function destroy() {
+      if (abortController) {
+        abortController.abort();
+        abortController = null;
+      }
+
+      supportedKinds.clear();
+      resetStats();
+    }
+
+    return {
+      init: init,
+      destroy: destroy,
+      getStats: getStats,
+      resetStats: resetStats
+    };
+  }, ['Config', 'Logger', 'Bus']);
   /* <!-- MODULE: EventRouter --> */
 
   /* <!-- MODULE: AuthService --> */
