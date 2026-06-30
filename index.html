@@ -3092,23 +3092,1767 @@ kbd {
   /* <!-- MODULE: Bus --> */
 
   /* <!-- MODULE: Store --> */
-  старт
-  энд
+  /**
+   * @module Store
+   * @description Безопасная обёртка над localStorage.
+   * 
+   * Все операции обёрнуты в try/catch для защиты от:
+   * - Private mode (Safari, Firefox) где localStorage может быть недоступен
+   * - QuotaExceededError при переполнении хранилища
+   * - Ошибок сериализации (циклические ссылки, функции, undefined)
+   * 
+   * Архитектурные принципы:
+   * - Все ключи имеют префикс 'noomium:' для изоляции от других приложений
+   * - Автоматическая сериализация/десериализация JSON
+   * - Значения по умолчанию при отсутствии ключа или ошибке парсинга
+   * - Не имеет зависимостей (самый базовый модуль после Logger)
+   * 
+   * Хранимые данные:
+   * - `noomium:sk` — зашифрованный приватный ключ Nostr
+   * - `noomium:cfg` — runtime конфигурация
+   * - `noomium:lang` — выбранный язык ('ru' | 'en')
+   * - `noomium:appVersion` — версия приложения (для миграций)
+   * 
+   * @namespace Store
+   */
+  DI.register('Store', function() {
+    
+    /**
+     * Префикс для всех ключей в localStorage.
+     * Предотвращает коллизии с другими приложениями на том же домене.
+     * @type {string}
+     */
+    var PREFIX = 'noomium:';
+
+    /**
+     * Проверяет доступность localStorage.
+     * В некоторых браузерах (Safari private mode) localStorage может быть недоступен
+     * или выбрасывать SecurityError при обращении.
+     * 
+     * @returns {boolean} true если localStorage доступен для чтения/записи.
+     */
+    function isAvailable() {
+      try {
+        var testKey = PREFIX + '__test__';
+        localStorage.setItem(testKey, '1');
+        localStorage.removeItem(testKey);
+        return true;
+      } catch (e) {
+        return false;
+      }
+    }
+
+    /**
+     * Читает JSON-значение из localStorage.
+     * 
+     * Алгоритм:
+     * 1. Проверка доступности localStorage
+     * 2. Чтение строки по ключу с префиксом
+     * 3. Парсинг JSON
+     * 4. Возврат значения по умолчанию при любой ошибке
+     * 
+     * @param {string} key - Ключ (без префикса 'noomium:').
+     * @param {*} [def=null] - Значение по умолчанию, если ключа нет или JSON некорректен.
+     * @returns {*} Десериализованное значение или def.
+     * 
+     * @example
+     * Store.get('lang', 'ru')        // → 'ru' (если не сохранён)
+     * Store.get('config', {})        // → {} (если не сохранён)
+     * Store.get('counter', 0)        // → 0 (если не сохранён)
+     */
+    function get(key, def) {
+      if (!isAvailable()) {
+        return def !== undefined ? def : null;
+      }
+      
+      try {
+        var raw = localStorage.getItem(PREFIX + key);
+        if (raw === null) {
+          return def !== undefined ? def : null;
+        }
+        return JSON.parse(raw);
+      } catch (e) {
+        return def !== undefined ? def : null;
+      }
+    }
+
+    /**
+     * Записывает значение в localStorage в виде JSON.
+     * 
+     * Обрабатываемые ошибки:
+     * - QuotaExceededError — хранилище переполнено
+     * - TypeError — значение содержит циклические ссылки или функции
+     * - SecurityError — доступ запрещён (private mode)
+     * 
+     * @param {string} key - Ключ (без префикса 'noomium:').
+     * @param {*} value - Значение (должно быть сериализуемым в JSON).
+     * @returns {boolean} true если запись успешна, false при ошибке.
+     * 
+     * @example
+     * Store.set('lang', 'en')              // → true
+     * Store.set('config', {theme: 'dark'}) // → true
+     * Store.set('data', circularObj)       // → false (ошибка сериализации)
+     */
+    function set(key, value) {
+      if (!isAvailable()) {
+        return false;
+      }
+      
+      try {
+        localStorage.setItem(PREFIX + key, JSON.stringify(value));
+        return true;
+      } catch (e) {
+        return false;
+      }
+    }
+
+    /**
+     * Удаляет ключ из localStorage.
+     * 
+     * @param {string} key - Ключ (без префикса 'noomium:').
+     * @returns {boolean} true если удаление успешно или ключа не было.
+     */
+    function remove(key) {
+      if (!isAvailable()) {
+        return false;
+      }
+      
+      try {
+        localStorage.removeItem(PREFIX + key);
+        return true;
+      } catch (e) {
+        return false;
+      }
+    }
+
+    /**
+     * Проверяет существование ключа в localStorage.
+     * 
+     * @param {string} key - Ключ (без префикса 'noomium:').
+     * @returns {boolean} true если ключ существует.
+     */
+    function has(key) {
+      if (!isAvailable()) {
+        return false;
+      }
+      
+      try {
+        return localStorage.getItem(PREFIX + key) !== null;
+      } catch (e) {
+        return false;
+      }
+    }
+
+    /**
+     * Очищает все ключи приложения из localStorage.
+     * Удаляет только ключи с префиксом 'noomium:', не трогая другие данные.
+     * 
+     * @returns {number} Количество удалённых ключей.
+     */
+    function clearAll() {
+      if (!isAvailable()) {
+        return 0;
+      }
+      
+      var removed = 0;
+      try {
+        var keysToRemove = [];
+        for (var i = 0; i < localStorage.length; i++) {
+          var k = localStorage.key(i);
+          if (k && k.indexOf(PREFIX) === 0) {
+            keysToRemove.push(k);
+          }
+        }
+        
+        for (var j = 0; j < keysToRemove.length; j++) {
+          localStorage.removeItem(keysToRemove[j]);
+          removed++;
+        }
+      } catch (e) {
+        // Игнорируем ошибки при очистке
+      }
+      
+      return removed;
+    }
+
+    /**
+     * Возвращает список всех ключей приложения.
+     * 
+     * @returns {string[]} Массив ключей (без префикса).
+     */
+    function keys() {
+      if (!isAvailable()) {
+        return [];
+      }
+      
+      var result = [];
+      try {
+        for (var i = 0; i < localStorage.length; i++) {
+          var k = localStorage.key(i);
+          if (k && k.indexOf(PREFIX) === 0) {
+            result.push(k.slice(PREFIX.length));
+          }
+        }
+      } catch (e) {
+        // Игнорируем ошибки
+      }
+      
+      return result;
+    }
+
+    /**
+     * Возвращает текущий размер хранилища приложения в байтах (приблизительно).
+     * 
+     * @returns {number} Размер в байтах (0 если недоступно).
+     */
+    function size() {
+      if (!isAvailable()) {
+        return 0;
+      }
+      
+      var total = 0;
+      try {
+        for (var i = 0; i < localStorage.length; i++) {
+          var k = localStorage.key(i);
+          if (k && k.indexOf(PREFIX) === 0) {
+            var v = localStorage.getItem(k);
+            total += (k.length + (v ? v.length : 0)) * 2; // UTF-16 = 2 байта на символ
+          }
+        }
+      } catch (e) {
+        return 0;
+      }
+      
+      return total;
+    }
+
+    /**
+     * Инициализация модуля.
+     * 
+     * @param {AbortSignal} [signal] - Сигнал для автоочистки (не используется).
+     * @returns {void}
+     */
+    function init(signal) {
+      // Store не требует инициализации
+    }
+
+    /**
+     * Уничтожение модуля.
+     * 
+     * @returns {void}
+     */
+    function destroy() {
+      // Store не имеет ресурсов для очистки
+    }
+
+    return {
+      get: get,
+      set: set,
+      remove: remove,
+      has: has,
+      clearAll: clearAll,
+      keys: keys,
+      size: size,
+      isAvailable: isAvailable,
+      init: init,
+      destroy: destroy
+    };
+  }, []);
   /* <!-- MODULE: Store --> */
 
   /* <!-- MODULE: I18n --> */
-  старт
-  энд
+  /**
+   * @typedef {Object<string, string>} I18nDict
+   * @description Словарь переводов: ключ -> переведённая строка.
+   */
+
+  /**
+   * @module I18n
+   * @description Модуль локализации приложения.
+   * 
+   * Поддерживает:
+   * - Множественные языки (ru, en)
+   * - Динамическое добавление словарей через addDict
+   * - Подстановку параметров в строки через {key}
+   * - Fallback цепочку: текущий язык → английский → ключ
+   * - Сохранение выбранного языка в Store
+   * - Уведомление подписчиков через onChange callbacks и Bus
+   * 
+   * Архитектурные принципы:
+   * - Object.create(null) для словарей (защита от прототипных ключей)
+   * - Безопасная обработка onChange callbacks (try/catch)
+   * - Валидация входных данных
+   * - Lifecycle через init(signal) / destroy()
+   * 
+   * События Bus:
+   * - `i18n:change` — смена языка, payload: {lang: string}
+   * 
+   * @namespace I18n
+   */
+  DI.register('I18n', function(Store, Bus) {
+    
+    /**
+     * Ключ для сохранения выбранного языка в Store.
+     * @type {string}
+     */
+    var KEY = 'lang';
+
+    /**
+     * Реестр словарей по языкам.
+     * Используется Object.create(null) для защиты от прототипных ключей.
+     * @type {Object<string, I18nDict>}
+     */
+    var dicts = Object.create(null);
+
+    /**
+     * Текущий активный язык.
+     * @type {string}
+     */
+    var current = 'ru';
+
+    /**
+     * Список подписчиков на смену языка.
+     * @type {Array<function(string): void>}
+     */
+    var listeners = [];
+
+    /**
+     * Язык по умолчанию (fallback).
+     * @type {string}
+     */
+    var DEFAULT_LANG = 'en';
+
+    /**
+     * Подставляет параметры в строку перевода по шаблону {key}.
+     * 
+     * Обрабатывает edge cases:
+     * - null/undefined в params → оставляет {key} как есть
+     * - Отсутствие params → возвращает строку без изменений
+     * - Несуществующие ключи → оставляет {key} как есть
+     * 
+     * @param {string} str - Строка с шаблонами.
+     * @param {Object<string, *>} [params] - Объект параметров для подстановки.
+     * @returns {string} Результирующая строка.
+     * 
+     * @example
+     * format('Привет, {name}!', {name: 'Иван'})  // → 'Привет, Иван!'
+     * format('Ожидают: {count}', {count: 5})      // → 'Ожидают: 5'
+     * format('Ожидают: {count}', {})              // → 'Ожидают: {count}'
+     */
+    function format(str, params) {
+      if (typeof str !== 'string') return '';
+      if (!params || typeof params !== 'object') return str;
+      
+      return str.replace(/\{(\w+)\}/g, function(match, k) {
+        if (params.hasOwnProperty(k) && params[k] !== undefined && params[k] !== null) {
+          return String(params[k]);
+        }
+        return match;
+      });
+    }
+
+    /**
+     * Устанавливает активный язык.
+     * 
+     * Алгоритм:
+     * 1. Валидация языка (должен быть строкой)
+     * 2. Сохранение в Store
+     * 3. Уведомление onChange listeners (с try/catch)
+     * 4. Публикация события i18n:change через Bus
+     * 
+     * @param {string} lang - Код языка ('ru' | 'en').
+     * @returns {boolean} true если язык успешно изменён.
+     */
+    function setLang(lang) {
+      if (typeof lang !== 'string' || !lang) {
+        return false;
+      }
+      
+      current = lang;
+      
+      try {
+        if (Store && Store.set) {
+          Store.set(KEY, current);
+        }
+      } catch (e) {
+        // Игнорируем ошибки Store
+      }
+      
+      for (var i = 0; i < listeners.length; i++) {
+        try {
+          listeners[i](current);
+        } catch (e) {
+          console.error('[I18n] onChange listener error:', e);
+        }
+      }
+      
+      if (Bus && Bus.emit) {
+        try {
+          Bus.emit('i18n:change', { lang: current });
+        } catch (e) {
+          console.error('[I18n] Bus.emit error:', e);
+        }
+      }
+      
+      return true;
+    }
+
+    /**
+     * Возвращает код текущего активного языка.
+     * 
+     * @returns {string} Код языка ('ru' | 'en').
+     */
+    function getLang() {
+      return current;
+    }
+
+    /**
+     * Добавляет или расширяет словарь для указанного языка.
+     * 
+     * Использует Object.assign для мерджа новых ключей с существующими.
+     * Если словарь для языка ещё не существует — создаёт его.
+     * 
+     * @param {string} lang - Код языка ('ru' | 'en').
+     * @param {I18nDict} dict - Словарь переводов.
+     * @returns {void}
+     * 
+     * @example
+     * I18n.addDict('ru', {
+     *   'btn.save': 'Сохранить',
+     *   'btn.cancel': 'Отмена'
+     * });
+     */
+    function addDict(lang, dict) {
+      if (typeof lang !== 'string' || !lang) return;
+      if (!dict || typeof dict !== 'object') return;
+      
+      if (!dicts[lang]) {
+        dicts[lang] = Object.create(null);
+      }
+      
+      Object.assign(dicts[lang], dict);
+    }
+
+    /**
+     * Возвращает перевод по ключу с подстановкой параметров.
+     * 
+     * Fallback цепочка:
+     * 1. Текущий язык → если есть ключ, возвращаем с форматированием
+     * 2. Английский (DEFAULT_LANG) → если есть ключ, возвращаем
+     * 3. Параметр fallback → если передан, возвращаем его
+     * 4. Сам ключ → возвращаем как есть
+     * 
+     * @param {string} key - Ключ перевода.
+     * @param {Object<string, *>} [params] - Параметры для подстановки.
+     * @param {string} [fallback] - Значение по умолчанию, если ключ не найден.
+     * @returns {string} Переведённая строка.
+     * 
+     * @example
+     * I18n.t('btn.save')                    // → 'Сохранить' (если есть перевод)
+     * I18n.t('offline.queue', {count: 5})   // → 'Ожидают: 5'
+     * I18n.t('unknown.key', {}, 'fallback') // → 'fallback'
+     * I18n.t('unknown.key')                 // → 'unknown.key'
+     */
+    function t(key, params, fallback) {
+      if (typeof key !== 'string') {
+        return fallback !== undefined ? String(fallback) : '';
+      }
+      
+      var dict = dicts[current];
+      var val = dict && dict.hasOwnProperty(key) ? dict[key] : undefined;
+      
+      if (val === undefined && current !== DEFAULT_LANG) {
+        var defaultDict = dicts[DEFAULT_LANG];
+        val = defaultDict && defaultDict.hasOwnProperty(key) ? defaultDict[key] : undefined;
+      }
+      
+      var out;
+      if (val !== undefined) {
+        out = val;
+      } else if (fallback !== undefined) {
+        out = String(fallback);
+      } else {
+        out = key;
+      }
+      
+      return format(out, params);
+    }
+
+    /**
+     * Регистрирует подписчика на смену языка.
+     * 
+     * @param {function(string): void} fn - Обработчик, принимающий новый код языка.
+     * @returns {function(): void} Функция для отписки.
+     * 
+     * @example
+     * var unsubscribe = I18n.onChange(function(lang) {
+     *   console.log('Язык изменён на:', lang);
+     * });
+     * 
+     * // Позже:
+     * unsubscribe(); // Отписка
+     */
+    function onChange(fn) {
+      if (typeof fn !== 'function') {
+        return function() {};
+      }
+      
+      listeners.push(fn);
+      
+      return function unsubscribe() {
+        var idx = listeners.indexOf(fn);
+        if (idx > -1) {
+          listeners.splice(idx, 1);
+        }
+      };
+    }
+
+    /**
+     * Возвращает словарь для указанного языка.
+     * Полезно для отладки и мониторинга.
+     * 
+     * @param {string} [lang] - Код языка. Если не указан — текущий.
+     * @returns {I18nDict | null} Словарь или null если язык не зарегистрирован.
+     */
+    function getDict(lang) {
+      var l = lang || current;
+      return dicts[l] ? Object.assign({}, dicts[l]) : null;
+    }
+
+    /**
+     * Возвращает список всех зарегистрированных языков.
+     * 
+     * @returns {string[]} Массив кодов языков.
+     */
+    function getLanguages() {
+      return Object.keys(dicts);
+    }
+
+    /**
+     * Сбрасывает язык к значению по умолчанию.
+     * 
+     * @returns {void}
+     */
+    function reset() {
+      setLang(DEFAULT_LANG);
+    }
+
+    /**
+     * Инициализация модуля.
+     * Загружает сохранённый язык из Store или определяет из navigator.language.
+     * 
+     * @param {AbortSignal} [signal] - Сигнал для автоочистки (не используется).
+     * @returns {void}
+     */
+    function init(signal) {
+      try {
+        var saved = Store ? Store.get(KEY, null) : null;
+        
+        if (saved && typeof saved === 'string' && saved.length > 0) {
+          current = saved;
+        } else {
+          var navLang = (typeof navigator !== 'undefined' && navigator.language) 
+            ? navigator.language.toLowerCase() 
+            : 'ru';
+          current = navLang.indexOf('ru') === 0 ? 'ru' : 'en';
+        }
+      } catch (e) {
+        current = 'ru';
+      }
+    }
+
+    /**
+     * Уничтожение модуля.
+     * Очищает список listeners.
+     * 
+     * @returns {void}
+     */
+    function destroy() {
+      listeners.length = 0;
+    }
+
+    return {
+      t: t,
+      setLang: setLang,
+      getLang: getLang,
+      addDict: addDict,
+      onChange: onChange,
+      getDict: getDict,
+      getLanguages: getLanguages,
+      reset: reset,
+      init: init,
+      destroy: destroy
+    };
+  }, ['Store', 'Bus']);
   /* <!-- MODULE: I18n --> */
 
   /* <!-- MODULE: Config --> */
-  старт
-  энд
+  /**
+   * @typedef {Object} AppConfig
+   * @description Полный объект конфигурации приложения NOOmium.
+   * 
+   * @property {string} room - Nostr-комната (тег #t) для обмена мыслями.
+   * @property {number} threshold - Порог косинусного сходства для local/world (0..1).
+   * @property {number} serendipity - Дельта ниже threshold для сегмента seren.
+   * @property {string[]} relays - Список WebSocket-адресов Nostr-релеев.
+   * @property {number} kQuery - Kind Nostr-события для поискового запроса (21000).
+   * @property {number} kAnswer - Kind Nostr-события для ответа (21001).
+   * @property {string} model - Идентификатор HuggingFace-модели.
+   * @property {number} dim - Размерность вектора эмбеддинга (384).
+   * @property {number} debounce - Задержка debounce для поиска (мс).
+   * @property {number} peerTTL - Время жизни пира в сети (мс).
+   * @property {number} heartbeat - Интервал heartbeat (мс).
+   * @property {number} subWindow - Окно подписки на события Nostr (сек).
+   * @property {number} queryRateLimit - Минимальный интервал между запросами (мс).
+   * @property {string} dbName - Имя базы IndexedDB.
+   * @property {string} storeName - Имя объектного хранилища в IDB.
+   * @property {'dark'|'light'} theme - Активная цветовая тема.
+   * @property {boolean} onboarded - Флаг прохождения онбординга.
+   * @property {number} publishCooldown - Задержка между публикациями (мс).
+   * @property {number} maxAnswersPerQuery - Макс. ответов на один запрос.
+   * @property {number} aiCacheLimit - Макс. размер LRU-кэша векторов.
+   * @property {number} aiEmbedTimeout - Таймаут запроса эмбеддинга (мс).
+   * @property {number} aiLoadRetries - Кол-во попыток загрузки модели.
+   * @property {number} aiLoadMaxBackoff - Макс. задержка между попытками (мс).
+   * @property {number} sharedCacheTTL - TTL кэша shared-векторов (мс).
+   * @property {number} seenMaxSize - Макс. размер SetSeen дубликатов.
+   * @property {number} seenKeepSize - Сколько последних ID сохранять.
+   * @property {number} outboxBatchSize - Размер батча отправки из outbox.
+   * @property {number} relayErrorThreshold - Кол-во ошибок до circuit-break.
+   * @property {number} relayCircuitBreakTime - Время блокировки релея (мс).
+   * @property {number} relayBackoff1 - Первый уровень backoff (мс).
+   * @property {number} relayBackoff2 - Второй уровень backoff (мс).
+   * @property {number} maxAnswersCache - Макс. размер кэша ответов.
+   * @property {number} answersTTL - TTL ответа в кэше (мс).
+   * @property {number} answerStaggerDelay - Задержка между ответами (мс).
+   * @property {number} reconnectMaxAttempts - Макс. попыток переподключения.
+   * @property {number} reconnectBaseDelay - Базовая задержка reconnect (мс).
+   * @property {number} reconnectMaxDelay - Макс. задержка reconnect (мс).
+   * @property {number} baseChunkSize - Размер чанка при пагинации IDB.
+   * @property {number} truncateTextLength - Макс. длина текста в списке.
+   * @property {number} noteViewAnimationDelay - Задержка анимации NoteView (мс).
+   * @property {number} vectorSimilarityThreshold - Порог для дедупликации запросов.
+   * @property {number} baseSearchDebounce - Debounce текстового поиска (мс).
+   * @property {number} maxPasswordAttempts - Макс. попыток ввода пароля.
+   * @property {number} toastMaxVisible - Макс. одновременно видимых тостов.
+   * @property {number} toastDefaultDuration - Длительность тоста (мс).
+   * @property {number} progressFocusDelay - Задержка фокуса в Progress (мс).
+   * @property {number} modalFocusDelay - Задержка фокуса в Modal (мс).
+   * @property {number} maxAnswerTextLength - Макс. длина текста ответа.
+   * @property {number} offlineQueueMaxSize - Макс. размер offline-очереди.
+   * @property {number} offlineFlushInterval - Интервал flush очереди (мс).
+   */
+
+  /**
+   * @module Config
+   * @description Runtime-конфигурация приложения с персистентностью.
+   * 
+   * Архитектурные принципы:
+   * - Whitelist валидация ключей (защита от опечаток)
+   * - Глубокое копирование возвращаемых объектов/массивов
+   * - Явное сохранение через save() (set не сохраняет автоматически)
+   * - Эмиссия события config:changed через Bus при изменении
+   * - Миграции для совместимости с будущими версиями
+   * 
+   * События Bus:
+   * - `config:changed` — изменение параметра, payload: {key, value, reset}
+   * 
+   * @namespace Config
+   */
+  DI.register('Config', function(Store, Logger, Bus) {
+    
+    /**
+     * Ключ для сохранения конфигурации в Store.
+     * @type {string}
+     */
+    var KEY = 'cfg';
+
+    /**
+     * Текущая версия схемы конфига (для миграций).
+     * @type {number}
+     */
+    var SCHEMA_VERSION = 2;
+
+    /**
+     * Значения по умолчанию для всех параметров приложения.
+     * @type {AppConfig}
+     */
+    var defaults = {
+      _schemaVersion: SCHEMA_VERSION,
+      
+      room: 'noomium-main',
+      threshold: 0.7,
+      serendipity: 0.3,
+      relays: ['wss://offchain.pub', 'wss://relay.nostr.info', 'wss://nostr.mom'],
+      
+      kQuery: 21000,
+      kAnswer: 21001,
+      
+      model: 'Xenova/paraphrase-multilingual-MiniLM-L12-v2',
+      dim: 384,
+      debounce: 800,
+      
+      peerTTL: 60000,
+      heartbeat: 30000,
+      subWindow: 300,
+      queryRateLimit: 3000,
+      
+      dbName: 'noomium_v8',
+      storeName: 'notes',
+      theme: 'dark',
+      onboarded: false,
+      
+      publishCooldown: 1500,
+      maxAnswersPerQuery: 5,
+      aiCacheLimit: 300,
+      aiEmbedTimeout: 15000,
+      aiLoadRetries: 2,
+      aiLoadMaxBackoff: 30000,
+      sharedCacheTTL: 60000,
+      
+      seenMaxSize: 1000,
+      seenKeepSize: 500,
+      outboxBatchSize: 2,
+      
+      relayErrorThreshold: 5,
+      relayCircuitBreakTime: 120000,
+      relayBackoff1: 15000,
+      relayBackoff2: 30000,
+      
+      maxAnswersCache: 100,
+      answersTTL: 300000,
+      answerStaggerDelay: 500,
+      
+      reconnectMaxAttempts: 10,
+      reconnectBaseDelay: 1000,
+      reconnectMaxDelay: 60000,
+      
+      baseChunkSize: 20,
+      truncateTextLength: 120,
+      noteViewAnimationDelay: 200,
+      
+      vectorSimilarityThreshold: 0.98,
+      baseSearchDebounce: 200,
+      maxPasswordAttempts: 3,
+      
+      toastMaxVisible: 3,
+      toastDefaultDuration: 2200,
+      progressFocusDelay: 50,
+      modalFocusDelay: 50,
+      
+      maxAnswerTextLength: 10000,
+      offlineQueueMaxSize: 100,
+      offlineFlushInterval: 30000
+    };
+
+    /**
+     * Whitelist валидных ключей конфигурации.
+     * Используется для защиты от опечаток при set().
+     * @type {Set<string>}
+     */
+    var validKeys = new Set(Object.keys(defaults).filter(function(k) {
+      return k !== '_schemaVersion';
+    }));
+
+    /**
+     * Текущее состояние конфигурации (defaults + сохранённые значения).
+     * @type {AppConfig}
+     */
+    var state = Object.assign({}, defaults);
+
+    /**
+     * Глубокое клонирование значения.
+     * Массивы и объекты копируются рекурсивно.
+     * 
+     * @param {*} value - Значение для клонирования.
+     * @returns {*} Клон значения.
+     */
+    function deepClone(value) {
+      if (value === null || typeof value !== 'object') {
+        return value;
+      }
+      if (Array.isArray(value)) {
+        var arr = [];
+        for (var i = 0; i < value.length; i++) {
+          arr.push(deepClone(value[i]));
+        }
+        return arr;
+      }
+      var result = {};
+      for (var key in value) {
+        if (value.hasOwnProperty(key)) {
+          result[key] = deepClone(value[key]);
+        }
+      }
+      return result;
+    }
+
+    /**
+     * Применяет миграции для совместимости с будущими версиями.
+     * Вызывается при загрузке из Store, если _schemaVersion отличается.
+     * 
+     * @param {Object} saved - Загруженная конфигурация.
+     * @returns {Object} Мигрированная конфигурация.
+     */
+    function migrate(saved) {
+      var savedVersion = saved._schemaVersion || 1;
+      
+      if (savedVersion < 2) {
+        if (Logger) {
+          Logger.info('Config', 'Migrating schema from v' + savedVersion + ' to v2');
+        }
+      }
+      
+      saved._schemaVersion = SCHEMA_VERSION;
+      return saved;
+    }
+
+    /**
+     * Возвращает копию объекта значений по умолчанию.
+     * 
+     * @returns {AppConfig} Клон defaults.
+     */
+    function getDefaults() {
+      return deepClone(defaults);
+    }
+
+    /**
+     * Читает значение параметра конфигурации.
+     * Возвращает глубокую копию для массивов и объектов.
+     * 
+     * @param {keyof AppConfig} k - Имя параметра.
+     * @param {*} [def] - Значение по умолчанию, если ключа нет в state.
+     * @returns {*} Значение параметра или def.
+     * 
+     * @example
+     * Config.get('threshold', 0.7)  // → 0.7
+     * Config.get('relays', [])      // → ['wss://...', ...] (копия массива)
+     * Config.get('unknown')         // → undefined
+     */
+    function get(k, def) {
+      if (!validKeys.has(k)) {
+        if (Logger) {
+          Logger.warn('Config', 'Unknown key requested: ' + k);
+        }
+        return def;
+      }
+      
+      var val = state.hasOwnProperty(k) ? state[k] : def;
+      return deepClone(val);
+    }
+
+    /**
+     * Устанавливает значение параметра в runtime-состоянии.
+     * 
+     * ВАЖНО: НЕ сохраняет в Store автоматически — нужен явный вызов save().
+     * Эмитит событие config:changed через Bus.
+     * 
+     * @param {keyof AppConfig} k - Имя параметра.
+     * @param {*} v - Новое значение.
+     * @returns {boolean} true если значение успешно установлено.
+     * 
+     * @example
+     * Config.set('threshold', 0.8);
+     * Config.save();  // Явное сохранение
+     */
+    function set(k, v) {
+      if (!validKeys.has(k)) {
+        if (Logger) {
+          Logger.warn('Config', 'Attempt to set unknown key: ' + k);
+        }
+        return false;
+      }
+      
+      state[k] = v;
+      
+      if (Bus && Bus.emit) {
+        try {
+          Bus.emit('config:changed', { key: k, value: deepClone(v) });
+        } catch (e) {
+          if (Logger) Logger.error('Config', 'Bus.emit failed', e);
+        }
+      }
+      
+      return true;
+    }
+
+    /**
+     * Сохраняет текущее состояние конфигурации в Store (localStorage).
+     * 
+     * @returns {boolean} true если сохранение успешно.
+     */
+    function save() {
+      try {
+        if (Store && Store.set) {
+          return Store.set(KEY, state);
+        }
+        return false;
+      } catch (e) {
+        if (Logger) Logger.warn('Config', 'save failed', e);
+        return false;
+      }
+    }
+
+    /**
+     * Сбрасывает один параметр к значению по умолчанию.
+     * 
+     * @param {keyof AppConfig} k - Имя параметра.
+     * @returns {boolean} true если сброс выполнен.
+     * 
+     * @example
+     * Config.reset('threshold');  // → threshold = 0.7 (дефолт)
+     * Config.save();
+     */
+    function reset(k) {
+      if (!validKeys.has(k)) {
+        return false;
+      }
+      
+      state[k] = deepClone(defaults[k]);
+      
+      if (Bus && Bus.emit) {
+        try {
+          Bus.emit('config:changed', { key: k, value: state[k], reset: true });
+        } catch (e) {
+          if (Logger) Logger.error('Config', 'Bus.emit failed', e);
+        }
+      }
+      
+      return true;
+    }
+
+    /**
+     * Сбрасывает ВСЕ параметры к значениям по умолчанию.
+     * 
+     * @returns {void}
+     */
+    function resetAll() {
+      state = Object.assign({}, defaults);
+      
+      if (Bus && Bus.emit) {
+        try {
+          Bus.emit('config:changed', { reset: true });
+        } catch (e) {
+          if (Logger) Logger.error('Config', 'Bus.emit failed', e);
+        }
+      }
+    }
+
+    /**
+     * Возвращает копию всех настроек.
+     * 
+     * @returns {AppConfig} Клон state.
+     */
+    function getAll() {
+      return deepClone(state);
+    }
+
+    /**
+     * Возвращает список всех валидных ключей конфигурации.
+     * 
+     * @returns {string[]} Массив ключей.
+     */
+    function getKeys() {
+      return Array.from(validKeys);
+    }
+
+    /**
+     * Проверяет, существует ли ключ в конфиге.
+     * 
+     * @param {string} k - Имя параметра.
+     * @returns {boolean} true если ключ валидный.
+     */
+    function has(k) {
+      return validKeys.has(k);
+    }
+
+    /**
+     * Инициализация модуля.
+     * Загружает сохранённую конфигурацию из Store, применяет миграции.
+     * 
+     * @param {AbortSignal} [signal] - Сигнал для автоочистки (не используется).
+     * @returns {void}
+     */
+    function init(signal) {
+      try {
+        var saved = Store ? Store.get(KEY, null) : null;
+        
+        if (saved && typeof saved === 'object' && !Array.isArray(saved)) {
+          var migrated = migrate(saved);
+          
+          for (var key in migrated) {
+            if (migrated.hasOwnProperty(key) && validKeys.has(key)) {
+              state[key] = migrated[key];
+            }
+          }
+          
+          state._schemaVersion = SCHEMA_VERSION;
+          
+          if (Logger) {
+            Logger.info('Config', 'Loaded from Store', { keys: Object.keys(state).length });
+          }
+        } else {
+          if (Logger) {
+            Logger.info('Config', 'Using defaults (no saved config)');
+          }
+        }
+      } catch (e) {
+        if (Logger) Logger.warn('Config', 'Load failed, using defaults', e);
+        state = Object.assign({}, defaults);
+      }
+    }
+
+    /**
+     * Уничтожение модуля.
+     * Очищает ресурсы.
+     * 
+     * @returns {void}
+     */
+    function destroy() {
+      state = Object.assign({}, defaults);
+    }
+
+    return {
+      defaults: getDefaults,
+      get: get,
+      set: set,
+      save: save,
+      reset: reset,
+      resetAll: resetAll,
+      getAll: getAll,
+      getKeys: getKeys,
+      has: has,
+      init: init,
+      destroy: destroy
+    };
+  }, ['Store', 'Logger', 'Bus']);
   /* <!-- MODULE: Config --> */
 
   /* <!-- MODULE: DB --> */
-  старт
-  энд
+  /**
+   * @typedef {Object} IDBMockStore
+   * @description Мок-объект хранилища для fallback на Map.
+   * @property {function(string): Object} get - Чтение по ключу.
+   * @property {function(Object): void} put - Запись объекта.
+   * @property {function(string): void} delete - Удаление по ключу.
+   * @property {function(): Object[]} getAll - Чтение всех объектов.
+   */
+
+  /**
+   * @typedef {Object} Note
+   * @description Структура заметки в базе данных.
+   * @property {string} id - Уникальный идентификатор.
+   * @property {string} text - Текст мысли.
+   * @property {Vector} [vector] - Вектор эмбеддинга.
+   * @property {boolean} shared - Флаг публикации в сеть.
+   * @property {number} createdAt - Timestamp создания.
+   * @property {number} [updatedAt] - Timestamp обновления.
+   * @property {string} [parentId] - ID родительской заметки.
+   * @property {string[]} [children] - Массив ID дочерних заметок.
+   */
+
+  /**
+   * @module DB
+   * @description Абстракция над IndexedDB с fallback на in-memory Map.
+   * 
+   * Архитектурные принципы:
+   * - Все операции возвращают Promise
+   * - Эмиссия события `db:change` через Bus после каждой мутации
+   * - Fallback на in-memory Map при недоступности IDB
+   * - Лимит 10,000 заметок в fallback (защита от OOM)
+   * - Валидация циклических зависимостей в addChild (DFS с лимитом 10)
+   * - Транзакционная целостность через tx() wrapper
+   * 
+   * События Bus:
+   * - `db:change` — изменение в базе (put/del/bulkPut/reset)
+   * 
+   * @namespace DB
+   */
+  DI.register('DB', function(Config, Logger, Bus) {
+    
+    /**
+     * Инстанс открытой IndexedDB (null, если IDB недоступен).
+     * @type {IDBDatabase | null}
+     */
+    var db = null;
+
+    /**
+     * In-memory fallback-хранилище (используется, если IDB недоступен).
+     * @type {Map<string, Note> | null}
+     */
+    var mem = null;
+
+    /**
+     * Максимальное количество заметок в in-memory fallback.
+     * @type {number}
+     */
+    var MAX_FALLBACK_NOTES = 10000;
+
+    /**
+     * Флаг готовности БД (успешно открыта или fallback создан).
+     * @type {boolean}
+     */
+    var isReady = false;
+
+    /**
+     * Promise открытия БД (для предотвращения повторных open).
+     * @type {Promise<void> | null}
+     */
+    var openPromise = null;
+
+    /**
+     * Возвращает имя базы данных из конфигурации.
+     * @returns {string}
+     */
+    function dbName() {
+      return Config ? Config.get('dbName', 'noomium_v8') : 'noomium_v8';
+    }
+
+    /**
+     * Возвращает имя объектного хранилища из конфигурации.
+     * @returns {string}
+     */
+    function storeName() {
+      return Config ? Config.get('storeName', 'notes') : 'notes';
+    }
+
+    /**
+     * Публикует событие db:change через Bus после любой мутации данных.
+     * Используется другими модулями для инвалидации кэшей.
+     * @returns {void}
+     */
+    function emitChange() {
+      if (Bus && Bus.emit) {
+        try {
+          Bus.emit('db:change');
+        } catch (e) {
+          if (Logger) Logger.error('DB', 'emitChange failed', e);
+        }
+      }
+    }
+
+    /**
+     * Открывает соединение с IndexedDB (или создаёт in-memory fallback).
+     * Кэширует результат в openPromise для предотвращения повторных вызовов.
+     * 
+     * @returns {Promise<IDBDatabase | null>} Promise с инстансом IDB или null (fallback).
+     */
+    function open() {
+      if (db) return Promise.resolve(db);
+      if (mem) return Promise.resolve(null);
+      if (openPromise) return openPromise;
+
+      openPromise = new Promise(function(resolve) {
+        if (typeof indexedDB === 'undefined') {
+          if (Logger) Logger.warn('DB', 'IndexedDB not supported, using in-memory fallback');
+          mem = new Map();
+          isReady = true;
+          resolve(null);
+          return;
+        }
+
+        try {
+          var req = indexedDB.open(dbName(), 1);
+
+          req.onupgradeneeded = function(e) {
+            var d = e.target.result;
+            var s = storeName();
+            if (!d.objectStoreNames.contains(s)) {
+              d.createObjectStore(s, { keyPath: 'id' });
+            }
+          };
+
+          req.onsuccess = function(e) {
+            db = e.target.result;
+            isReady = true;
+            if (Logger) Logger.info('DB', 'IndexedDB opened: ' + dbName());
+            resolve(db);
+          };
+
+          req.onerror = function() {
+            if (Logger) Logger.warn('DB', 'IDB open error, using fallback', req.error);
+            mem = new Map();
+            isReady = true;
+            resolve(null);
+          };
+
+          req.onblocked = function() {
+            if (Logger) Logger.warn('DB', 'IDB blocked, using fallback');
+            mem = new Map();
+            isReady = true;
+            resolve(null);
+          };
+        } catch (err) {
+          if (Logger) Logger.warn('DB', 'IDB unsupported, using fallback', err);
+          mem = new Map();
+          isReady = true;
+          resolve(null);
+        }
+      });
+
+      return openPromise;
+    }
+
+    /**
+     * Выполняет операцию внутри IDB-транзакции (или в in-memory fallback).
+     * 
+     * Для fallback использует микро-таски (Promise.resolve().then) вместо setTimeout,
+     * чтобы не блокировать event loop при массовых операциях.
+     * 
+     * @param {'readonly' | 'readwrite'} mode - Режим транзакции.
+     * @param {function(IDBObjectStore | IDBMockStore): *} fn - Функция операции.
+     * @returns {Promise<*>} Promise с результатом операции.
+     */
+    function tx(mode, fn) {
+      return open().then(function(d) {
+        return new Promise(function(resolve, reject) {
+          try {
+            if (!d) {
+              // In-memory fallback
+              var mockStore = {
+                get: function(k) {
+                  return { result: mem.get(k) };
+                },
+                put: function(v) {
+                  if (!v || !v.id) {
+                    throw new Error('Note must have id');
+                  }
+                  mem.set(v.id, v);
+                  if (mem.size > MAX_FALLBACK_NOTES) {
+                    var oldest = mem.keys().next().value;
+                    mem.delete(oldest);
+                    if (Logger) Logger.warn('DB', 'Fallback limit reached, evicted oldest');
+                  }
+                  return {};
+                },
+                delete: function(k) {
+                  mem.delete(k);
+                  return {};
+                },
+                getAll: function() {
+                  return { result: Array.from(mem.values()) };
+                }
+              };
+
+              var req = { result: null, onsuccess: null, onerror: null };
+              try {
+                var r = fn(mockStore);
+                if (!r || typeof r.onsuccess !== 'function') {
+                  resolve(r && r.result !== undefined ? r.result : r);
+                  return;
+                }
+                req.result = r.result !== undefined ? r.result : r;
+                req.onsuccess = function() { resolve(req.result); };
+                req.onerror = function(e) { reject(e); };
+                
+                Promise.resolve().then(function() {
+                  if (req.onsuccess) req.onsuccess();
+                });
+              } catch (e) {
+                req.onerror = function() { reject(e); };
+                Promise.resolve().then(function() {
+                  if (req.onerror) req.onerror();
+                });
+              }
+              return;
+            }
+
+            // Реальная IDB транзакция
+            var transaction = d.transaction(storeName(), mode);
+            var store = transaction.objectStore(storeName());
+            var r = fn(store);
+            r.onsuccess = function() { resolve(r.result); };
+            r.onerror = function() {
+              if (Logger) Logger.warn('DB', 'IDB op error', r.error);
+              reject(r.error);
+            };
+          } catch (err) {
+            if (Logger) Logger.warn('DB', 'tx error', err);
+            reject(err);
+          }
+        });
+      });
+    }
+
+    /**
+     * Проверяет наличие циклических зависимостей в генеалогическом древе.
+     * Использует DFS с лимитом глубины 10.
+     * 
+     * @param {string} parentId - ID предполагаемого родителя.
+     * @param {string} childId - ID предполагаемого ребёнка.
+     * @param {Set<string>} [visited] - Set посещённых ID.
+     * @param {number} [depth] - Текущая глубина обхода.
+     * @returns {Promise<boolean>} true если цикл обнаружен.
+     */
+    function checkCycle(parentId, childId, visited, depth) {
+      if (!visited) visited = new Set();
+      if (!depth) depth = 0;
+
+      if (depth > 10) {
+        if (Logger) Logger.warn('DB', 'checkCycle depth limit reached');
+        return Promise.resolve(true);
+      }
+      
+      if (visited.has(parentId)) {
+        return Promise.resolve(parentId === childId);
+      }
+      
+      visited.add(parentId);
+
+      return tx('readonly', function(s) {
+        return s.get(parentId);
+      }).then(function(note) {
+        if (!note || !note.parentId) {
+          return Promise.resolve(false);
+        }
+        if (note.parentId === childId) {
+          return Promise.resolve(true);
+        }
+        return checkCycle(note.parentId, childId, visited, depth + 1);
+      }).catch(function(err) {
+        if (Logger) Logger.warn('DB', 'checkCycle error', err);
+        return Promise.resolve(false);
+      });
+    }
+
+    /**
+     * Создаёт или обновляет заметку в хранилище.
+     * Эмитит db:change после успешной записи.
+     * 
+     * @param {Note} note - Объект заметки с обязательным полем id.
+     * @returns {Promise<Note>} Promise с сохранённой заметкой.
+     * @throws {Error} Если note не имеет поля id.
+     * 
+     * @example
+     * DB.put({
+     *   id: 'n1234567890',
+     *   text: 'Моя мысль',
+     *   shared: false,
+     *   createdAt: Date.now()
+     * });
+     */
+    function put(note) {
+      if (!note || !note.id) {
+        return Promise.reject(new Error('Note must have id'));
+      }
+      
+      return tx('readwrite', function(s) {
+        return s.put(note);
+      }).then(function(res) {
+        emitChange();
+        return note;
+      });
+    }
+
+    /**
+     * Читает одну заметку по её идентификатору.
+     * 
+     * @param {string} id - Уникальный ID заметки.
+     * @returns {Promise<Note | undefined>} Promise с заметкой или undefined.
+     */
+    function get(id) {
+      if (!id || typeof id !== 'string') {
+        return Promise.resolve(undefined);
+      }
+      
+      return tx('readonly', function(s) {
+        return s.get(id);
+      });
+    }
+
+    /**
+     * Удаляет заметку по идентификатору.
+     * Эмитит db:change после успешного удаления.
+     * 
+     * @param {string} id - Уникальный ID заметки.
+     * @returns {Promise<void>} Promise, разрешающийся после удаления.
+     */
+    function del(id) {
+      if (!id || typeof id !== 'string') {
+        return Promise.resolve();
+      }
+      
+      return tx('readwrite', function(s) {
+        return s.delete(id);
+      }).then(function(res) {
+        emitChange();
+        return res;
+      });
+    }
+
+    /**
+     * Возвращает все заметки из хранилища.
+     * 
+     * @returns {Promise<Note[]>} Promise с массивом всех заметок.
+     */
+    function all() {
+      return tx('readonly', function(s) {
+        return s.getAll();
+      });
+    }
+
+    /**
+     * Возвращает порцию заметок через IDB-курсор (для экономии памяти).
+     * В fallback-режиме использует slice на массиве.
+     * 
+     * @param {number} offset - Количество пропускаемых записей.
+     * @param {number} limit - Макс. количество возвращаемых записей.
+     * @returns {Promise<Note[]>} Promise с массивом заметок.
+     */
+    function getAllPaginated(offset, limit) {
+      return open().then(function(d) {
+        return new Promise(function(resolve, reject) {
+          if (!d) {
+            var allNotes = mem ? Array.from(mem.values()) : [];
+            resolve(allNotes.slice(offset, offset + limit));
+            return;
+          }
+
+          var transaction = d.transaction(storeName(), 'readonly');
+          var store = transaction.objectStore(storeName());
+          var request = store.openCursor();
+          var result = [];
+          var advanced = false;
+
+          request.onsuccess = function(event) {
+            var cursor = event.target.result;
+            if (!cursor) {
+              resolve(result);
+              return;
+            }
+            if (!advanced && offset > 0) {
+              advanced = true;
+              try {
+                cursor.advance(offset);
+              } catch (e) {
+                resolve(result);
+              }
+              return;
+            }
+            result.push(cursor.value);
+            if (result.length >= limit) {
+              resolve(result);
+              return;
+            }
+            cursor.continue();
+          };
+
+          request.onerror = function() {
+            if (Logger) Logger.warn('DB', 'cursor error', request.error);
+            reject(request.error);
+          };
+        });
+      });
+    }
+
+    /**
+     * Массовая вставка/обновление заметок в одной транзакции.
+     * Эмитит db:change только один раз после завершения всей операции.
+     * 
+     * @param {Note[]} notes - Массив заметок для записи.
+     * @returns {Promise<number>} Promise с количеством записанных заметок.
+     */
+    function bulkPut(notes) {
+      if (!Array.isArray(notes) || notes.length === 0) {
+        return Promise.resolve(0);
+      }
+
+      return open().then(function(d) {
+        return new Promise(function(resolve, reject) {
+          try {
+            if (!d) {
+              var count = 0;
+              for (var i = 0; i < notes.length; i++) {
+                var note = notes[i];
+                if (note && note.id) {
+                  mem.set(note.id, note);
+                  count++;
+                  if (mem.size > MAX_FALLBACK_NOTES) {
+                    var oldest = mem.keys().next().value;
+                    mem.delete(oldest);
+                  }
+                }
+              }
+              emitChange();
+              resolve(count);
+              return;
+            }
+
+            var transaction = d.transaction(storeName(), 'readwrite');
+            var store = transaction.objectStore(storeName());
+            var written = 0;
+
+            for (var j = 0; j < notes.length; j++) {
+              if (notes[j] && notes[j].id) {
+                store.put(notes[j]);
+                written++;
+              }
+            }
+
+            transaction.oncomplete = function() {
+              emitChange();
+              resolve(written);
+            };
+            transaction.onerror = function() {
+              reject(transaction.error);
+            };
+          } catch (err) {
+            reject(err);
+          }
+        });
+      });
+    }
+
+    /**
+     * Добавляет ID дочерней заметки в массив children родительской заметки.
+     * 
+     * Валидация:
+     * - Отклоняет self-reference (parentId === childId)
+     * - Проверяет циклические зависимости через checkCycle()
+     * - Если parentId не найден в БД — операция игнорируется
+     * 
+     * @param {string} parentId - ID родительской заметки.
+     * @param {string} childId - ID дочерней заметки.
+     * @returns {Promise<boolean>} Promise: true если связь добавлена.
+     */
+    function addChild(parentId, childId) {
+      if (!parentId || !childId) {
+        return Promise.resolve(false);
+      }
+
+      if (parentId === childId) {
+        if (Logger) Logger.warn('DB', 'addChild: self-reference rejected');
+        return Promise.resolve(false);
+      }
+
+      return checkCycle(parentId, childId).then(function(hasCycle) {
+        if (hasCycle) {
+          if (Logger) Logger.warn('DB', 'addChild: cycle detected, rejected');
+          return Promise.resolve(false);
+        }
+
+        return tx('readonly', function(s) {
+          return s.get(parentId);
+        }).then(function(parent) {
+          if (!parent) {
+            return Promise.resolve(false);
+          }
+
+          if (!Array.isArray(parent.children)) {
+            parent.children = [];
+          }
+
+          if (parent.children.indexOf(childId) !== -1) {
+            return Promise.resolve(false);
+          }
+
+          parent.children.push(childId);
+
+          return tx('readwrite', function(s) {
+            return s.put(parent);
+          }).then(function() {
+            emitChange();
+            return true;
+          });
+        });
+      }).catch(function(e) {
+        if (Logger) Logger.warn('DB', 'addChild fail', e);
+        return Promise.resolve(false);
+      });
+    }
+
+    /**
+     * Удаляет ID дочерней заметки из массива children родительской заметки.
+     * 
+     * @param {string} parentId - ID родительской заметки.
+     * @param {string} childId - ID дочерней заметки для удаления.
+     * @returns {Promise<boolean>} Promise: true если связь удалена.
+     */
+    function removeChild(parentId, childId) {
+      if (!parentId || !childId) {
+        return Promise.resolve(false);
+      }
+
+      return tx('readonly', function(s) {
+        return s.get(parentId);
+      }).then(function(parent) {
+        if (!parent || !Array.isArray(parent.children)) {
+          return Promise.resolve(false);
+        }
+
+        var idx = parent.children.indexOf(childId);
+        if (idx === -1) {
+          return Promise.resolve(false);
+        }
+
+        parent.children.splice(idx, 1);
+
+        return tx('readwrite', function(s) {
+          return s.put(parent);
+        }).then(function() {
+          emitChange();
+          return true;
+        });
+      }).catch(function(e) {
+        if (Logger) Logger.warn('DB', 'removeChild fail', e);
+        return Promise.resolve(false);
+      });
+    }
+
+    /**
+     * Возвращает количество заметок в хранилище.
+     * 
+     * @returns {Promise<number>} Promise с количеством заметок.
+     */
+    function count() {
+      return open().then(function(d) {
+        if (!d) {
+          return mem ? mem.size : 0;
+        }
+
+        return new Promise(function(resolve, reject) {
+          var transaction = d.transaction(storeName(), 'readonly');
+          var store = transaction.objectStore(storeName());
+          var request = store.count();
+
+          request.onsuccess = function() {
+            resolve(request.result);
+          };
+          request.onerror = function() {
+            reject(request.error);
+          };
+        });
+      });
+    }
+
+    /**
+     * Возвращает все shared-заметки из хранилища.
+     * 
+     * @returns {Promise<Note[]>} Promise с массивом shared-заметок.
+     */
+    function getShared() {
+      return all().then(function(notes) {
+        return notes.filter(function(n) {
+          return n && n.shared === true;
+        });
+      });
+    }
+
+    /**
+     * Полностью удаляет базу данных и очищает in-memory fallback.
+     * Используется для сброса всех данных пользователя.
+     * Эмитит db:change после завершения.
+     * 
+     * @returns {Promise<void>} Promise, разрешающийся после удаления.
+     */
+    function reset() {
+      if (db) {
+        try {
+          db.close();
+        } catch (e) {
+          if (Logger) Logger.warn('DB', 'close error', e);
+        }
+        db = null;
+      }
+      if (mem) {
+        mem.clear();
+      }
+      openPromise = null;
+      isReady = false;
+
+      return new Promise(function(resolve) {
+        if (typeof indexedDB === 'undefined') {
+          emitChange();
+          resolve();
+          return;
+        }
+
+        try {
+          var req = indexedDB.deleteDatabase(dbName());
+          req.onsuccess = req.onerror = req.onblocked = function() {
+            emitChange();
+            if (Logger) Logger.info('DB', 'Database reset');
+            resolve();
+          };
+        } catch (e) {
+          emitChange();
+          resolve();
+        }
+      });
+    }
+
+    /**
+     * Проверяет готовность БД к работе.
+     * 
+     * @returns {boolean} true если БД открыта или fallback создан.
+     */
+    function ready() {
+      return isReady;
+    }
+
+    /**
+     * Проверяет, используется ли in-memory fallback.
+     * 
+     * @returns {boolean} true если используется fallback.
+     */
+    function isFallback() {
+      return mem !== null;
+    }
+
+    /**
+     * Инициализация модуля.
+     * Открывает БД при старте приложения.
+     * 
+     * @param {AbortSignal} [signal] - Сигнал для автоочистки.
+     * @returns {void}
+     */
+    function init(signal) {
+      open().catch(function(err) {
+        if (Logger) Logger.error('DB', 'init open failed', err);
+      });
+    }
+
+    /**
+     * Уничтожение модуля.
+     * Закрывает соединение с IDB, очищает fallback.
+     * 
+     * @returns {void}
+     */
+    function destroy() {
+      if (db) {
+        try {
+          db.close();
+        } catch (e) {
+          // Игнорируем ошибки закрытия
+        }
+        db = null;
+      }
+      if (mem) {
+        mem.clear();
+        mem = null;
+      }
+      openPromise = null;
+      isReady = false;
+    }
+
+    return {
+      put: put,
+      get: get,
+      del: del,
+      all: all,
+      getAllPaginated: getAllPaginated,
+      bulkPut: bulkPut,
+      addChild: addChild,
+      removeChild: removeChild,
+      count: count,
+      getShared: getShared,
+      reset: reset,
+      ready: ready,
+      isFallback: isFallback,
+      init: init,
+      destroy: destroy
+    };
+  }, ['Config', 'Logger', 'Bus']);
   /* <!-- MODULE: DB --> */
 
   /* <!-- MODULE: AI --> */
