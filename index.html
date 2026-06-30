@@ -5977,8 +5977,994 @@ kbd {
   /* <!-- MODULE: Crypto --> */
 
   /* <!-- MODULE: NetTransport --> */
-  старт
-  энд
+  /**
+   * @typedef {Object} NostrEvent
+   * @description Nostr-событие (упрощённая типизация).
+   * @property {string} id - ID события (64 hex символа).
+   * @property {string} pubkey - Публичный ключ автора (64 hex символа).
+   * @property {number} created_at - Unix timestamp создания.
+   * @property {number} kind - Kind события (21000, 21001 и т.д.).
+   * @property {Array} tags - Массив тегов.
+   * @property {string} content - Содержимое события (JSON для наших kinds).
+   * @property {string} sig - Подпись (64 hex символа).
+   */
+
+  /**
+   * @typedef {'disconnected'|'connecting'|'connected'|'reconnecting'|'failed'} NetStatus
+   * @description Статус подключения к сети.
+   */
+
+  /**
+   * @typedef {Object} NetworkAnswer
+   * @description Сетевой ответ на поисковый запрос.
+   * @property {string} id - ID события ответа.
+   * @property {string} text - Текст заметки.
+   * @property {Vector} vector - Вектор заметки.
+   * @property {number} score - Score из ответа.
+   * @property {number} [z_score] - Z-score из ответа.
+   * @property {string} peer - Короткий ID пира (первые 6 символов).
+   * @property {string} fullPubkey - Полный pubkey пира.
+   * @property {number} createdAt - Timestamp получения.
+   * @property {string} queryId - ID запроса, на который получен ответ.
+   */
+
+  /**
+   * @module NetTransport
+   * @description Тонкий транспорт для Nostr WebSocket.
+   * 
+   * Архитектурные принципы:
+   * - Не знает о бизнес-логике (заметки, поиск, фокус)
+   * - Единая глобальная подписка на kinds 21000, 21001
+   * - Ephemeral events (20000-29999) — релеи НЕ хранят, только ретранслируют
+   * - Делегирует обработку событий в EventRouter через Bus
+   * - Хранит peers Map для heartbeat и answers для текущих ответов
+   * 
+   * Зона ответственности:
+   * - WebSocket pool (через nostr-tools)
+   * - Управление приватным ключом (шифрование через Crypto)
+   * - Публикация событий с circuit breaker
+   * - Offline outbox для отложенной отправки
+   * - Дедупликация входящих событий (seen Set)
+   * - Heartbeat для пиров (TTL 60с)
+   * - Reconnect с exponential backoff
+   * 
+   * События Bus:
+   * - `net:status` — изменение статуса сети, payload: {status: NetStatus}
+   * - `net:peers` — изменение количества пиров, payload: {count: number}
+   * - `net:outbox` — изменение размера outbox, payload: {count: number}
+   * - `net:event` — входящее событие для EventRouter, payload: {event: NostrEvent}
+   * - `net:peer-offline` — пир отключился, payload: {pubkey: string}
+   * - `net:stream-event` — новое событие для LiveStreamService, payload: {note: Object}
+   * 
+   * Не обрабатывает:
+   * - Kind 21000 (Query) → делегирует в EventRouter → QueryHandler
+   * - Kind 21001 (Answer) → делегирует в EventRouter → LiveStreamService
+   * - Rate limiting inbound → QueryHandler
+   * - Z-score фильтрация → QueryHandler
+   * 
+   * @namespace NetTransport
+   */
+  DI.register('NetTransport', function(Config, Logger, Bus, Crypto, Store) {
+    
+    /** @type {Object|null} Nostr SimplePool instance */
+    var pool = null;
+
+    /** @type {Uint8Array|null} Секретный ключ (приватный) */
+    var sk = null;
+
+    /** @type {string|null} Публичный ключ (hex) */
+    var pk = null;
+
+    /** @type {string|null} ID последнего отправленного запроса */
+    var queryId = null;
+
+    /** @type {Map<string, number>} Активные пиры: pubkey → timestamp последнего события */
+    var peers = new Map();
+
+    /** @type {NetworkAnswer[]} Кэш полученных ответов на ТЕКУЩИЙ запрос */
+    var answers = [];
+
+    /** @type {function():void|null} Колбэк обновления UI (вызывается при изменениях) */
+    var onUpdate = null;
+
+    /** @type {number|null} ID таймера heartbeat */
+    var hbTimer = null;
+
+    /** @type {number} Timestamp последнего запроса в сеть */
+    var lastQueryTime = 0;
+
+    /** @type {Object|null} Nostr-tools модуль */
+    var nostr = null;
+
+    /** @type {Object|null} Глобальная подписка на события */
+    var subscription = null;
+
+    /** @type {Array<function(number):void>} Подписчики на изменение количества пиров */
+    var peerListeners = [];
+
+    /** @type {boolean} Флаг инициализации сети */
+    var started = false;
+
+    /** @type {boolean} Флаг процесса переподключения */
+    var reconnecting = false;
+
+    /** @type {Set<string>} Множество ID уже обработанных событий (дедупликация) */
+    var seen = new Set();
+
+    /** @type {Map<string, number>} Rate limiting релеев: relay → timestamp до которого заблокирован */
+    var rateLimitedUntil = new Map();
+
+    /** @type {number} Счётчик попыток подключения */
+    var connAttempts = 0;
+
+    /** @type {NetStatus} Текущий статус сети */
+    var netStatus = 'disconnected';
+
+    /** @type {Map<string, NostrEvent>} Очередь событий для отправки (offline) */
+    var outbox = new Map();
+
+    /** @type {Map<string, number>} Счётчик ошибок для каждого релея */
+    var relayErrors = new Map();
+
+    /** @type {number|null} ID таймера реконнекта */
+    var reconnectTimer = null;
+
+    /** @type {number} Жёсткий лимит длины текста для P2P-ответов */
+    var MAX_P2P_TEXT_LENGTH = 2000;
+
+    /** @type {number} Текущая версия сетевого протокола */
+    var PROTOCOL_VERSION = 2;
+
+    /**
+     * Устанавливает статус сети и публикует событие.
+     * При переходе из disconnected в connected — автоматически вызывает flushOutbox.
+     * 
+     * @param {NetStatus} s - Новый статус.
+     * @returns {void}
+     */
+    function setStatus(s) {
+      var wasDisconnected = (netStatus !== 'connected');
+      netStatus = s;
+      
+      if (Bus && Bus.emit) {
+        try {
+          Bus.emit('net:status', { status: s });
+        } catch (e) {
+          if (Logger) Logger.error('NetTransport', 'Bus.emit failed', e);
+        }
+      }
+      
+      if (s === 'connected' && wasDisconnected) {
+        flushOutbox();
+      }
+    }
+
+    /**
+     * Уведомляет подписчиков об изменении количества пиров.
+     * Вызывается при добавлении нового пира или удалении через heartbeat.
+     * 
+     * @returns {void}
+     */
+    function notifyPeers() {
+      var count = peers.size;
+      
+      for (var i = 0; i < peerListeners.length; i++) {
+        try {
+          peerListeners[i](count);
+        } catch (e) {
+          if (Logger) Logger.warn('NetTransport', 'peerListener error', e);
+        }
+      }
+      
+      if (Bus && Bus.emit) {
+        try {
+          Bus.emit('net:peers', { count: count });
+        } catch (e) {
+          if (Logger) Logger.error('NetTransport', 'Bus.emit failed', e);
+        }
+      }
+    }
+
+    /**
+     * Проверяет валидность структуры Nostr-события.
+     * Не проверяет подпись — это делает nostr.verifyEvent.
+     * 
+     * @param {NostrEvent} ev - Событие для проверки.
+     * @returns {boolean} true если структура валидна.
+     */
+    function isValidEvent(ev) {
+      if (!ev || typeof ev !== 'object') return false;
+      if (typeof ev.id !== 'string' || ev.id.length !== 64) return false;
+      if (typeof ev.pubkey !== 'string' || ev.pubkey.length !== 64) return false;
+      if (typeof ev.kind !== 'number') return false;
+      if (!Array.isArray(ev.tags)) return false;
+      if (typeof ev.content !== 'string') return false;
+      return true;
+    }
+
+    /**
+     * Проверяет, является ли событие дубликатом.
+     * Использует seen Set с лимитом размера (FIFO при переполнении).
+     * 
+     * @param {NostrEvent} ev - Событие для проверки.
+     * @returns {boolean} true если событие уже обработано.
+     */
+    function isDuplicate(ev) {
+      if (!ev || !ev.id) return true;
+      if (seen.has(ev.id)) return true;
+      
+      seen.add(ev.id);
+      
+      var maxSize = Config ? Config.get('seenMaxSize', 1000) : 1000;
+      if (seen.size > maxSize) {
+        var arr = Array.from(seen);
+        seen.clear();
+        var keepSize = Config ? Config.get('seenKeepSize', 500) : 500;
+        for (var i = arr.length - keepSize; i < arr.length; i++) {
+          seen.add(arr[i]);
+        }
+      }
+      
+      return false;
+    }
+
+    /**
+     * Эмитит текущий размер outbox через Bus.
+     * 
+     * @returns {void}
+     */
+    function emitOutboxCount() {
+      if (Bus && Bus.emit) {
+        try {
+          Bus.emit('net:outbox', { count: outbox.size });
+        } catch (e) {
+          if (Logger) Logger.error('NetTransport', 'Bus.emit failed', e);
+        }
+      }
+    }
+
+    /**
+     * Добавляет событие в offline-очередь.
+     * При переполнении удаляет самое старое событие (FIFO).
+     * 
+     * @param {NostrEvent} ev - Событие для добавления.
+     * @returns {void}
+     */
+    function addToOutbox(ev) {
+      if (!ev || !ev.id) return;
+      if (outbox.has(ev.id)) return;
+      
+      var maxSize = Config ? Config.get('offlineQueueMaxSize', 100) : 100;
+      if (outbox.size >= maxSize) {
+        var oldestKey = outbox.keys().next().value;
+        outbox.delete(oldestKey);
+      }
+      
+      outbox.set(ev.id, ev);
+      emitOutboxCount();
+    }
+
+    /**
+     * Отправляет порцию событий из outbox.
+     * Размер батча определяется Config.outboxBatchSize (по умолчанию 2).
+     * 
+     * @returns {void}
+     */
+    function flushOutbox() {
+      if (outbox.size === 0 || !pool) return;
+      
+      var batchSize = Config ? Config.get('outboxBatchSize', 2) : 2;
+      var limit = Math.min(batchSize, outbox.size);
+      var keys = Array.from(outbox.keys()).slice(0, limit);
+      
+      var toSend = [];
+      for (var i = 0; i < keys.length; i++) {
+        toSend.push(outbox.get(keys[i]));
+        outbox.delete(keys[i]);
+      }
+      
+      for (var j = 0; j < toSend.length; j++) {
+        safePublish(toSend[j]);
+      }
+      
+      emitOutboxCount();
+    }
+
+    /**
+     * Безопасно публикует событие с учётом circuit breaker для реле.
+     * 
+     * Алгоритм:
+     * 1. Фильтрует релеи по rateLimitedUntil
+     * 2. Если нет доступных реле — добавляет в outbox
+     * 3. При ошибке публикации увеличивает счётчик ошибок релея
+     * 4. При достижении threshold — circuit break на 2 минуты
+     * 
+     * @param {NostrEvent} ev - Событие для публикации.
+     * @returns {Promise<void>}
+     */
+    function safePublish(ev) {
+      var relays = Config ? Config.get('relays', []) : [];
+      var now = Date.now();
+      var goodRelays = [];
+      
+      for (var i = 0; i < relays.length; i++) {
+        var until = rateLimitedUntil.get(relays[i]) || 0;
+        if (until <= now) goodRelays.push(relays[i]);
+      }
+      
+      if (goodRelays.length === 0) {
+        addToOutbox(ev);
+        return Promise.resolve();
+      }
+      
+      try {
+        var pubs = pool.publish(goodRelays, ev);
+        
+        for (var j = 0; j < goodRelays.length; j++) {
+          var relay = goodRelays[j];
+          var p = (pubs && typeof pubs.get === 'function') 
+            ? pubs.get(relay) 
+            : (Array.isArray(pubs) ? pubs[j] : null);
+          
+          if (p && typeof p.then === 'function') {
+            (function(promise, relayUrl) {
+              promise.then(function() {
+                relayErrors.delete(relayUrl);
+              }).catch(function(err) {
+                var count = (relayErrors.get(relayUrl) || 0) + 1;
+                relayErrors.set(relayUrl, count);
+                
+                var threshold = Config ? Config.get('relayErrorThreshold', 5) : 5;
+                if (count >= threshold) {
+                  var circuitBreakTime = Config ? Config.get('relayCircuitBreakTime', 120000) : 120000;
+                  rateLimitedUntil.set(relayUrl, Date.now() + circuitBreakTime);
+                  relayErrors.set(relayUrl, 0);
+                  if (Logger) Logger.warn('NetTransport', 'Relay circuit broken: ' + relayUrl);
+                } else {
+                  var backoff = count === 1 
+                    ? (Config ? Config.get('relayBackoff1', 15000) : 15000)
+                    : (Config ? Config.get('relayBackoff2', 30000) : 30000);
+                  rateLimitedUntil.set(relayUrl, Date.now() + backoff);
+                }
+                
+                if (!outbox.has(ev.id)) {
+                  outbox.set(ev.id, ev);
+                  emitOutboxCount();
+                }
+              });
+            })(p, relay);
+          }
+        }
+      } catch (err) {
+        if (Logger) Logger.warn('NetTransport', 'publish throw', err);
+        addToOutbox(ev);
+      }
+      
+      return Promise.resolve();
+    }
+
+    /**
+     * Обрабатывает входящее Nostr-событие.
+     * 
+     * Алгоритм:
+     * 1. Валидация структуры (isValidEvent)
+     * 2. Проверка подписи (nostr.verifyEvent)
+     * 3. Проверка дубликата (isDuplicate)
+     * 4. Игнорирование своих событий
+     * 5. Обновление peers Map
+     * 6. Если это ответ на наш запрос → добавление в answers
+     * 7. Эмиссия net:event для EventRouter
+     * 8. Эмиссия net:stream-event для LiveStreamService (если Kind 21001 без тега 'e')
+     * 
+     * @param {NostrEvent} ev - Входящее событие.
+     * @returns {void}
+     */
+    function onEvent(ev) {
+      try {
+        if (!ev || typeof ev !== 'object' || !Array.isArray(ev.tags)) return;
+
+        if (nostr && typeof nostr.verifyEvent === 'function') {
+          if (!nostr.verifyEvent(ev)) return;
+        }
+
+        if (!isValidEvent(ev)) return;
+        if (isDuplicate(ev)) return;
+        if (pk && ev.pubkey === pk) return;
+
+        var had = peers.has(ev.pubkey);
+        peers.set(ev.pubkey, Date.now());
+        if (!had) notifyPeers();
+        
+        setStatus('connected');
+        connAttempts = 0;
+        flushOutbox();
+
+        var KQ = Config ? Config.get('kQuery', 21000) : 21000;
+        var KA = Config ? Config.get('kAnswer', 21001) : 21001;
+
+        if (ev.kind === KA) {
+          var eTag = null;
+          for (var i = 0; i < ev.tags.length; i++) {
+            var tg = ev.tags[i];
+            if (Array.isArray(tg) && tg[0] === 'e' && !tg[3]) {
+              eTag = tg[1];
+              break;
+            }
+          }
+          
+          var data;
+          try {
+            data = JSON.parse(ev.content);
+          } catch (e) {
+            return;
+          }
+          
+          if (!data || typeof data !== 'object' || Array.isArray(data)) return;
+          if (typeof data.text !== 'string' || !data.text || data.text.length > MAX_P2P_TEXT_LENGTH) return;
+          if (!Array.isArray(data.vector) || typeof data.score !== 'number') return;
+
+          var expectedDim = Config ? Config.get('dim', 384) : 384;
+          if (data.vector.length !== expectedDim) {
+            if (Logger) Logger.warn('NetTransport', 'Answer rejected: incompatible vector dimension', {
+              expected: expectedDim,
+              got: data.vector.length,
+              eventId: ev.id,
+              peer: ev.pubkey.slice(0, 6)
+            });
+            return;
+          }
+
+          if (eTag && eTag === queryId) {
+            var isDupAnswer = false;
+            for (var j = 0; j < answers.length; j++) {
+              if (answers[j].id === ev.id) {
+                isDupAnswer = true;
+                break;
+              }
+            }
+            
+            if (!isDupAnswer) {
+              var maxCache = Config ? Config.get('maxAnswersCache', 100) : 100;
+              if (answers.length >= maxCache) answers.shift();
+              
+              answers.push({
+                id: ev.id,
+                text: data.text,
+                vector: data.vector,
+                score: data.score,
+                z_score: data.z_score,
+                peer: ev.pubkey.slice(0, 6),
+                fullPubkey: ev.pubkey,
+                createdAt: Date.now(),
+                queryId: eTag
+              });
+              
+              if (typeof onUpdate === 'function') {
+                try { onUpdate(); } catch (e) { /* ignore */ }
+              }
+            }
+          }
+
+          if (!eTag && Array.isArray(data.vector) && typeof data.text === 'string') {
+            var netNote = {
+              id: ev.id,
+              text: data.text,
+              vector: data.vector,
+              peer: ev.pubkey.slice(0, 6),
+              fullPubkey: ev.pubkey,
+              createdAt: Date.now(),
+              children: []
+            };
+
+            if (Bus && Bus.emit) {
+              try {
+                Bus.emit('net:stream-event', { note: netNote });
+              } catch (e) { /* ignore */ }
+            }
+          }
+        }
+
+        if (Bus && Bus.emit) {
+          try {
+            Bus.emit('net:event', { event: ev });
+          } catch (e) {
+            if (Logger) Logger.error('NetTransport', 'Bus.emit net:event failed', e);
+          }
+        }
+      } catch (err) {
+        if (Logger) Logger.warn('NetTransport', 'onEvent error', err);
+      }
+    }
+
+    /**
+     * Запускает heartbeat для очистки устаревших пиров и ответов.
+     * Интервал определяется Config.heartbeat (по умолчанию 30с).
+     * TTL пиров определяется Config.peerTTL (по умолчанию 60с).
+     * 
+     * @returns {void}
+     */
+    function startHeartbeat() {
+      if (hbTimer) clearInterval(hbTimer);
+      
+      hbTimer = setInterval(function() {
+        var now = Date.now();
+        var peerTTL = Config ? Config.get('peerTTL', 60000) : 60000;
+        var removedPeers = [];
+        
+        peers.forEach(function(ts, pubkey) {
+          if (now - ts > peerTTL) {
+            peers.delete(pubkey);
+            removedPeers.push(pubkey);
+          }
+        });
+        
+        if (removedPeers.length > 0) {
+          notifyPeers();
+          
+          for (var i = 0; i < removedPeers.length; i++) {
+            if (Bus && Bus.emit) {
+              try {
+                Bus.emit('net:peer-offline', { pubkey: removedPeers[i] });
+              } catch (e) { /* ignore */ }
+            }
+          }
+          
+          if (typeof onUpdate === 'function') {
+            try { onUpdate(); } catch (e) { /* ignore */ }
+          }
+        }
+        
+        var answersTTL = Config ? Config.get('answersTTL', 300000) : 300000;
+        var cutoff = now - answersTTL;
+        for (var j = answers.length - 1; j >= 0; j--) {
+          if (!peers.has(answers[j].fullPubkey) || answers[j].createdAt < cutoff) {
+            answers.splice(j, 1);
+          }
+        }
+      }, Config ? Config.get('heartbeat', 30000) : 30000);
+    }
+
+    /**
+     * Планирует попытку переподключения с exponential backoff.
+     * Максимум попыток определяется Config.reconnectMaxAttempts.
+     * 
+     * @returns {void}
+     */
+    function scheduleReconnect() {
+      if (reconnecting || !started) return;
+      
+      var maxAttempts = Config ? Config.get('reconnectMaxAttempts', 10) : 10;
+      if (connAttempts >= maxAttempts) {
+        setStatus('failed');
+        return;
+      }
+      
+      reconnecting = true;
+      var baseDelay = Config ? Config.get('reconnectBaseDelay', 1000) : 1000;
+      var maxDelay = Config ? Config.get('reconnectMaxDelay', 60000) : 60000;
+      var delay = Math.min(maxDelay, baseDelay * Math.pow(2, connAttempts));
+      connAttempts++;
+      
+      setStatus('reconnecting');
+      
+      reconnectTimer = setTimeout(function() {
+        try {
+          if (subscription && typeof subscription.close === 'function') {
+            try { subscription.close(); } catch (e) { /* ignore */ }
+          }
+          subscription = null;
+          
+          var room = Config ? Config.get('room', 'noomium-main') : 'noomium-main';
+          var KQ = Config ? Config.get('kQuery', 21000) : 21000;
+          var KA = Config ? Config.get('kAnswer', 21001) : 21001;
+          var subWindow = Config ? Config.get('subWindow', 300) : 300;
+          var nowSec = Math.floor(Date.now() / 1000);
+          
+          if (pool) {
+            var relays = Config ? Config.get('relays', []) : [];
+            subscription = pool.subscribeMany(relays,
+              [{ kinds: [KQ, KA], '#t': [room], since: nowSec }],
+              {
+                onevent: onEvent,
+                onclose: function() { scheduleReconnect(); }
+              });
+            reconnecting = false;
+          } else {
+            throw new Error('Pool not available');
+          }
+        } catch (err) {
+          if (Logger) Logger.warn('NetTransport', 'Reconnect fail', err);
+          if (started && connAttempts < maxAttempts) {
+            scheduleReconnect();
+          } else {
+            reconnecting = false;
+            setStatus('failed');
+          }
+        }
+      }, delay);
+    }
+
+    /**
+     * Инициализирует сеть: загружает nostr-tools, расшифровывает/создаёт ключ,
+     * подключается к релеям, запускает heartbeat.
+     * 
+     * @param {function():void} callback - Колбэк обновления UI.
+     * @param {string} password - Пароль для расшифровки ключа.
+     * @returns {Promise<void>}
+     * @throws {Error} Если неверный пароль ('WRONG_PASSWORD').
+     */
+    function init(callback, password) {
+      if (started) return Promise.resolve();
+      onUpdate = callback;
+      connAttempts = 0;
+
+      var loadAndDecrypt = function() {
+        var p = import('https://cdn.jsdelivr.net/npm/nostr-tools@2.7.2/+esm').then(function(mod) {
+          var tools = (mod && mod.default && typeof mod.default.generateSecretKey === 'function')
+            ? mod.default
+            : (typeof mod.generateSecretKey === 'function' ? mod : null);
+          
+          if (!tools || !tools.SimplePool) {
+            throw new Error('nostr-tools incompatible');
+          }
+          
+          nostr = tools;
+          return tools;
+        });
+
+        if (sk) return p.then(function() { return true; });
+
+        return p.then(function(tools) {
+          var KEY = 'sk';
+          var stored = Store ? Store.get(KEY, null) : null;
+          
+          if (stored && typeof stored === 'string') {
+            if (/^[0-9a-f]{64}$/i.test(stored)) {
+              if (Crypto && Crypto.encryptKey) {
+                return Crypto.encryptKey(stored, password).then(function(encrypted) {
+                  if (Store) Store.set(KEY, encrypted);
+                  return stored;
+                });
+              }
+              return stored;
+            } else {
+              if (Crypto && Crypto.decryptKey) {
+                return Crypto.decryptKey(stored, password).catch(function() {
+                  throw new Error('WRONG_PASSWORD');
+                });
+              }
+              throw new Error('Crypto module not available');
+            }
+          }
+          
+          var raw = tools.generateSecretKey();
+          var keyHex = Array.from(raw).map(function(b) {
+            return b.toString(16).padStart(2, '0');
+          }).join('');
+          
+          if (Crypto && Crypto.encryptKey) {
+            return Crypto.encryptKey(keyHex, password).then(function(encrypted) {
+              if (Store) Store.set(KEY, encrypted);
+              return keyHex;
+            });
+          }
+          
+          if (Store) Store.set(KEY, keyHex);
+          return keyHex;
+        }).then(function(hex) {
+          sk = new Uint8Array(hex.match(/.{1,2}/g).map(function(b) {
+            return parseInt(b, 16);
+          }));
+          pk = nostr.getPublicKey(sk);
+          return true;
+        });
+      };
+
+      return loadAndDecrypt().then(function() {
+        if (!pool && nostr) pool = new nostr.SimplePool();
+        
+        var nowSec = Math.floor(Date.now() / 1000);
+        var room = Config ? Config.get('room', 'noomium-main') : 'noomium-main';
+        var KQ = Config ? Config.get('kQuery', 21000) : 21000;
+        var KA = Config ? Config.get('kAnswer', 21001) : 21001;
+        var relays = Config ? Config.get('relays', []) : [];
+        
+        started = true;
+        
+        try {
+          subscription = pool.subscribeMany(relays,
+            [{ kinds: [KQ, KA], '#t': [room], since: nowSec }],
+            {
+              onevent: onEvent,
+              onclose: function() { scheduleReconnect(); }
+            });
+          startHeartbeat();
+        } catch (e) {
+          if (Logger) Logger.warn('NetTransport', 'sub fail', e);
+          scheduleReconnect();
+        }
+        
+        notifyPeers();
+        setStatus('connected');
+        
+        if (Logger) Logger.info('NetTransport', 'started, room=' + room);
+      }).catch(function(err) {
+        if (Logger && err.message !== 'WRONG_PASSWORD') {
+          Logger.error('NetTransport', 'nostr load fail', err);
+        }
+        if (err.message !== 'WRONG_PASSWORD') {
+          setStatus('failed');
+        }
+        throw err;
+      });
+    }
+
+    /**
+     * Отправляет поисковый запрос (Kind 21000) с вектором.
+     * Rate limit: 1 запрос в queryRateLimit мс (по умолчанию 3000мс).
+     * 
+     * @param {Vector} vector - Вектор запроса.
+     * @returns {void}
+     */
+    function send(vector) {
+      if (!pool || !nostr || !sk) return;
+      
+      var mode = 'model';
+      try {
+        var ai = DI.resolve('AI');
+        if (ai && typeof ai.getMode === 'function') {
+          mode = ai.getMode();
+        }
+      } catch (e) { /* ignore */ }
+      
+      if (mode === 'demo') return;
+      
+      var now = Date.now();
+      var rateLimit = Config ? Config.get('queryRateLimit', 3000) : 3000;
+      if (now - lastQueryTime < rateLimit) return;
+      lastQueryTime = now;
+      
+      answers.length = 0;
+      
+      try {
+        var threshold = Config ? Config.get('threshold', 0.7) : 0.7;
+        var serendipity = Config ? Config.get('serendipity', 0.3) : 0.3;
+        var room = Config ? Config.get('room', 'noomium-main') : 'noomium-main';
+        var KQ = Config ? Config.get('kQuery', 21000) : 21000;
+        
+        var payload = {
+          vector: vector,
+          threshold: threshold,
+          serendipity: serendipity,
+          protocol_version: PROTOCOL_VERSION
+        };
+
+        var ev = nostr.finalizeEvent({
+          kind: KQ,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [['t', room]],
+          content: JSON.stringify(payload)
+        }, sk);
+        
+        queryId = ev.id;
+        safePublish(ev);
+        
+        if (typeof onUpdate === 'function') {
+          try { onUpdate(); } catch (e) { /* ignore */ }
+        }
+      } catch (e) {
+        if (Logger) Logger.warn('NetTransport', 'send fail', e);
+      }
+    }
+
+    /**
+     * Публикует заметку в сеть (Kind 21001).
+     * Вызывается только для shared-заметок.
+     * 
+     * @param {Object} note - Объект заметки.
+     * @param {string} [parentId] - ID родительской заметки (для тегов).
+     * @returns {void}
+     */
+    function publishNote(note, parentId) {
+      if (!sk || !nostr || !note || !note.shared) return;
+      
+      var room = Config ? Config.get('room', 'noomium-main') : 'noomium-main';
+      var KA = Config ? Config.get('kAnswer', 21001) : 21001;
+      
+      var tags = [['t', room]];
+      if (parentId) tags.push(['e', parentId, '', 'reply']);
+      
+      try {
+        var ev = nostr.finalizeEvent({
+          kind: KA,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: tags,
+          content: JSON.stringify({
+            text: note.text,
+            vector: note.vector,
+            score: 1.0
+          })
+        }, sk);
+        
+        safePublish(ev);
+      } catch (e) {
+        if (Logger) Logger.warn('NetTransport', 'publishNote fail', e);
+      }
+    }
+
+    /**
+     * Возвращает активные ответы (от пиров, которые всё ещё онлайн).
+     * 
+     * @returns {NetworkAnswer[]} Массив активных ответов.
+     */
+    function activeAnswers() {
+      var out = [];
+      for (var i = 0; i < answers.length; i++) {
+        if (peers.has(answers[i].fullPubkey)) {
+          out.push(answers[i]);
+        }
+      }
+      return out;
+    }
+
+    /**
+     * Возвращает текущий статус сети.
+     * @returns {NetStatus}
+     */
+    function getStatus() {
+      return netStatus;
+    }
+
+    /**
+     * Возвращает размер offline-очереди.
+     * @returns {number}
+     */
+    function getOutboxLength() {
+      return outbox.size;
+    }
+
+    /**
+     * Проверяет наличие приватного ключа.
+     * @returns {boolean}
+     */
+    function hasKey() {
+      return sk !== null;
+    }
+
+    /**
+     * Проверяет, зашифрован ли ключ в Store.
+     * @returns {boolean}
+     */
+    function isKeyEncrypted() {
+      try {
+        var stored = Store ? Store.get('sk', null) : null;
+        return !!(stored && typeof stored === 'string' && !/^[0-9a-f]{64}$/i.test(stored));
+      } catch (e) {
+        return false;
+      }
+    }
+
+    /**
+     * Возвращает количество активных пиров.
+     * @returns {number}
+     */
+    function peerCount() {
+      return peers.size;
+    }
+
+    /**
+     * Регистрирует подписчика на изменение количества пиров.
+     * @param {function(number):void} fn - Обработчик.
+     * @returns {void}
+     */
+    function onPeers(fn) {
+      if (typeof fn === 'function') peerListeners.push(fn);
+    }
+
+    /**
+     * Отписывает обработчика от изменений количества пиров.
+     * @param {function(number):void} fn - Обработчик.
+     * @returns {void}
+     */
+    function offPeers(fn) {
+      var idx = peerListeners.indexOf(fn);
+      if (idx > -1) peerListeners.splice(idx, 1);
+    }
+
+    /**
+     * Останавливает сеть: закрывает подписку, очищает все ресурсы.
+     * @returns {void}
+     */
+    function stop() {
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
+      if (hbTimer) {
+        clearInterval(hbTimer);
+        hbTimer = null;
+      }
+      if (subscription && typeof subscription.close === 'function') {
+        try { subscription.close(); } catch (e) { /* ignore */ }
+      }
+      if (pool && typeof pool.close === 'function') {
+        try {
+          var relays = Config ? Config.get('relays', []) : [];
+          pool.close(relays);
+        } catch (e) { /* ignore */ }
+      }
+      
+      started = false;
+      subscription = null;
+      pool = null;
+      peers.clear();
+      answers.length = 0;
+      seen.clear();
+      outbox.clear();
+      relayErrors.clear();
+      rateLimitedUntil.clear();
+      reconnecting = false;
+      
+      setStatus('disconnected');
+      emitOutboxCount();
+    }
+
+    /**
+     * Перезапускает сеть (stop + init).
+     * @param {function():void} callback - Колбэк обновления UI.
+     * @param {string} password - Пароль.
+     * @returns {Promise<void>}
+     */
+    function restart(callback, password) {
+      stop();
+      return init(callback, password);
+    }
+
+    /**
+     * Инициализация модуля (вызывается DI.initAll).
+     * NetTransport не требует автоматической инициализации —
+     * init() вызывается явно из App.Boot после загрузки AI.
+     * 
+     * @param {AbortSignal} [signal] - Сигнал для автоочистки.
+     * @returns {void}
+     */
+    function initModule(signal) {
+      // Нет автоматической инициализации
+    }
+
+    /**
+     * Уничтожение модуля (вызывается DI.destroyAll).
+     * Полностью останавливает сеть и очищает ресурсы.
+     * 
+     * @returns {void}
+     */
+    function destroy() {
+      stop();
+      peerListeners.length = 0;
+      onUpdate = null;
+      sk = null;
+      pk = null;
+      nostr = null;
+    }
+
+    return {
+      onPeers: onPeers,
+      offPeers: offPeers,
+      getStatus: getStatus,
+      getOutboxLength: getOutboxLength,
+      hasKey: hasKey,
+      isKeyEncrypted: isKeyEncrypted,
+      init: init,
+      send: send,
+      activeAnswers: activeAnswers,
+      peerCount: peerCount,
+      stop: stop,
+      restart: restart,
+      publishNote: publishNote,
+      initModule: initModule,
+      destroy: destroy
+    };
+  }, ['Config', 'Logger', 'Bus', 'Crypto', 'Store']);
   /* <!-- MODULE: NetTransport --> */
 
   /* <!-- MODULE: EventRouter --> */
