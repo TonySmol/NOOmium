@@ -14845,13 +14845,1704 @@ kbd {
   /* <!-- MODULE: EditorComponent --> */
 
   /* <!-- MODULE: FocusBarComponent --> */
-  старт
-  энд
+  /**
+   * @typedef {Object} FocusBarState
+   * @description Внутреннее состояние компонента панели фокуса.
+   * @property {HTMLDivElement|null} container - Ссылка на контейнер панели.
+   * @property {AbortController|null} abortController - Контроллер для автоотписки.
+   * @property {function():void|null} stateUnsubscribe - Функция отписки от StateManager.
+   */
+
+  /**
+   * @module FocusBarComponent
+   * @description Компонент панели закреплённой заметки (Focus Bar).
+   * 
+   * Зона ответственности:
+   * - Отображение текста закреплённой заметки вверху интерфейса
+   * - Показ источника заметки (peer ID для сетевых, "вы" для локальных)
+   * - Кнопка снятия фокуса (✕) с умной логикой
+   * - Видимость в режимах FOCUS и SEARCH (когда есть focusedItem)
+   * - Скрытие плашки сегментов при активном закрепе
+   * 
+   * Архитектурные принципы:
+   * - НЕ читает DOM для бизнес-логики (Принцип #1)
+   * - Рендерит UI на основе StateManager.focusedItem
+   * - Использует textContent для XSS-safe вставки текста
+   * - Refresh DOM references при каждом рендере (защита от refreshUI)
+   * - AbortSignal для автоматической отписки при destroy
+   * 
+   * Логика кнопки "Снять фокус" (✕):
+   * 
+   * **При наличии текста в редакторе:**
+   * - Сбрасывает только `focusedItem` через setState (без смены uiMode)
+   * - syncDerivedFields() автоматически пересчитывает showSegments = true
+   * - Плашка сегментов появляется мгновенно без мерцания
+   * - Запускает поиск по текущему тексту через SearchService
+   * 
+   * **При пустом редакторе:**
+   * - Стандартный переход dispatch('to-idle')
+   * - Активируется Live Stream
+   * - Запускается поиск с пустым текстом
+   * 
+   * Видимость панели:
+   * - uiMode === 'focus' && focusedItem !== null → видна
+   * - uiMode === 'search' && focusedItem !== null → видна
+   * - Иначе → скрыта
+   * 
+   * Слушает события:
+   * - `state:changed` — изменение состояния (перерисовка панели)
+   * - `i18n:change` — смена языка (обновление переводов)
+   * 
+   * Используется модулями:
+   * - StateManager → через subscribe для реактивного рендеринга
+   * - StreamViewComponent → управление видимостью .seg блока
+   * 
+   * @namespace FocusBarComponent
+   */
+  DI.register('FocusBarComponent', function(
+    Config, Logger, Bus, I18n, StateManager, SearchService
+  ) {
+    
+    /**
+     * Внутреннее состояние компонента.
+     * @type {FocusBarState}
+     */
+    var state = {
+      container: null,
+      abortController: null,
+      stateUnsubscribe: null
+    };
+
+    /**
+     * Счётчик рендеров (для статистики).
+     * @type {number}
+     */
+    var renderCount = 0;
+
+    /**
+     * Обновляет ссылку на DOM-контейнер.
+     * Вызывается при каждом рендере, так как DOM может быть пересоздан после refreshUI.
+     * 
+     * @returns {void}
+     */
+    function ensureDOM() {
+      if (typeof document === 'undefined') return;
+      state.container = document.getElementById('focus-bar');
+    }
+
+    /**
+     * Создаёт DOM-структуру панели фокуса.
+     * 
+     * Безопасная альтернатива innerHTML:
+     * - Все элементы создаются через createElement
+     * - Текстовые данные вставляются через textContent (автоматический XSS-эскейпинг)
+     * 
+     * Структура:
+     * <div class="focus-bar-inner">
+     *   <div class="focus-text">{text}</div>
+     *   <div class="focus-meta">
+     *     <span class="focus-peer">{peer}</span>
+     *     <button class="focus-unfocus">✕</button>
+     *   </div>
+     * </div>
+     * 
+     * @param {string} text - Текст закреплённой заметки (обрезается до 100 символов).
+     * @param {string} peer - Идентификатор пира или перевод "вы".
+     * @returns {HTMLDivElement} Корневой элемент панели.
+     */
+    function buildFocusBarUI(text, peer) {
+      var wrapper = document.createElement('div');
+      wrapper.className = 'focus-bar-inner';
+
+      // Текстовый блок
+      var textEl = document.createElement('div');
+      textEl.className = 'focus-text';
+      
+      // Обрезка длинного текста
+      var displayText = text;
+      if (text.length > 100) {
+        displayText = text.substring(0, 100) + '…';
+      }
+      textEl.textContent = displayText;
+      wrapper.appendChild(textEl);
+
+      // Мета-блок (peer + кнопка закрытия)
+      var metaEl = document.createElement('div');
+      metaEl.className = 'focus-meta';
+
+      var peerEl = document.createElement('span');
+      peerEl.className = 'focus-peer';
+      peerEl.textContent = peer;
+      metaEl.appendChild(peerEl);
+
+      var unfocusBtn = document.createElement('button');
+      unfocusBtn.className = 'focus-unfocus';
+      unfocusBtn.setAttribute('aria-label', I18n ? I18n.t('btn.unfocus') : 'Снять фокус');
+      unfocusBtn.textContent = '✕';
+
+      /**
+       * Обработчик клика по кнопке снятия фокуса.
+       * 
+       * Логика:
+       * 1. Получает текущий текст из редактора
+       * 2. Если текст есть:
+       *    - Сбрасывает только focusedItem через setState
+       *    - syncDerivedFields() пересчитывает showSegments = true
+       *    - Принудительно показывает плашку сегментов (для мгновенной реакции)
+       *    - Запускает поиск по текущему тексту
+       * 3. Если текст пуст:
+       *    - dispatch('to-idle') для перехода в Live Stream
+       *    - Запускает поиск с пустым текстом
+       */
+      unfocusBtn.onclick = function() {
+        var editor = document.getElementById('ed-ta');
+        var editorVal = editor ? editor.value.trim() : '';
+
+        if (Logger) {
+          Logger.debug('FocusBarComponent', 'Unfocus button clicked', {
+            hasText: !!editorVal,
+            textLength: editorVal.length
+          });
+        }
+
+        if (editorVal) {
+          // Текст есть: сбрасываем только focusedItem, не меняя uiMode
+          if (StateManager && StateManager.setState) {
+            StateManager.setState({ focusedItem: null });
+          }
+
+          // Принудительно показываем плашку сегментов для мгновенной визуальной реакции
+          var segBlock = document.querySelector('.seg');
+          if (segBlock) {
+            segBlock.style.display = '';
+          }
+
+          // Запускаем поиск по текущему тексту (force=true для принудительной сетевой отправки)
+          if (SearchService && SearchService.search) {
+            SearchService.search(editorVal, true);
+          }
+        } else {
+          // Текст пуст: стандартный переход в IDLE (Live Stream)
+          if (StateManager && StateManager.dispatch) {
+            StateManager.dispatch('to-idle');
+          }
+          
+          // Запускаем поиск с пустым текстом для корректной инициализации Live Stream
+          if (SearchService && SearchService.search) {
+            SearchService.search('', true);
+          }
+        }
+      };
+
+      metaEl.appendChild(unfocusBtn);
+      wrapper.appendChild(metaEl);
+
+      return wrapper;
+    }
+
+    /**
+     * Рендерит панель фокуса в зависимости от текущего состояния.
+     * 
+     * Логика отображения:
+     * - Если uiMode === 'focus' && focusedItem: показываем панель, скрываем seg-блок
+     * - Если uiMode === 'search' && focusedItem: показываем панель, скрываем seg-блок
+     * - Иначе: скрываем панель, видимость seg-блока управляется через showSegments
+     * 
+     * @returns {void}
+     */
+    function render() {
+      if (!state.container) ensureDOM();
+      if (!state.container) return;
+
+      renderCount++;
+
+      var sm = StateManager ? StateManager.getState() : {};
+      var segBlock = document.querySelector('.seg');
+
+      // Проверяем, должна ли панель быть видима
+      var shouldShowFocusBar = sm.focusedItem &&
+                               (sm.uiMode === 'focus' || sm.uiMode === 'search');
+
+      if (shouldShowFocusBar) {
+        state.container.style.display = 'block';
+        
+        // Скрываем плашку сегментов при активном закрепе
+        if (segBlock) {
+          segBlock.style.display = 'none';
+        }
+
+        // Очистка старого содержимого
+        while (state.container.firstChild) {
+          state.container.removeChild(state.container.firstChild);
+        }
+
+        // Извлечение данных из focusedItem
+        var text = sm.focusedItem.text || '';
+        var peer = sm.focusedItem.peer || (I18n ? I18n.t('focus.you') : 'вы');
+
+        // Построение и вставка UI
+        var ui = buildFocusBarUI(text, peer);
+        state.container.appendChild(ui);
+
+        if (Logger) {
+          Logger.debug('FocusBarComponent', 'Focus bar rendered', {
+            textLength: text.length,
+            peer: peer,
+            uiMode: sm.uiMode
+          });
+        }
+      } else {
+        state.container.style.display = 'none';
+        
+        // Видимость seg-блока управляется через state.showSegments
+        if (segBlock) {
+          segBlock.style.display = sm.showSegments ? '' : 'none';
+        }
+      }
+    }
+
+    /**
+     * Обработчик события state:changed.
+     * Перерисовывает панель при изменении focusedItem или uiMode.
+     * 
+     * @param {AppState} newState - Новое состояние.
+     * @returns {void}
+     */
+    function handleStateChanged(newState) {
+      if (!newState) return;
+      render();
+    }
+
+    /**
+     * Обработчик события i18n:change.
+     * Перерисовывает панель с новыми переводами.
+     * 
+     * @returns {void}
+     */
+    function handleI18nChange() {
+      render();
+    }
+
+    /**
+     * Возвращает статистику компонента.
+     * 
+     * @returns {{renders: number}}
+     */
+    function getStats() {
+      return {
+        renders: renderCount
+      };
+    }
+
+    /**
+     * Сбрасывает статистику.
+     * 
+     * @returns {void}
+     */
+    function resetStats() {
+      renderCount = 0;
+    }
+
+    /**
+     * Инициализация модуля.
+     * Подписывается на события state:changed и i18n:change.
+     * Выполняет первый рендер.
+     * 
+     * @param {AbortSignal} [signal] - Сигнал для автоочистки.
+     * @returns {void}
+     */
+    function init(signal) {
+      ensureDOM();
+
+      if (state.abortController) {
+        state.abortController.abort();
+      }
+
+      state.abortController = new AbortController();
+      var internalSignal = state.abortController.signal;
+
+      // Подписка на изменения состояния
+      if (StateManager && typeof StateManager.subscribe === 'function') {
+        state.stateUnsubscribe = StateManager.subscribe(handleStateChanged);
+        
+        // Регистрируем отписку через signal
+        internalSignal.addEventListener('abort', function() {
+          if (state.stateUnsubscribe) {
+            state.stateUnsubscribe();
+            state.stateUnsubscribe = null;
+          }
+        }, { once: true });
+      }
+
+      // Подписка на смену языка
+      if (Bus && typeof Bus.subscribe === 'function') {
+        Bus.subscribe('i18n:change', handleI18nChange, internalSignal);
+      }
+
+      // Первый рендер
+      render();
+
+      if (Logger) {
+        Logger.info('FocusBarComponent', 'Initialized');
+      }
+    }
+
+    /**
+     * Уничтожение модуля.
+     * Отписывается от всех событий, очищает DOM-ссылки.
+     * 
+     * @returns {void}
+     */
+    function destroy() {
+      if (state.abortController) {
+        state.abortController.abort();
+        state.abortController = null;
+      }
+
+      if (state.stateUnsubscribe) {
+        state.stateUnsubscribe();
+        state.stateUnsubscribe = null;
+      }
+
+      state.container = null;
+      resetStats();
+    }
+
+    return {
+      // Статистика
+      getStats: getStats,
+      resetStats: resetStats,
+
+      // Lifecycle
+      init: init,
+      destroy: destroy
+    };
+  }, ['Config', 'Logger', 'Bus', 'I18n', 'StateManager', 'SearchService']);
   /* <!-- MODULE: FocusBarComponent --> */
 
   /* <!-- MODULE: StreamViewComponent --> */
-  старт
-  энд
+  /**
+   * @typedef {Object} StreamViewState
+   * @description Внутреннее состояние компонента карусели.
+   * @property {number} currentPage - Индекс текущей страницы пагинации.
+   * @property {Array<Array<SearchResult>>} pages - Разбиение результатов на страницы.
+   * @property {number} totalPages - Общее количество страниц.
+   * @property {number} activeIndex - Индекс активной карточки на текущей странице.
+   * @property {HTMLElement|null} carouselEl - Ссылка на контейнер карусели.
+   * @property {HTMLElement|null} dotsContainer - Ссылка на контейнер точек пагинации.
+   * @property {HTMLElement|null} counterEl - Ссылка на счётчик карточек.
+   * @property {HTMLButtonElement|null} prevBtn - Ссылка на кнопку "Предыдущая".
+   * @property {HTMLButtonElement|null} nextBtn - Ссылка на кнопку "Следующая".
+   * @property {number|null} scrollRAF - ID requestAnimationFrame для throttling скролла.
+   * @property {number} snapStep - Вычисленный шаг snap-scroll (ширина карточки + gap).
+   */
+
+  /**
+   * @typedef {Object} CarouselItem
+   * @description Элемент для отображения в карусели.
+   * @property {string} id - ID заметки.
+   * @property {string} text - Текст заметки.
+   * @property {Vector} [vector] - Вектор эмбеддинга.
+   * @property {number} [score] - Косинусное сходство (для поиска).
+   * @property {boolean} [shared] - Флаг публикации в сеть.
+   * @property {string} [peer] - Короткий ID пира (для сетевых заметок).
+   * @property {string} [fullPubkey] - Полный публичный ключ пира.
+   * @property {number} createdAt - Timestamp создания.
+   * @property {string} [parentId] - ID родительской заметки (локальной).
+   * @property {string[]} [children] - Массив ID дочерних заметок.
+   */
+
+  /**
+   * @module StreamViewComponent
+   * @description Компонент карусели результатов поиска и Live Stream.
+   * 
+   * Зона ответственности:
+   * - Отображение результатов в трёх режимах state machine (idle/focus/search)
+   * - Snap-scroll карусель с плавной прокруткой
+   * - Пагинация (стрелки ‹ ›, точки, счётчик)
+   * - Подсветка поискового запроса через <mark>
+   * - Действия над карточками: фокус, редактирование, копирование, удаление, toggle shared
+   * - Отображение связей parent/child (только локальных)
+   * - Адаптивный snapStep через LayoutMetrics
+   * 
+   * Архитектурные принципы:
+   * - НЕ читает DOM для бизнес-логики (Принцип #1)
+   * - Подписка на StateManager для реактивного рендеринга
+   * - Использует LayoutMetrics для CSS-зависимых вычислений
+   * - DocumentFragment для подсветки (XSS-safe)
+   * - textContent для всех текстовых вставок
+   * - AbortSignal для автоматической отписки при destroy
+   * - Делегирование кликов через closest()
+   * 
+   * Режимы отображения:
+   * 
+   * **IDLE (Live Stream):**
+   * - Источник: state.streamData
+   * - Сегменты: скрыты
+   * - FocusBar: скрыт
+   * - Карточки: только сетевые заметки с кнопкой "Фокус"
+   * 
+   * **FOCUS (поиск по вектору закрепа):**
+   * - Источник: state.lists.focus
+   * - Сегменты: скрыты
+   * - FocusBar: виден
+   * - Карточки: local + world объединены, сортировка по score desc
+   * 
+   * **SEARCH (текстовый поиск):**
+   * - Источник: state.lists[state.seg] (local/world/seren)
+   * - Сегменты: видны (если нет focusedItem)
+   * - FocusBar: скрыт (или виден если есть focusedItem с текстом)
+   * - Карточки: с подсветкой запроса
+   * 
+   * Слушает события:
+   * - `state:changed` — изменение состояния (перерисовка карусели)
+   * - `i18n:change` — смена языка (обновление переводов)
+   * - `state:lists-changed` — изменение списков результатов
+   * - `net:parent-updated` — обновление parent/child связей
+   * 
+   * Эмитит события:
+   * - `editor:edit-note` — редактирование заметки
+   *   payload: {id: string}
+   * - `editor:search-request` — повторный поиск после мутации
+   *   payload: {force: boolean}
+   * - `state:lists-changed` — уведомление об изменении списков
+   * 
+   * Dispatch в StateManager:
+   * - `to-focus` — при клике на кнопку "Фокус"
+   * - `switch-segment` — при клике на кнопку сегмента
+   * 
+   * Вызывает сервисы:
+   * - `DB.del(id)` — удаление заметки
+   * - `DB.put(note)` — toggle shared
+   * - `DB.get(id)` — проверка существования родителя
+   * - `SearchService.search()` — повторный поиск
+   * - `Toast.show()` — уведомления
+   * 
+   * @namespace StreamViewComponent
+   */
+  DI.register('StreamViewComponent', function(
+    Config, Logger, Bus, I18n, Utils, StateManager, DB, Toast,
+    EditorComponent, SearchService, LayoutMetrics
+  ) {
+    
+    /**
+     * Количество карточек на одной странице пагинации.
+     * @type {number}
+     */
+    var PAGE_SIZE = 10;
+
+    /**
+     * Внутреннее состояние компонента карусели.
+     * @type {StreamViewState}
+     */
+    var uiState = {
+      currentPage: 0,
+      pages: [],
+      totalPages: 0,
+      activeIndex: 0,
+      carouselEl: null,
+      dotsContainer: null,
+      counterEl: null,
+      prevBtn: null,
+      nextBtn: null,
+      scrollRAF: null,
+      snapStep: 0
+    };
+
+    /**
+     * Кэшированный поисковый запрос для подсветки.
+     * Используется для инвалидации кэша RegExp при смене запроса.
+     * @type {string | null}
+     */
+    var cachedQuery = null;
+
+    /**
+     * Скомпилированное RegExp для подсветки.
+     * Кэшируется для оптимизации при скролле и перерисовке.
+     * @type {RegExp | null}
+     */
+    var cachedRegex = null;
+
+    /**
+     * Контроллер для автоматической отписки всех listeners.
+     * @type {AbortController | null}
+     */
+    var abortController = null;
+
+    /**
+     * Функция отписки от StateManager (не поддерживает signal нативно).
+     * Сохраняется для вызова в обработчике abort.
+     * @type {function(): void | null}
+     */
+    var stateUnsubscribe = null;
+
+    /**
+     * Счётчик рендеров (для статистики).
+     * @type {number}
+     */
+    var renderCount = 0;
+
+    /**
+     * Счётчик действий над карточками (для статистики).
+     * @type {{focus: number, edit: number, copy: number, del: number, toggle: number}}
+     */
+    var actionStats = {
+      focus: 0,
+      edit: 0,
+      copy: 0,
+      del: 0,
+      toggle: 0
+    };
+
+    /**
+     * Обновляет ссылки на DOM-элементы.
+     * Вызывается при каждом рендере, так как DOM может быть пересоздан после refreshUI.
+     * 
+     * @returns {void}
+     */
+    function refreshDOM() {
+      if (typeof document === 'undefined') return;
+      
+      uiState.carouselEl = document.getElementById('carousel');
+      uiState.dotsContainer = document.getElementById('carousel-dots');
+      uiState.counterEl = document.getElementById('carousel-counter');
+      uiState.prevBtn = document.getElementById('pagination-prev');
+      uiState.nextBtn = document.getElementById('pagination-next');
+    }
+
+    /**
+     * Создаёт DocumentFragment с подсвеченными совпадениями поискового запроса.
+     * 
+     * Алгоритм:
+     * 1. Если query изменился → перекомпилируем RegExp
+     * 2. Split текста по RegExp
+     * 3. Чётные части → textNode, нечётные → <mark>
+     * 4. Возвращаем DocumentFragment (XSS-safe, нет innerHTML)
+     * 
+     * Кэширование:
+     * - cachedQuery хранит последний запрос
+     * - cachedRegex хранит скомпилированный RegExp
+     * - При смене запроса → инвалидация кэша
+     * 
+     * @param {string} text - Исходный текст карточки.
+     * @param {string} query - Поисковый запрос из редактора.
+     * @returns {DocumentFragment} Фрагмент с текстовыми узлами и тегами <mark>.
+     */
+    function highlightText(text, query) {
+      var fragment = document.createDocumentFragment();
+      
+      if (!text) return fragment;
+      
+      // Если нет запроса → просто текст
+      if (!query) {
+        fragment.appendChild(document.createTextNode(String(text)));
+        return fragment;
+      }
+      
+      // Инвалидация кэша при смене запроса
+      if (query !== cachedQuery) {
+        var words = query.toLowerCase().split(/\s+/).filter(function(w) {
+          return w.length > 2;
+        });
+        
+        if (words.length === 0) {
+          cachedRegex = null;
+        } else {
+          var escapedWords = words.map(function(w) {
+            return Utils.escRe(w);
+          });
+          cachedRegex = new RegExp('(' + escapedWords.join('|') + ')', 'gi');
+        }
+        
+        cachedQuery = query;
+      }
+      
+      // Если RegExp не скомпилирован → просто текст
+      if (!cachedRegex) {
+        fragment.appendChild(document.createTextNode(String(text)));
+        return fragment;
+      }
+      
+      // Split и построение фрагмента
+      var parts = String(text).split(cachedRegex);
+      
+      for (var i = 0; i < parts.length; i++) {
+        if (parts[i] === '') continue;
+        
+        if (i % 2 === 1) {
+          // Нечётная часть → совпадение → <mark>
+          var mark = document.createElement('mark');
+          mark.textContent = parts[i];
+          fragment.appendChild(mark);
+        } else {
+          // Чётная часть → обычный текст
+          fragment.appendChild(document.createTextNode(parts[i]));
+        }
+      }
+      
+      return fragment;
+    }
+
+    /**
+     * Генерирует DOM-структуру карточки (fi) для переданного элемента.
+     * 
+     * Структура:
+     * <div class="fi t-{mode}" data-id="{id}">
+     *   <div class="fi-h">
+     *     <span class="fi-badge">{badge}</span>
+     *     [parentLink]
+     *     [childCount]
+     *     [score]
+     *   </div>
+     *   <div class="fi-body">{highlighted text}</div>
+     *   <div class="fi-foot">
+     *     [focusBtn]
+     *     [editBtn, toggleBtn, copyBtn, delBtn]
+     *   </div>
+     * </div>
+     * 
+     * XSS-safe:
+     * - Все текстовые данные через textContent
+     * - DocumentFragment для подсветки
+     * - Нет innerHTML с user-data
+     * 
+     * @param {CarouselItem} item - Данные для отрисовки.
+     * @param {string} mode - Текущий режим ('local', 'world', 'seren', 'focus').
+     * @returns {HTMLDivElement} Корневой элемент карточки.
+     */
+    function renderItemHTML(item, mode) {
+      if (!item) return document.createElement('div');
+      
+      var seg = mode || (StateManager ? StateManager.getState().seg : 'local');
+      var own = !item.peer;
+      
+      var card = document.createElement('div');
+      card.className = 'fi t-' + seg;
+      card.setAttribute('data-id', item.id);
+
+      // Header
+      var header = document.createElement('div');
+      header.className = 'fi-h';
+      
+      // Badge
+      var badge = document.createElement('span');
+      badge.className = 'fi-badge';
+      var typeLabel = own
+        ? (item.shared ? (I18n ? I18n.t('base.tag.shared') : 'открыто') : (I18n ? I18n.t('base.tag.private') : 'лично'))
+        : ('· ' + item.peer);
+      badge.textContent = typeLabel;
+      header.appendChild(badge);
+
+      // Parent link (только для локальных связей)
+      if (item.parentId) {
+        var parentLink = document.createElement('a');
+        parentLink.href = '#';
+        parentLink.className = 'fi-parent';
+        parentLink.setAttribute('data-parent-id', item.parentId);
+        parentLink.textContent = '↳ ' + (I18n ? I18n.t('note.parent') : 'В ответ на');
+        
+        parentLink.onclick = function(e) {
+          e.preventDefault();
+          e.stopPropagation();
+          
+          // Проверка существования родителя
+          if (DB && DB.get) {
+            DB.get(item.parentId).then(function(parent) {
+              if (parent) {
+                if (Bus && Bus.emit) {
+                  try {
+                    Bus.emit('editor:edit-note', { id: item.parentId });
+                  } catch (err) {
+                    if (Logger) Logger.error('StreamViewComponent', 'Bus.emit editor:edit-note failed', err);
+                  }
+                }
+              } else {
+                if (Toast && Toast.show) {
+                  Toast.show('warn', I18n ? I18n.t('note.parent.notfound') : 'Родительская заметка недоступна');
+                }
+              }
+            }).catch(function(err) {
+              if (Logger) Logger.warn('StreamViewComponent', 'DB.get parent failed', err);
+            });
+          }
+        };
+        
+        header.appendChild(parentLink);
+      }
+
+      // Children count
+      if (item.children && item.children.length > 0) {
+        var childCount = document.createElement('span');
+        childCount.className = 'fi-children';
+        childCount.textContent = '💬 ' + item.children.length;
+        header.appendChild(childCount);
+      }
+
+      // Score (процент совпадения)
+      var scoreNum = typeof item.score === 'number' ? Math.round(item.score * 100) : null;
+      if (scoreNum !== null) {
+        var scoreWrap = document.createElement('span');
+        scoreWrap.className = 'fi-score';
+        
+        var scoreLabel = document.createElement('span');
+        scoreLabel.className = 'fi-score-label';
+        scoreLabel.textContent = I18n ? I18n.t('sim.score') : 'похожа на';
+        scoreWrap.appendChild(scoreLabel);
+        
+        var scoreValue = document.createElement('span');
+        scoreValue.className = 'fi-score-value';
+        scoreValue.textContent = String(scoreNum) + '%';
+        scoreWrap.appendChild(scoreValue);
+        
+        header.appendChild(scoreWrap);
+      }
+      
+      card.appendChild(header);
+
+      // Body (текст с подсветкой)
+      var body = document.createElement('div');
+      body.className = 'fi-body';
+      
+      var editorText = EditorComponent ? EditorComponent.getValue() : '';
+      body.appendChild(highlightText(item.text, editorText));
+      
+      card.appendChild(body);
+
+      // Footer (кнопки действий)
+      var footer = document.createElement('div');
+      footer.className = 'fi-foot';
+      
+      // Кнопка "Фокус" для сетевых заметок с вектором
+      if (!own && item.vector) {
+        var btnFocus = document.createElement('button');
+        btnFocus.className = 'fi-act primary';
+        btnFocus.setAttribute('data-act', 'focus');
+        btnFocus.setAttribute('data-id', item.id);
+        btnFocus.textContent = '◎ ' + (I18n ? I18n.t('btn.focus') : 'Фокус');
+        footer.appendChild(btnFocus);
+      }
+
+      // Кнопки управления для собственных заметок
+      if (own) {
+        var btnEdit = document.createElement('button');
+        btnEdit.className = 'fi-act primary';
+        btnEdit.setAttribute('data-act', 'edit');
+        btnEdit.setAttribute('data-id', item.id);
+        btnEdit.textContent = I18n ? I18n.t('btn.edit') : 'Развить';
+        footer.appendChild(btnEdit);
+        
+        var btnToggle = document.createElement('button');
+        btnToggle.className = 'fi-act';
+        btnToggle.setAttribute('data-act', 'toggle');
+        btnToggle.setAttribute('data-id', item.id);
+        btnToggle.textContent = item.shared
+          ? (I18n ? I18n.t('btn.toggle.priv') : 'Скрыть')
+          : (I18n ? I18n.t('btn.toggle.pub') : 'Открыть');
+        footer.appendChild(btnToggle);
+        
+        var btnCopy = document.createElement('button');
+        btnCopy.className = 'fi-act';
+        btnCopy.setAttribute('data-act', 'copy');
+        btnCopy.setAttribute('data-id', item.id);
+        btnCopy.textContent = I18n ? I18n.t('btn.copy') : 'Копия';
+        footer.appendChild(btnCopy);
+        
+        var btnDel = document.createElement('button');
+        btnDel.className = 'fi-act danger';
+        btnDel.setAttribute('data-act', 'del');
+        btnDel.setAttribute('data-id', item.id);
+        btnDel.textContent = I18n ? I18n.t('btn.del') : 'Удалить';
+        footer.appendChild(btnDel);
+      }
+      
+      card.appendChild(footer);
+      return card;
+    }
+
+    /**
+     * Разбивает плоский массив результатов на страницы по PAGE_SIZE.
+     * 
+     * @param {CarouselItem[]} list - Массив результатов поиска.
+     * @returns {void}
+     */
+    function paginate(list) {
+      uiState.pages = [];
+      
+      if (!list || list.length === 0) {
+        uiState.totalPages = 0;
+        return;
+      }
+      
+      for (var i = 0; i < list.length; i += PAGE_SIZE) {
+        uiState.pages.push(list.slice(i, i + PAGE_SIZE));
+      }
+      
+      uiState.totalPages = uiState.pages.length;
+    }
+
+    /**
+     * Обновляет disabled-статус кнопок пагинации в зависимости от текущей страницы.
+     * 
+     * @returns {void}
+     */
+    function updatePaginationButtons() {
+      if (uiState.prevBtn) {
+        uiState.prevBtn.disabled = (uiState.currentPage === 0);
+      }
+      if (uiState.nextBtn) {
+        uiState.nextBtn.disabled = (uiState.currentPage >= uiState.totalPages - 1);
+      }
+    }
+
+    /**
+     * Полностью перерисовывает карусель для указанной страницы.
+     * 
+     * Алгоритм:
+     * 1. Очистка carouselEl от старых карточек
+     * 2. Определение режима (idle/focus/search)
+     * 3. Получение списка для текущего режима
+     * 4. Если список пуст → показать empty state
+     * 5. Иначе → создать карточки через renderItemHTML
+     * 6. Вычислить snapStep через LayoutMetrics
+     * 7. Создать точки пагинации
+     * 8. Обновить счётчик
+     * 
+     * @param {number} pageIndex - Индекс страницы для отображения.
+     * @returns {void}
+     */
+    function renderPage(pageIndex) {
+      refreshDOM();
+      
+      if (!uiState.carouselEl || !uiState.dotsContainer || !uiState.counterEl) return;
+      
+      renderCount++;
+      
+      // Очистка старых карточек
+      while (uiState.carouselEl.firstChild) {
+        uiState.carouselEl.removeChild(uiState.carouselEl.firstChild);
+      }
+      
+      var pageItems = uiState.pages[pageIndex] || [];
+      var sm = StateManager ? StateManager.getState() : {};
+      
+      // Определение режима
+      var mode;
+      switch (sm.uiMode) {
+        case 'idle':
+          mode = 'world';
+          break;
+        case 'focus':
+          mode = 'focus';
+          break;
+        case 'search':
+        default:
+          mode = sm.seg;
+          break;
+      }
+
+      // Пустой список
+      if (pageItems.length === 0) {
+        while (uiState.dotsContainer.firstChild) {
+          uiState.dotsContainer.removeChild(uiState.dotsContainer.firstChild);
+        }
+        uiState.counterEl.textContent = '0 / 0';
+        updatePaginationButtons();
+        return;
+      }
+      
+      // Создание карточек
+      for (var i = 0; i < pageItems.length; i++) {
+        var itemEl = document.createElement('div');
+        itemEl.className = 'carousel-item';
+        itemEl.appendChild(renderItemHTML(pageItems[i], mode));
+        uiState.carouselEl.appendChild(itemEl);
+      }
+      
+      // Вычисление snapStep через LayoutMetrics
+      var firstItem = uiState.carouselEl.querySelector('.carousel-item');
+      if (firstItem) {
+        var gap = LayoutMetrics ? LayoutMetrics.getCarouselGap() : 10;
+        uiState.snapStep = firstItem.getBoundingClientRect().width + gap;
+      } else {
+        uiState.snapStep = uiState.carouselEl.clientWidth;
+      }
+
+      // Создание точек пагинации
+      while (uiState.dotsContainer.firstChild) {
+        uiState.dotsContainer.removeChild(uiState.dotsContainer.firstChild);
+      }
+      
+      for (var j = 0; j < pageItems.length; j++) {
+        var dot = document.createElement('span');
+        dot.className = 'carousel-dot' + (j === 0 ? ' active' : '');
+        uiState.dotsContainer.appendChild(dot);
+      }
+      
+      // Обновление счётчика
+      uiState.counterEl.textContent = '1 / ' + pageItems.length;
+      uiState.activeIndex = 0;
+      uiState.carouselEl.scrollLeft = 0;
+      
+      updatePaginationButtons();
+    }
+
+    /**
+     * Обработчик скролла карусели (throttled через requestAnimationFrame).
+     * 
+     * Алгоритм:
+     * 1. RAF throttling (один вызов на frame)
+     * 2. Вычисление активной карточки: idx = round(scrollLeft / snapStep)
+     * 3. Clamp idx в диапазон [0, pageItems.length - 1]
+     * 4. Обновление активной точки
+     * 5. Обновление счётчика
+     * 
+     * @returns {void}
+     */
+    function onCarouselScroll() {
+      if (uiState.scrollRAF) return;
+      
+      uiState.scrollRAF = requestAnimationFrame(function() {
+        uiState.scrollRAF = null;
+        
+        if (!uiState.carouselEl) return;
+        
+        var step = uiState.snapStep;
+        if (!step || step <= 0) return;
+        
+        var idx = Math.round(uiState.carouselEl.scrollLeft / step);
+        var pageItems = uiState.pages[uiState.currentPage] || [];
+        var maxIdx = Math.max(0, pageItems.length - 1);
+        
+        idx = Math.min(maxIdx, Math.max(0, idx));
+        
+        if (idx !== uiState.activeIndex) {
+          uiState.activeIndex = idx;
+          
+          var dots = uiState.dotsContainer.querySelectorAll('.carousel-dot');
+          for (var i = 0; i < dots.length; i++) {
+            dots[i].classList.toggle('active', i === idx);
+          }
+          
+          if (uiState.counterEl) {
+            uiState.counterEl.textContent = (idx + 1) + ' / ' + pageItems.length;
+          }
+        }
+      });
+    }
+
+    /**
+     * Плавно прокручивает карусель к карточке с указанным индексом.
+     * 
+     * @param {number} idx - Индекс карточки.
+     * @returns {void}
+     */
+    function scrollToIndex(idx) {
+      if (!uiState.carouselEl || !uiState.snapStep) return;
+      
+      uiState.carouselEl.scrollTo({
+        left: idx * uiState.snapStep,
+        behavior: 'smooth'
+      });
+    }
+
+    /**
+     * Пересчитывает snapStep при изменении размера окна.
+     * Вызывается при resize/orientationchange.
+     * 
+     * @returns {void}
+     */
+    function recalculateSnapStep() {
+      if (uiState.carouselEl && uiState.pages.length > 0) {
+        var firstItem = uiState.carouselEl.querySelector('.carousel-item');
+        if (firstItem) {
+          var gap = LayoutMetrics ? LayoutMetrics.getCarouselGap() : 10;
+          uiState.snapStep = firstItem.getBoundingClientRect().width + gap;
+        }
+      }
+    }
+
+    /**
+     * Инициализирует или пересобирает карусель на основе текущего state machine.
+     * 
+     * Алгоритм:
+     * 1. Получение state из StateManager
+     * 2. Выбор источника данных по uiMode
+     * 3. Управление видимостью seg-блока через state.showSegments
+     * 4. Пагинация списка
+     * 5. Если список пуст → показать empty state
+     * 6. Иначе → рендер текущей страницы
+     * 
+     * @returns {void}
+     */
+    function initCarousel() {
+      refreshDOM();
+      
+      var sm = StateManager ? StateManager.getState() : {};
+      var list = [];
+      
+      // Выбор источника данных
+      switch (sm.uiMode) {
+        case 'idle':
+          list = sm.streamData || [];
+          break;
+        case 'focus':
+          list = sm.lists.focus || [];
+          break;
+        case 'search':
+        default:
+          list = sm.lists[sm.seg] || [];
+          break;
+      }
+
+      // Управление видимостью seg-блока
+      var segBlock = document.querySelector('.seg');
+      if (segBlock) {
+        segBlock.style.display = sm.showSegments ? '' : 'none';
+      }
+
+      paginate(list);
+      
+      // Пустой список → empty state
+      if (uiState.totalPages === 0) {
+        if (uiState.carouselEl) {
+          uiState.carouselEl.style.display = 'none';
+        }
+        
+        var controls = document.getElementById('pagination-controls');
+        if (controls) {
+          controls.style.display = 'none';
+        }
+
+        var wrap = document.getElementById('carousel-wrap');
+        if (wrap) {
+          var existingEmpty = wrap.querySelector('.feed-empty');
+          if (existingEmpty) existingEmpty.remove();
+
+          var emptyDiv = document.createElement('div');
+          emptyDiv.className = 'feed-empty';
+          
+          var emptyT = document.createElement('div');
+          emptyT.className = 'feed-empty-t';
+          
+          // Текст empty-state зависит от режима
+          if (sm.uiMode === 'idle') {
+            emptyT.textContent = I18n ? I18n.t('stream.live') : 'Прямой эфир';
+          } else if (sm.uiMode === 'focus') {
+            emptyT.textContent = 'No focus results';
+          } else {
+            emptyT.textContent = I18n ? I18n.t('empty.local.t') : 'Пока нет мыслей';
+          }
+          
+          emptyDiv.appendChild(emptyT);
+          wrap.appendChild(emptyDiv);
+        }
+        
+        updatePaginationButtons();
+        return;
+      }
+      
+      // Есть данные → рендер карусели
+      if (uiState.carouselEl) {
+        uiState.carouselEl.style.display = '';
+      }
+      
+      var controls = document.getElementById('pagination-controls');
+      if (controls) {
+        controls.style.display = '';
+      }
+      
+      var wrap = document.getElementById('carousel-wrap');
+      if (wrap) {
+        var existingEmpty = wrap.querySelector('.feed-empty');
+        if (existingEmpty) existingEmpty.remove();
+      }
+      
+      if (uiState.currentPage >= uiState.totalPages) {
+        uiState.currentPage = Math.max(0, uiState.totalPages - 1);
+      }
+      
+      renderPage(uiState.currentPage);
+    }
+
+    /**
+     * Обновляет счётчики (бейджи) над сегментами карусели.
+     * 
+     * @returns {void}
+     */
+    function updateCounts() {
+      var sm = StateManager ? StateManager.getState() : {};
+      
+      ['local', 'world', 'seren'].forEach(function(key) {
+        var el = document.getElementById('c-' + key);
+        if (el) {
+          el.textContent = (sm.lists[key] || []).length;
+        }
+      });
+    }
+
+    /**
+     * Переключает активный сегмент (local/world/seren) и перерисовывает карусель.
+     * 
+     * @param {Segment} segKey - Ключ сегмента.
+     * @returns {void}
+     */
+    function setSegment(segKey) {
+      if (StateManager && StateManager.dispatch) {
+        StateManager.dispatch('switch-segment', { seg: segKey });
+      }
+      
+      // Обновление визуального состояния кнопок
+      document.querySelectorAll('.seg-b').forEach(function(b) {
+        b.classList.toggle('on', b.getAttribute('data-k') === segKey);
+      });
+      
+      // Инвалидация кэша подсветки
+      cachedQuery = null;
+      cachedRegex = null;
+      
+      uiState.currentPage = 0;
+      initCarousel();
+    }
+
+    /**
+     * Копирует текст в буфер обмена с фоллбэком на execCommand.
+     * 
+     * @param {string} text - Текст для копирования.
+     * @returns {void}
+     */
+    function copyToClipboard(text) {
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text).then(
+            function() {
+              if (Toast && Toast.show) {
+                Toast.show('ok', I18n ? I18n.t('toast.copied') : 'скопировано');
+              }
+            },
+            function() {
+              if (Toast && Toast.show) {
+                Toast.show('err', I18n ? I18n.t('toast.copy.fail') : 'не удалось');
+              }
+            }
+          );
+        } else {
+          // Fallback для старых браузеров
+          var ta = document.createElement('textarea');
+          ta.value = text;
+          ta.style.position = 'fixed';
+          ta.style.top = '-9999px';
+          document.body.appendChild(ta);
+          ta.select();
+          
+          try {
+            document.execCommand('copy');
+            if (Toast && Toast.show) {
+              Toast.show('ok', I18n ? I18n.t('toast.copied') : 'скопировано');
+            }
+          } catch (err) {
+            if (Toast && Toast.show) {
+              Toast.show('err', I18n ? I18n.t('toast.copy.fail') : 'не удалось');
+            }
+          }
+          
+          document.body.removeChild(ta);
+        }
+      } catch (err) {
+        if (Toast && Toast.show) {
+          Toast.show('err', I18n ? I18n.t('toast.copy.fail') : 'не удалось');
+        }
+      }
+    }
+
+    /**
+     * Обрабатывает клики по действиям внутри карточки.
+     * 
+     * Действия:
+     * - focus: dispatch('to-focus', {item})
+     * - edit: emit('editor:edit-note', {id})
+     * - copy: copyToClipboard(text)
+     * - del: confirm + DB.del(id) + emit('editor:search-request')
+     * - toggle: DB.get(id) + DB.put({shared: !shared}) + emit('editor:search-request')
+     * 
+     * @param {string} action - Имя действия (из data-act).
+     * @param {HTMLElement} element - DOM-элемент кнопки.
+     * @returns {void}
+     */
+    function handleItemAction(action, element) {
+      if (!element) return;
+      
+      var id = element.getAttribute('data-id');
+      var sm = StateManager ? StateManager.getState() : {};
+      
+      if (action === 'focus') {
+        actionStats.focus++;
+        
+        var item = null;
+        
+        // Поиск заметки в текущем активном списке
+        if (sm.uiMode === 'idle') {
+          for (var i = 0; i < sm.streamData.length; i++) {
+            if (sm.streamData[i].id === id) {
+              item = sm.streamData[i];
+              break;
+            }
+          }
+        } else if (sm.uiMode === 'focus') {
+          for (var j = 0; j < sm.lists.focus.length; j++) {
+            if (sm.lists.focus[j].id === id) {
+              item = sm.lists.focus[j];
+              break;
+            }
+          }
+        } else {
+          var segList = sm.lists[sm.seg] || [];
+          for (var k = 0; k < segList.length; k++) {
+            if (segList[k].id === id) {
+              item = segList[k];
+              break;
+            }
+          }
+        }
+        
+        if (item && item.vector) {
+          if (StateManager && StateManager.dispatch) {
+            StateManager.dispatch('to-focus', {
+              item: {
+                id: item.id,
+                text: item.text,
+                vector: item.vector,
+                peer: item.peer
+              }
+            });
+          }
+          
+          if (SearchService && SearchService.searchByVector) {
+            SearchService.searchByVector(item.vector);
+          }
+        }
+        
+        return;
+      }
+      
+      if (action === 'edit') {
+        actionStats.edit++;
+        
+        if (Bus && Bus.emit) {
+          try {
+            Bus.emit('editor:edit-note', { id: id });
+          } catch (e) {
+            if (Logger) Logger.error('StreamViewComponent', 'Bus.emit editor:edit-note failed', e);
+          }
+        }
+        
+        return;
+      }
+      
+      if (action === 'copy') {
+        actionStats.copy++;
+        
+        var copyItem = null;
+        
+        if (sm.uiMode === 'idle') {
+          for (var i = 0; i < sm.streamData.length; i++) {
+            if (sm.streamData[i].id === id) {
+              copyItem = sm.streamData[i];
+              break;
+            }
+          }
+        } else if (sm.uiMode === 'focus') {
+          for (var j = 0; j < sm.lists.focus.length; j++) {
+            if (sm.lists.focus[j].id === id) {
+              copyItem = sm.lists.focus[j];
+              break;
+            }
+          }
+        } else {
+          var segList = sm.lists[sm.seg] || [];
+          for (var k = 0; k < segList.length; k++) {
+            if (segList[k].id === id) {
+              copyItem = segList[k];
+              break;
+            }
+          }
+        }
+        
+        if (copyItem) {
+          copyToClipboard(copyItem.text);
+        }
+        
+        return;
+      }
+      
+      if (action === 'del') {
+        actionStats.del++;
+        
+        var confirmMsg = I18n ? I18n.t('del.confirm') : 'Удалить эту мысль навсегда?';
+        if (!confirm(confirmMsg)) return;
+        
+        if (DB && DB.del) {
+          DB.del(id).then(function() {
+            if (Toast && Toast.show) {
+              Toast.show('ok', I18n ? I18n.t('toast.deleted') : 'удалено');
+            }
+            
+            // Повторный поиск для обновления списков
+            if (Bus && Bus.emit) {
+              try {
+                Bus.emit('editor:search-request', { force: true });
+              } catch (e) {
+                if (Logger) Logger.error('StreamViewComponent', 'Bus.emit editor:search-request failed', e);
+              }
+            }
+          }).catch(function(err) {
+            if (Toast && Toast.show) {
+              Toast.show('err', String(err && err.message || err) || 'Delete failed');
+            }
+          });
+        }
+        
+        return;
+      }
+      
+      if (action === 'toggle') {
+        actionStats.toggle++;
+        
+        if (DB && DB.get && DB.put) {
+          DB.get(id).then(function(record) {
+            if (!record) return;
+            
+            record.shared = !record.shared;
+            
+            return DB.put(record).then(function() {
+              var msg = record.shared
+                ? (I18n ? I18n.t('toast.saved.public') : 'опубликовано')
+                : (I18n ? I18n.t('toast.saved.private') : 'сохранено лично');
+              
+              if (Toast && Toast.show) {
+                Toast.show('ok', msg);
+              }
+              
+              // Повторный поиск для обновления списков
+              if (Bus && Bus.emit) {
+                try {
+                  Bus.emit('editor:search-request', { force: true });
+                } catch (e) {
+                  if (Logger) Logger.error('StreamViewComponent', 'Bus.emit editor:search-request failed', e);
+                }
+              }
+            });
+          }).catch(function(err) {
+            if (Toast && Toast.show) {
+              Toast.show('err', String(err && err.message || err) || 'Toggle failed');
+            }
+          });
+        }
+        
+        return;
+      }
+    }
+
+    /**
+     * Делегированный обработчик кликов по обёртке карусели.
+     * Обрабатывает клики по стрелкам пагинации и действиям карточек.
+     * 
+     * @param {MouseEvent} e - Событие клика.
+     * @returns {void}
+     */
+    function handleWrapClick(e) {
+      // Клик по кнопке "Предыдущая"
+      var prevBtn = e.target.closest('#pagination-prev');
+      if (prevBtn && !prevBtn.disabled) {
+        if (uiState.currentPage > 0) {
+          uiState.currentPage--;
+          renderPage(uiState.currentPage);
+        }
+        return;
+      }
+      
+      // Клик по кнопке "Следующая"
+      var nextBtn = e.target.closest('#pagination-next');
+      if (nextBtn && !nextBtn.disabled) {
+        if (uiState.currentPage < uiState.totalPages - 1) {
+          uiState.currentPage++;
+          renderPage(uiState.currentPage);
+        }
+        return;
+      }
+      
+      // Клик по действию карточки
+      var actionEl = e.target.closest('[data-act]');
+      if (actionEl) {
+        handleItemAction(actionEl.getAttribute('data-act'), actionEl);
+      }
+    }
+
+    /**
+     * Привязывает первичные DOM-события (клики по сегментам и обёртке).
+     * Все обработчики привязываются к AbortSignal для автоматической очистки.
+     * 
+     * @returns {void}
+     */
+    function bindDOMEvents() {
+      if (!abortController) return;
+      var signal = abortController.signal;
+      
+      // Клики по кнопкам сегментов
+      document.querySelectorAll('.seg-b').forEach(function(b) {
+        b.addEventListener('click', function() {
+          setSegment(b.getAttribute('data-k'));
+        }, { signal: signal });
+      });
+
+      // Делегированный обработчик кликов по обёртке карусели
+      var wrap = document.getElementById('carousel-wrap');
+      if (wrap) {
+        wrap.addEventListener('click', handleWrapClick, { signal: signal });
+      }
+    }
+
+    /**
+     * Обработчик события state:changed.
+     * Перерисовывает карусель при изменении state.
+     * 
+     * @param {AppState} newState - Новое состояние.
+     * @returns {void}
+     */
+    function handleStateChanged(newState) {
+      if (!newState) return;
+      initCarousel();
+    }
+
+    /**
+     * Обработчик события i18n:change.
+     * Обновляет переводы и перерисовывает карусель.
+     * 
+     * @returns {void}
+     */
+    function handleI18nChange() {
+      var sm = StateManager ? StateManager.getState() : {};
+      
+      document.querySelectorAll('.seg-b').forEach(function(b) {
+        var lbl = b.querySelector('.lbl');
+        var k = b.getAttribute('data-k');
+        
+        if (lbl && k === 'local') {
+          lbl.textContent = I18n ? I18n.t('seg.local') : 'Моё';
+        } else if (lbl && k === 'world') {
+          lbl.textContent = I18n ? I18n.t('seg.world') : 'Мир';
+        } else if (lbl && k === 'seren') {
+          lbl.textContent = I18n ? I18n.t('seg.seren') : 'Озарения';
+        }
+      });
+      
+      updateCounts();
+      
+      // Инвалидация кэша подсветки
+      cachedQuery = null;
+      cachedRegex = null;
+      
+      initCarousel();
+    }
+
+    /**
+     * Обработчик события state:lists-changed.
+     * Обновляет счётчики и перерисовывает карусель.
+     * 
+     * @returns {void}
+     */
+    function handleListsChanged() {
+      updateCounts();
+      
+      // Инвалидация кэша подсветки
+      cachedQuery = null;
+      cachedRegex = null;
+      
+      uiState.currentPage = 0;
+      initCarousel();
+    }
+
+    /**
+     * Обработчик события net:parent-updated.
+     * Перерисовывает карусель для обновления счётчиков детей.
+     * 
+     * @returns {void}
+     */
+    function handleParentUpdated() {
+      var sm = StateManager ? StateManager.getState() : {};
+      
+      // Перерисовываем только если не в live stream
+      if (sm.uiMode !== 'idle') {
+        initCarousel();
+      }
+    }
+
+    /**
+     * Возвращает статистику компонента.
+     * 
+     * @returns {{renders: number, actions: Object}}
+     */
+    function getStats() {
+      return {
+        renders: renderCount,
+        actions: {
+          focus: actionStats.focus,
+          edit: actionStats.edit,
+          copy: actionStats.copy,
+          del: actionStats.del,
+          toggle: actionStats.toggle
+        }
+      };
+    }
+
+    /**
+     * Сбрасывает статистику.
+     * 
+     * @returns {void}
+     */
+    function resetStats() {
+      renderCount = 0;
+      actionStats.focus = 0;
+      actionStats.edit = 0;
+      actionStats.copy = 0;
+      actionStats.del = 0;
+      actionStats.toggle = 0;
+    }
+
+    /**
+     * Инициализация модуля.
+     * Привязывает события, подписывается на Bus, рендерит UI.
+     * 
+     * @param {AbortSignal} [signal] - Сигнал для автоочистки.
+     * @returns {void}
+     */
+    function init(signal) {
+      if (abortController) {
+        abortController.abort();
+      }
+
+      abortController = new AbortController();
+      var internalSignal = abortController.signal;
+      
+      bindDOMEvents();
+      
+      var sm = StateManager ? StateManager.getState() : {};
+      
+      document.querySelectorAll('.seg-b').forEach(function(b) {
+        b.classList.toggle('on', b.getAttribute('data-k') === sm.seg);
+      });
+      
+      // Scroll listener на карусели с passive: true
+      var carouselEl = document.getElementById('carousel');
+      if (carouselEl) {
+        carouselEl.addEventListener('scroll', onCarouselScroll, {
+          passive: true,
+          signal: internalSignal
+        });
+        
+        // Keyboard navigation (стрелки влево/вправо)
+        carouselEl.addEventListener('keydown', function(e) {
+          var currentList = uiState.pages[uiState.currentPage] || [];
+          
+          if (!currentList || currentList.length === 0) return;
+          
+          if (e.key === 'ArrowRight') {
+            e.preventDefault();
+            scrollToIndex(Math.min(uiState.activeIndex + 1, currentList.length - 1));
+          } else if (e.key === 'ArrowLeft') {
+            e.preventDefault();
+            scrollToIndex(Math.max(uiState.activeIndex - 1, 0));
+          }
+        }, { signal: internalSignal });
+      }
+
+      // Resize/orientationchange listeners для пересчёта snapStep
+      var resizeHandler = function() {
+        recalculateSnapStep();
+      };
+      
+      window.addEventListener('resize', resizeHandler, { signal: internalSignal });
+      window.addEventListener('orientationchange', resizeHandler, { signal: internalSignal });
+
+      // Bus-подписки с автоотпиской через signal
+      if (Bus && typeof Bus.subscribe === 'function') {
+        Bus.subscribe('i18n:change', handleI18nChange, internalSignal);
+        Bus.subscribe('state:lists-changed', handleListsChanged, internalSignal);
+        Bus.subscribe('net:parent-updated', handleParentUpdated, internalSignal);
+      }
+      
+      // StateManager.subscribe не поддерживает signal, сохраняем функцию отписки
+      if (StateManager && typeof StateManager.subscribe === 'function') {
+        stateUnsubscribe = StateManager.subscribe(handleStateChanged);
+        
+        // Регистрируем отписку через signal
+        internalSignal.addEventListener('abort', function() {
+          if (stateUnsubscribe) {
+            stateUnsubscribe();
+            stateUnsubscribe = null;
+          }
+        }, { once: true });
+      }
+      
+      updateCounts();
+      initCarousel();
+
+      if (Logger) {
+        Logger.info('StreamViewComponent', 'Initialized', {
+          pageSize: PAGE_SIZE
+        });
+      }
+    }
+
+    /**
+     * Уничтожение модуля.
+     * Очищает таймеры, снимает обработчики, отписывается от шины.
+     * 
+     * @returns {void}
+     */
+    function destroy() {
+      // Отмена pending requestAnimationFrame
+      if (uiState.scrollRAF) {
+        cancelAnimationFrame(uiState.scrollRAF);
+        uiState.scrollRAF = null;
+      }
+      
+      // Отписка от всех событий через AbortController
+      if (abortController) {
+        abortController.abort();
+        abortController = null;
+      }
+      
+      // Очистка состояния карусели
+      uiState.carouselEl = null;
+      uiState.dotsContainer = null;
+      uiState.counterEl = null;
+      uiState.prevBtn = null;
+      uiState.nextBtn = null;
+      uiState.pages = [];
+      
+      // Сброс кэша RegExp
+      cachedQuery = null;
+      cachedRegex = null;
+      
+      // Очистка функции отписки от StateManager
+      if (stateUnsubscribe) {
+        stateUnsubscribe();
+        stateUnsubscribe = null;
+      }
+      
+      resetStats();
+    }
+
+    return {
+      // Статистика
+      getStats: getStats,
+      resetStats: resetStats,
+
+      // Lifecycle
+      init: init,
+      destroy: destroy
+    };
+  }, ['Config', 'Logger', 'Bus', 'I18n', 'Utils', 'StateManager', 'DB', 'Toast', 'EditorComponent', 'SearchService', 'LayoutMetrics']);
   /* <!-- MODULE: StreamViewComponent --> */
 
   /* <!-- MODULE: BaseViewComponent --> */
