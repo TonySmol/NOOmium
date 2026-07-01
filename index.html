@@ -11671,13 +11671,1022 @@ kbd {
   /* <!-- MODULE: NotePublisher --> */
 
   /* <!-- MODULE: AsyncScheduler --> */
-  старт
-  энд
+  /**
+   * @typedef {'debounce' | 'delay' | 'repeat' | 'throttle'} TaskType
+   * @description Тип запланированной задачи.
+   */
+
+  /**
+   * @typedef {Object} ScheduledTask
+   * @description Внутренняя структура запланированной задачи.
+   * @property {TaskType} type - Тип задачи.
+   * @property {number} timer - ID таймера (setTimeout/setInterval).
+   * @property {Function} fn - Функция для выполнения.
+   * @property {Array} args - Аргументы для fn.
+   * @property {number} [interval] - Интервал (для repeat/throttle).
+   * @property {number} [lastRun] - Timestamp последнего запуска (для throttle).
+   */
+
+  /**
+   * @module AsyncScheduler
+   * @description Централизованный планировщик асинхронных задач.
+   * 
+   * Зона ответственности:
+   * - Debounce: запуск после паузы (EditorComponent: поиск через 800мс)
+   * - Delay: одноразовая отложенная задача (QueryHandler: stagger ответов)
+   * - Repeat: периодическая задача (PeerManager: heartbeat, QueryHandler: cleanup)
+   * - Throttle: не чаще чем раз в N мс (для будущих use cases)
+   * - Глобальная отмена всех задач через cancelAll()
+   * - Отмена конкретной задачи через cancel(key)
+   * - Обработка ошибок в задачах (try/catch + логирование)
+   * 
+   * Архитектурные принципы:
+   * - Единая точка для всех debounce/throttle/delay/repeat операций
+   * - Каждый ключ (key) — уникальная строка, перезаписывает предыдущую задачу
+   * - Нет прямых setTimeout/setInterval в других модулях
+   * - Автоматическая очистка при destroy() (предотвращает утечки)
+   * - Whitelist валидация ключей (только непустые строки)
+   * 
+   * Используется модулями:
+   * - EditorComponent → debounce('editor-search', emit, 800)
+   * - PeerManager → repeat('peermanager-heartbeat', heartbeat, 30000)
+   * - QueryHandler → delay('query-response-123', publish, 500)
+   * - QueryHandler → repeat('queryhandler-cleanup', cleanup, 300000)
+   * - FocusSearchStrategy → мог бы использовать, но имеет свой throttle
+   * 
+   * @namespace AsyncScheduler
+   */
+  DI.register('AsyncScheduler', function(Config, Logger) {
+    
+    /**
+     * Реестр активных задач: key → ScheduledTask.
+     * @type {Map<string, ScheduledTask>}
+     */
+    var tasks = new Map();
+
+    /**
+     * Счётчик созданных задач (для статистики).
+     * @type {number}
+     */
+    var createdCount = 0;
+
+    /**
+     * Счётчик выполненных задач (для статистики).
+     * @type {number}
+     */
+    var executedCount = 0;
+
+    /**
+     * Счётчик отменённых задач (для статистики).
+     * @type {number}
+     */
+    var cancelledCount = 0;
+
+    /**
+     * Счётчик ошибок в задачах (для статистики).
+     * @type {number}
+     */
+    var errorsCount = 0;
+
+    /**
+     * Валидирует ключ задачи.
+     * 
+     * @param {string} key - Ключ для проверки.
+     * @returns {boolean} true если ключ валидный.
+     */
+    function isValidKey(key) {
+      return typeof key === 'string' && key.length > 0;
+    }
+
+    /**
+     * Безопасно выполняет функцию с try/catch.
+     * Логирует ошибки через Logger, не прерывает работу планировщика.
+     * 
+     * @param {Function} fn - Функция для выполнения.
+     * @param {Array} args - Аргументы.
+     * @param {string} key - Ключ задачи (для логирования).
+     * @returns {void}
+     */
+    function safeExecute(fn, args, key) {
+      try {
+        fn.apply(null, args);
+        executedCount++;
+      } catch (err) {
+        errorsCount++;
+        if (Logger) {
+          Logger.error('AsyncScheduler', 'Task "' + key + '" failed', err);
+        }
+      }
+    }
+
+    /**
+     * Отменяет задачу по ключу.
+     * Очищает setTimeout или clearInterval в зависимости от типа.
+     * 
+     * @param {string} key - Ключ задачи.
+     * @returns {boolean} true если задача была найдена и отменена.
+     */
+    function cancel(key) {
+      if (!isValidKey(key)) {
+        return false;
+      }
+
+      var task = tasks.get(key);
+      if (!task) {
+        return false;
+      }
+
+      if (task.type === 'repeat') {
+        clearInterval(task.timer);
+      } else {
+        clearTimeout(task.timer);
+      }
+
+      tasks.delete(key);
+      cancelledCount++;
+
+      if (Logger) {
+        Logger.debug('AsyncScheduler', 'Task cancelled', {
+          key: key,
+          type: task.type
+        });
+      }
+
+      return true;
+    }
+
+    /**
+     * Планирует debounce-задачу: запуск после паузы.
+     * Если вызывается повторно до истечения delay — предыдущая задача отменяется.
+     * 
+     * Используется для:
+     * - EditorComponent: поиск через 800мс после последнего ввода
+     * - BaseViewComponent: фильтрация через 200мс после ввода
+     * 
+     * @param {string} key - Уникальный ключ задачи.
+     * @param {Function} fn - Функция для выполнения.
+     * @param {number} delay - Задержка в миллисекундах.
+     * @param {...*} args - Аргументы для fn.
+     * @returns {boolean} true если задача запланирована.
+     * 
+     * @example
+     * AsyncScheduler.debounce('editor-search', function() {
+     *   Bus.emit('editor:search-request', {text: '...'});
+     * }, 800);
+     */
+    function debounce(key, fn, delay, args) {
+      if (!isValidKey(key)) {
+        if (Logger) Logger.warn('AsyncScheduler', 'debounce: invalid key');
+        return false;
+      }
+      if (typeof fn !== 'function') {
+        if (Logger) Logger.warn('AsyncScheduler', 'debounce: fn must be a function');
+        return false;
+      }
+      if (typeof delay !== 'number' || delay < 0) {
+        if (Logger) Logger.warn('AsyncScheduler', 'debounce: invalid delay');
+        return false;
+      }
+
+      // Отменяем предыдущую задачу с тем же ключом
+      cancel(key);
+
+      var taskArgs = Array.prototype.slice.call(arguments, 3);
+
+      var timer = setTimeout(function() {
+        tasks.delete(key);
+        safeExecute(fn, taskArgs, key);
+      }, delay);
+
+      tasks.set(key, {
+        type: 'debounce',
+        timer: timer,
+        fn: fn,
+        args: taskArgs
+      });
+
+      createdCount++;
+
+      if (Logger) {
+        Logger.debug('AsyncScheduler', 'Debounce scheduled', {
+          key: key,
+          delay: delay
+        });
+      }
+
+      return true;
+    }
+
+    /**
+     * Планирует одноразовую отложенную задачу.
+     * Если вызывается повторно с тем же ключом — предыдущая отменяется.
+     * 
+     * Используется для:
+     * - QueryHandler: stagger ответов (delay 500мс * index)
+     * - UI компоненты: отложенные действия после анимации
+     * 
+     * @param {string} key - Уникальный ключ задачи.
+     * @param {Function} fn - Функция для выполнения.
+     * @param {number} delay - Задержка в миллисекундах.
+     * @param {...*} args - Аргументы для fn.
+     * @returns {boolean} true если задача запланирована.
+     * 
+     * @example
+     * AsyncScheduler.delay('query-response-123', function() {
+     *   NotePublisher.publishAnswer(queryId, answer);
+     * }, 500);
+     */
+    function delay(key, fn, delay, args) {
+      if (!isValidKey(key)) {
+        if (Logger) Logger.warn('AsyncScheduler', 'delay: invalid key');
+        return false;
+      }
+      if (typeof fn !== 'function') {
+        if (Logger) Logger.warn('AsyncScheduler', 'delay: fn must be a function');
+        return false;
+      }
+      if (typeof delay !== 'number' || delay < 0) {
+        if (Logger) Logger.warn('AsyncScheduler', 'delay: invalid delay');
+        return false;
+      }
+
+      // Отменяем предыдущую задачу с тем же ключом
+      cancel(key);
+
+      var taskArgs = Array.prototype.slice.call(arguments, 3);
+
+      var timer = setTimeout(function() {
+        tasks.delete(key);
+        safeExecute(fn, taskArgs, key);
+      }, delay);
+
+      tasks.set(key, {
+        type: 'delay',
+        timer: timer,
+        fn: fn,
+        args: taskArgs
+      });
+
+      createdCount++;
+
+      if (Logger) {
+        Logger.debug('AsyncScheduler', 'Delay scheduled', {
+          key: key,
+          delay: delay
+        });
+      }
+
+      return true;
+    }
+
+    /**
+     * Планирует периодическую задачу (setInterval).
+     * Если вызывается повторно с тем же ключом — предыдущая отменяется.
+     * 
+     * Используется для:
+     * - PeerManager: heartbeat каждые 30с
+     * - QueryHandler: cleanup peerRateLimit каждые 5 минут
+     * 
+     * @param {string} key - Уникальный ключ задачи.
+     * @param {Function} fn - Функция для выполнения.
+     * @param {number} interval - Интервал в миллисекундах.
+     * @param {...*} args - Аргументы для fn.
+     * @returns {boolean} true если задача запланирована.
+     * 
+     * @example
+     * AsyncScheduler.repeat('peermanager-heartbeat', function() {
+     *   PeerManager.heartbeat();
+     * }, 30000);
+     */
+    function repeat(key, fn, interval, args) {
+      if (!isValidKey(key)) {
+        if (Logger) Logger.warn('AsyncScheduler', 'repeat: invalid key');
+        return false;
+      }
+      if (typeof fn !== 'function') {
+        if (Logger) Logger.warn('AsyncScheduler', 'repeat: fn must be a function');
+        return false;
+      }
+      if (typeof interval !== 'number' || interval <= 0) {
+        if (Logger) Logger.warn('AsyncScheduler', 'repeat: invalid interval');
+        return false;
+      }
+
+      // Отменяем предыдущую задачу с тем же ключом
+      cancel(key);
+
+      var taskArgs = Array.prototype.slice.call(arguments, 3);
+
+      var timer = setInterval(function() {
+        safeExecute(fn, taskArgs, key);
+      }, interval);
+
+      tasks.set(key, {
+        type: 'repeat',
+        timer: timer,
+        fn: fn,
+        args: taskArgs,
+        interval: interval
+      });
+
+      createdCount++;
+
+      if (Logger) {
+        Logger.debug('AsyncScheduler', 'Repeat scheduled', {
+          key: key,
+          interval: interval
+        });
+      }
+
+      return true;
+    }
+
+    /**
+     * Планирует throttle-задачу: не чаще чем раз в interval.
+     * Использует leading edge (выполняется немедленно, затем игнорирует до истечения interval).
+     * 
+     * @param {string} key - Уникальный ключ задачи.
+     * @param {Function} fn - Функция для выполнения.
+     * @param {number} interval - Минимальный интервал между запусками (мс).
+     * @param {...*} args - Аргументы для fn.
+     * @returns {boolean} true если задача выполнена или запланирована.
+     * 
+     * @example
+     * AsyncScheduler.throttle('scroll-handler', function() {
+     *   updateVisibleItems();
+     * }, 100);
+     */
+    function throttle(key, fn, interval, args) {
+      if (!isValidKey(key)) {
+        if (Logger) Logger.warn('AsyncScheduler', 'throttle: invalid key');
+        return false;
+      }
+      if (typeof fn !== 'function') {
+        if (Logger) Logger.warn('AsyncScheduler', 'throttle: fn must be a function');
+        return false;
+      }
+      if (typeof interval !== 'number' || interval <= 0) {
+        if (Logger) Logger.warn('AsyncScheduler', 'throttle: invalid interval');
+        return false;
+      }
+
+      var taskArgs = Array.prototype.slice.call(arguments, 3);
+      var now = Date.now();
+
+      var existing = tasks.get(key);
+      
+      // Если задача уже существует и interval не истёк — игнорируем
+      if (existing && existing.type === 'throttle' && existing.lastRun) {
+        var elapsed = now - existing.lastRun;
+        if (elapsed < interval) {
+          if (Logger) {
+            Logger.debug('AsyncScheduler', 'Throttle ignored (too soon)', {
+              key: key,
+              elapsed: elapsed,
+              interval: interval
+            });
+          }
+          return false;
+        }
+      }
+
+      // Выполняем немедленно (leading edge)
+      safeExecute(fn, taskArgs, key);
+
+      // Сохраняем timestamp последнего запуска
+      tasks.set(key, {
+        type: 'throttle',
+        timer: 0, // throttle не использует timer
+        fn: fn,
+        args: taskArgs,
+        interval: interval,
+        lastRun: now
+      });
+
+      createdCount++;
+
+      if (Logger) {
+        Logger.debug('AsyncScheduler', 'Throttle executed', {
+          key: key,
+          interval: interval
+        });
+      }
+
+      return true;
+    }
+
+    /**
+     * Отменяет все активные задачи.
+     * Вызывается при destroy() или глобальном reset.
+     * 
+     * @returns {number} Количество отменённых задач.
+     */
+    function cancelAll() {
+      var count = tasks.size;
+      var keys = Array.from(tasks.keys());
+
+      for (var i = 0; i < keys.length; i++) {
+        cancel(keys[i]);
+      }
+
+      if (Logger && count > 0) {
+        Logger.info('AsyncScheduler', 'All tasks cancelled', { count: count });
+      }
+
+      return count;
+    }
+
+    /**
+     * Проверяет, активна ли задача с указанным ключом.
+     * 
+     * @param {string} key - Ключ задачи.
+     * @returns {boolean} true если задача существует.
+     */
+    function isActive(key) {
+      if (!isValidKey(key)) return false;
+      return tasks.has(key);
+    }
+
+    /**
+     * Возвращает тип активной задачи.
+     * 
+     * @param {string} key - Ключ задачи.
+     * @returns {TaskType | null} Тип задачи или null если не существует.
+     */
+    function getTaskType(key) {
+      if (!isValidKey(key)) return null;
+      var task = tasks.get(key);
+      return task ? task.type : null;
+    }
+
+    /**
+     * Возвращает список всех активных ключей.
+     * 
+     * @returns {string[]} Массив ключей.
+     */
+    function getActiveKeys() {
+      return Array.from(tasks.keys());
+    }
+
+    /**
+     * Возвращает количество активных задач.
+     * 
+     * @returns {number}
+     */
+    function getActiveCount() {
+      return tasks.size;
+    }
+
+    /**
+     * Возвращает статистику планировщика.
+     * 
+     * @returns {{created: number, executed: number, cancelled: number, errors: number, active: number}}
+     */
+    function getStats() {
+      return {
+        created: createdCount,
+        executed: executedCount,
+        cancelled: cancelledCount,
+        errors: errorsCount,
+        active: tasks.size
+      };
+    }
+
+    /**
+     * Сбрасывает статистику.
+     * 
+     * @returns {void}
+     */
+    function resetStats() {
+      createdCount = 0;
+      executedCount = 0;
+      cancelledCount = 0;
+      errorsCount = 0;
+    }
+
+    /**
+     * Инициализация модуля.
+     * AsyncScheduler не требует автоматической инициализации.
+     * 
+     * @param {AbortSignal} [signal] - Сигнал для автоочистки.
+     * @returns {void}
+     */
+    function init(signal) {
+      if (Logger) {
+        Logger.info('AsyncScheduler', 'Initialized');
+      }
+    }
+
+    /**
+     * Уничтожение модуля.
+     * Отменяет все активные задачи, очищает статистику.
+     * 
+     * @returns {void}
+     */
+    function destroy() {
+      cancelAll();
+      resetStats();
+    }
+
+    return {
+      debounce: debounce,
+      delay: delay,
+      repeat: repeat,
+      throttle: throttle,
+      cancel: cancel,
+      cancelAll: cancelAll,
+      isActive: isActive,
+      getTaskType: getTaskType,
+      getActiveKeys: getActiveKeys,
+      getActiveCount: getActiveCount,
+      getStats: getStats,
+      resetStats: resetStats,
+      init: init,
+      destroy: destroy
+    };
+  }, ['Config', 'Logger']);
   /* <!-- MODULE: AsyncScheduler --> */
 
   /* <!-- MODULE: LayoutMetrics --> */
-  старт
-  энд
+  /**
+   * @typedef {Object} MetricsCache
+   * @description Внутренняя структура кэша CSS-метрик.
+   * @property {number|null} carouselGap - Gap между carousel-item (px).
+   * @property {number|null} baseItemHeight - Высота карточки в BaseView (px).
+   * @property {number|null} baseItemGap - Gap между карточками в BaseView (px).
+   * @property {number} timestamp - Timestamp последнего обновления.
+   */
+
+  /**
+   * @module LayoutMetrics
+   * @description Чтение CSS-метрик из DOM для вычислений в UI-компонентах.
+   * 
+   * Зона ответственности:
+   * - Чтение CSS-переменных (gap, размеры) через getComputedStyle
+   * - Вычисление точных метрик для carousel snap (width + gap)
+   * - Вычисление метрик для virtual scroll в BaseView
+   * - Кэширование значений с инвалидацией при resize/orientationchange
+   * - Fallback на константы при недоступности DOM или CSS-переменных
+   * 
+   * Архитектурные принципы:
+   * - НЕ знает о UI-компонентах, StateManager, бизнес-логике
+   * - Предоставляет чистые геттеры без побочных эффектов
+   * - Кэш с TTL и инвалидацией по событиям окна
+   * - Whitelist валидация имён CSS-свойств (защита от injection)
+   * - Try/catch вокруг всех DOM-операций
+   * 
+   * Решаемая проблема:
+   * В оригинальном коде v1 магические числа типа `snapStep = width + 10`
+   * делали carousel хрупким при изменении CSS. LayoutMetrics читает
+   * реальные значения из CSS и предоставляет единый API.
+   * 
+   * Используется модулями:
+   * - StreamViewComponent → snapStep = itemWidth + getCarouselGap()
+   * - BaseViewComponent → ROW_SIZE = getBaseItemHeight() + getBaseItemGap()
+   * 
+   * Слушает события:
+   * - `layout:invalidate` — принудительная инвалидация кэша (от других модулей)
+   * 
+   * @namespace LayoutMetrics
+   */
+  DI.register('LayoutMetrics', function(Config, Logger, Bus, AsyncScheduler) {
+    
+    /**
+     * Контроллер для управления подписками.
+     * @type {AbortController | null}
+     */
+    var abortController = null;
+
+    /**
+     * Кэш метрик.
+     * @type {MetricsCache}
+     */
+    var cache = {
+      carouselGap: null,
+      baseItemHeight: null,
+      baseItemGap: null,
+      timestamp: 0
+    };
+
+    /**
+     * Время жизни кэша (5 минут).
+     * Защита от устаревших значений при длительной работе без resize.
+     * @type {number}
+     */
+    var CACHE_TTL = 5 * 60 * 1000;
+
+    /**
+     * Whitelist валидных CSS-переменных.
+     * Используется для защиты от injection при динамическом чтении.
+     * @type {Set<string>}
+     */
+    var ALLOWED_CSS_VARS = new Set([
+      '--gap',
+      '--gap-sm',
+      '--r',
+      '--r-sm',
+      '--hdr-h',
+      '--btab-h'
+    ]);
+
+    /**
+     * Fallback-значения для метрик.
+     * Используются если CSS-переменные недоступны.
+     * @type {Object<string, number>}
+     */
+    var FALLBACKS = {
+      carouselGap: 10,
+      baseItemHeight: 100,
+      baseItemGap: 8
+    };
+
+    /**
+     * Счётчик чтений из кэша (для статистики).
+     * @type {number}
+     */
+    var cacheHits = 0;
+
+    /**
+     * Счётчик вычислений (для статистики).
+     * @type {number}
+     */
+    var computations = 0;
+
+    /**
+     * Счётчик инвалидаций кэша (для статистики).
+     * @type {number}
+     */
+    var invalidations = 0;
+
+    /**
+     * Безопасно читает CSS-переменную из :root.
+     * 
+     * @param {string} varName - Имя CSS-переменной (должна быть в whitelist).
+     * @param {number} fallback - Значение по умолчанию при ошибке.
+     * @returns {number} Числовое значение CSS-переменной.
+     */
+    function readCssVar(varName, fallback) {
+      if (!ALLOWED_CSS_VARS.has(varName)) {
+        if (Logger) {
+          Logger.warn('LayoutMetrics', 'CSS var not in whitelist', { varName: varName });
+        }
+        return fallback;
+      }
+
+      try {
+        if (typeof document === 'undefined' || !document.documentElement) {
+          return fallback;
+        }
+
+        var style = getComputedStyle(document.documentElement);
+        var value = style.getPropertyValue(varName);
+
+        if (!value || typeof value !== 'string') {
+          return fallback;
+        }
+
+        // Извлекаем число из значения вида "8px" или "8"
+        var num = parseFloat(value);
+        return isFinite(num) ? num : fallback;
+      } catch (e) {
+        if (Logger) Logger.warn('LayoutMetrics', 'readCssVar failed', { varName: varName, error: e });
+        return fallback;
+      }
+    }
+
+    /**
+     * Проверяет, валиден ли кэш (не истёк TTL).
+     * 
+     * @returns {boolean} true если кэш валиден.
+     */
+    function isCacheValid() {
+      if (cache.timestamp === 0) return false;
+      return (Date.now() - cache.timestamp) < CACHE_TTL;
+    }
+
+    /**
+     * Инвалидирует весь кэш.
+     * Вызывается при resize/orientationchange/layout:invalidate.
+     * 
+     * @returns {void}
+     */
+    function invalidate() {
+      cache.carouselGap = null;
+      cache.baseItemHeight = null;
+      cache.baseItemGap = null;
+      cache.timestamp = 0;
+      invalidations++;
+
+      if (Logger) {
+        Logger.debug('LayoutMetrics', 'Cache invalidated', {
+          totalInvalidations: invalidations
+        });
+      }
+    }
+
+    /**
+     * Вычисляет и кэширует carousel gap.
+     * Читает CSS-переменную --gap (по умолчанию 10px).
+     * 
+     * @returns {number} Gap между carousel-item в пикселях.
+     */
+    function computeCarouselGap() {
+      var value = readCssVar('--gap', FALLBACKS.carouselGap);
+      cache.carouselGap = value;
+      cache.timestamp = Date.now();
+      computations++;
+
+      if (Logger) {
+        Logger.debug('LayoutMetrics', 'Computed carouselGap', {
+          value: value,
+          fallback: FALLBACKS.carouselGap
+        });
+      }
+
+      return value;
+    }
+
+    /**
+     * Вычисляет и кэширует высоту карточки BaseView.
+     * Константа в CSS: .bi { height: 100px; }
+     * 
+     * @returns {number} Высота карточки в пикселях.
+     */
+    function computeBaseItemHeight() {
+      // В CSS жёстко задано: .bi { height: 100px; }
+      // Можно было бы читать из DOM, но это константа дизайна
+      var value = 100;
+
+      // Попытка чтения из DOM (для future-proof, если станет CSS-переменной)
+      try {
+        if (typeof document !== 'undefined') {
+          var bi = document.querySelector('.bi');
+          if (bi) {
+            var height = bi.getBoundingClientRect().height;
+            if (isFinite(height) && height > 0) {
+              value = Math.round(height);
+            }
+          }
+        }
+      } catch (e) {
+        if (Logger) Logger.warn('LayoutMetrics', 'Failed to read .bi height from DOM', e);
+      }
+
+      if (value === 100) {
+        value = FALLBACKS.baseItemHeight;
+      }
+
+      cache.baseItemHeight = value;
+      cache.timestamp = Date.now();
+      computations++;
+
+      return value;
+    }
+
+    /**
+     * Вычисляет и кэширует gap между карточками BaseView.
+     * Константа в CSS: var(--gap) = 8px.
+     * 
+     * @returns {number} Gap в пикселях.
+     */
+    function computeBaseItemGap() {
+      var value = readCssVar('--gap', FALLBACKS.baseItemGap);
+      cache.baseItemGap = value;
+      cache.timestamp = Date.now();
+      computations++;
+
+      return value;
+    }
+
+    /**
+     * Возвращает gap между carousel-item в пикселях.
+     * Используется StreamViewComponent для вычисления snapStep.
+     * 
+     * Формула snapStep: item.getBoundingClientRect().width + getCarouselGap()
+     * 
+     * @returns {number} Gap в пикселях (обычно 10).
+     * 
+     * @example
+     * var gap = LayoutMetrics.getCarouselGap();
+     * var firstItem = carousel.querySelector('.carousel-item');
+     * var snapStep = firstItem.getBoundingClientRect().width + gap;
+     */
+    function getCarouselGap() {
+      if (isCacheValid() && cache.carouselGap !== null) {
+        cacheHits++;
+        return cache.carouselGap;
+      }
+      return computeCarouselGap();
+    }
+
+    /**
+     * Возвращает высоту карточки BaseView в пикселях.
+     * Используется для вычисления ROW_SIZE в виртуальном скролле.
+     * 
+     * @returns {number} Высота в пикселях (обычно 100).
+     * 
+     * @example
+     * var height = LayoutMetrics.getBaseItemHeight();
+     * var gap = LayoutMetrics.getBaseItemGap();
+     * var ROW_SIZE = height + gap;
+     */
+    function getBaseItemHeight() {
+      if (isCacheValid() && cache.baseItemHeight !== null) {
+        cacheHits++;
+        return cache.baseItemHeight;
+      }
+      return computeBaseItemHeight();
+    }
+
+    /**
+     * Возвращает gap между карточками BaseView в пикселях.
+     * 
+     * @returns {number} Gap в пикселях (обычно 8).
+     */
+    function getBaseItemGap() {
+      if (isCacheValid() && cache.baseItemGap !== null) {
+        cacheHits++;
+        return cache.baseItemGap;
+      }
+      return computeBaseItemGap();
+    }
+
+    /**
+     * Возвращает полный размер строки для виртуального скролла.
+     * Convenience метод: height + gap.
+     * 
+     * @returns {number} ROW_SIZE в пикселях (обычно 108).
+     */
+    function getBaseRowSize() {
+      return getBaseItemHeight() + getBaseItemGap();
+    }
+
+    /**
+     * Возвращает высоту header в пикселях.
+     * Читается из CSS-переменной --hdr-h.
+     * 
+     * @returns {number} Высота header (обычно 48).
+     */
+    function getHeaderHeight() {
+      return readCssVar('--hdr-h', 48);
+    }
+
+    /**
+     * Возвращает высоту bottom tab bar в пикселях.
+     * Читается из CSS-переменной --btab-h.
+     * 
+     * @returns {number} Высота bottom bar (обычно 56).
+     */
+    function getBottomTabHeight() {
+      return readCssVar('--btab-h', 56);
+    }
+
+    /**
+     * Возвращает доступную высоту для контента.
+     * Вычисляется как window.innerHeight - header - bottomTab.
+     * 
+     * @returns {number} Доступная высота в пикселях.
+     */
+    function getAvailableHeight() {
+      try {
+        if (typeof window === 'undefined') {
+          return 600; // Fallback
+        }
+        var total = window.innerHeight;
+        return total - getHeaderHeight() - getBottomTabHeight();
+      } catch (e) {
+        if (Logger) Logger.warn('LayoutMetrics', 'getAvailableHeight failed', e);
+        return 600;
+      }
+    }
+
+    /**
+     * Возвращает текущее состояние кэша.
+     * 
+     * @returns {{valid: boolean, age: number, values: MetricsCache}}
+     */
+    function getCacheState() {
+      return {
+        valid: isCacheValid(),
+        age: cache.timestamp ? Date.now() - cache.timestamp : 0,
+        values: {
+          carouselGap: cache.carouselGap,
+          baseItemHeight: cache.baseItemHeight,
+          baseItemGap: cache.baseItemGap
+        }
+      };
+    }
+
+    /**
+     * Возвращает статистику использования.
+     * 
+     * @returns {{hits: number, computations: number, invalidations: number}}
+     */
+    function getStats() {
+      return {
+        hits: cacheHits,
+        computations: computations,
+        invalidations: invalidations
+      };
+    }
+
+    /**
+     * Сбрасывает статистику.
+     * 
+     * @returns {void}
+     */
+    function resetStats() {
+      cacheHits = 0;
+      computations = 0;
+      invalidations = 0;
+    }
+
+    /**
+     * Обработчик resize/orientationchange.
+     * Инвалидирует кэш для пересчёта при следующем запросе.
+     * 
+     * @returns {void}
+     */
+    function handleResize() {
+      invalidate();
+    }
+
+    /**
+     * Обработчик события layout:invalidate.
+     * Позволяет другим модулям принудительно инвалидировать кэш.
+     * 
+     * @returns {void}
+     */
+    function handleInvalidateRequest() {
+      invalidate();
+    }
+
+    /**
+     * Инициализация модуля.
+     * Подписывается на resize/orientationchange/layout:invalidate.
+     * 
+     * @param {AbortSignal} [signal] - Сигнал для автоочистки.
+     * @returns {void}
+     */
+    function init(signal) {
+      if (abortController) {
+        abortController.abort();
+      }
+
+      abortController = new AbortController();
+      var internalSignal = abortController.signal;
+
+      // Подписка на layout:invalidate через Bus
+      if (Bus && typeof Bus.subscribe === 'function') {
+        Bus.subscribe('layout:invalidate', handleInvalidateRequest, internalSignal);
+      }
+
+      // Нативные обработчики окна
+      if (typeof window !== 'undefined') {
+        window.addEventListener('resize', handleResize, { signal: internalSignal, passive: true });
+        window.addEventListener('orientationchange', handleResize, { signal: internalSignal, passive: true });
+      }
+
+      if (Logger) {
+        Logger.info('LayoutMetrics', 'Initialized', {
+          cacheTTL: CACHE_TTL,
+          fallbacks: FALLBACKS
+        });
+      }
+    }
+
+    /**
+     * Уничтожение модуля.
+     * Инвалидирует кэш, отписывается от событий.
+     * 
+     * @returns {void}
+     */
+    function destroy() {
+      if (abortController) {
+        abortController.abort();
+        abortController = null;
+      }
+
+      invalidate();
+      resetStats();
+    }
+
+    return {
+      getCarouselGap: getCarouselGap,
+      getBaseItemHeight: getBaseItemHeight,
+      getBaseItemGap: getBaseItemGap,
+      getBaseRowSize: getBaseRowSize,
+      getHeaderHeight: getHeaderHeight,
+      getBottomTabHeight: getBottomTabHeight,
+      getAvailableHeight: getAvailableHeight,
+      invalidate: invalidate,
+      getCacheState: getCacheState,
+      getStats: getStats,
+      resetStats: resetStats,
+      init: init,
+      destroy: destroy
+    };
+  }, ['Config', 'Logger', 'Bus', 'AsyncScheduler']);
   /* <!-- MODULE: LayoutMetrics --> */
 
   /* <!-- MODULE: StateManager --> */
