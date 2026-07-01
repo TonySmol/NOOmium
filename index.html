@@ -18690,8 +18690,486 @@ kbd {
   /* <!-- MODULE: OfflineBarComponent --> */
 
   /* <!-- MODULE: Modal --> */
-  старт
-  энд
+  /**
+   * @typedef {Object} ModalButton
+   * @description Конфигурация кнопки в футере модального окна.
+   * @property {string} text - Текст кнопки.
+   * @property {boolean} [primary=false] - Флаг основной кнопки (стиль btn-send).
+   * @property {boolean} [danger=false] - Флаг опасной кнопки (красный стиль).
+   * @property {boolean} [disabled=false] - Флаг блокировки кнопки.
+   * @property {function(): void} [onClick] - Обработчик клика.
+   */
+
+  /**
+   * @typedef {Object} ModalOptions
+   * @description Параметры открытия модального окна.
+   * @property {string} [title] - Заголовок окна.
+   * @property {string | Node} [body] - Содержимое тела (строка или DOM-узел).
+   * @property {ModalButton[]} [buttons] - Массив кнопок в футере.
+   */
+
+  /**
+   * @module Modal
+   * @description Компонент модальных окон с focus trap и accessibility.
+   * 
+   * Зона ответственности:
+   * - Создание и управление модальными окнами
+   * - Focus trap (Tab не выходит за пределы модалки)
+   * - ARIA-атрибуты для accessibility (role, aria-modal, aria-labelledby)
+   * - Закрытие по Escape и клику на overlay
+   * - Возврат фокуса на элемент, который был активен до открытия
+   * - Поддержка кнопок в футере с обработчиками
+   * 
+   * Архитектурные принципы:
+   * - НЕ знает о бизнес-логике (настройки, авторизация и т.д.)
+   * - Принимает options: {title, body, buttons}
+   * - body может быть строкой (textContent) или DOM-узлом (appendChild)
+   * - Создание DOM-элементов через createElement (XSS-safe)
+   * - textContent для всех текстовых вставок
+   * - Singleton: один overlay и container переиспользуются
+   * - Refresh DOM references при каждом open (защита от refreshUI)
+   * 
+   * Accessibility:
+   * - role="dialog" на overlay
+   * - aria-modal="true" на overlay
+   * - aria-labelledby="{title-id}" если есть title
+   * - aria-label="Dialog" если нет title
+   * - aria-label на кнопке закрытия
+   * - Focus trap: Tab и Shift+Tab циклически переключают фокус
+   * - Автоматический фокус на первый focusable элемент при открытии
+   * - Возврат фокуса на lastFocus при закрытии
+   * 
+   * Используется модулями:
+   * - UI.Menu → Modal.open({title, body, buttons})
+   * - UI.Help → Modal.open({title, body, buttons})
+   * - App.Boot → Modal.open для авторизации
+   * - AuthService → Modal.open для сброса хранилища
+   * 
+   * @namespace Modal
+   */
+  DI.register('Modal', function(Config, Logger) {
+    
+    /**
+     * Overlay модального окна (полупрозрачный фон).
+     * Создаётся один раз при первом open() и переиспользуется.
+     * @type {HTMLDivElement | null}
+     */
+    var overlay = null;
+
+    /**
+     * Контейнер модального окна (.md).
+     * Создаётся один раз при первом open() и переиспользуется.
+     * @type {HTMLDivElement | null}
+     */
+    var container = null;
+
+    /**
+     * Элемент, имевший фокус до открытия модалки.
+     * Используется для возврата фокуса при закрытии.
+     * @type {Element | null}
+     */
+    var lastFocus = null;
+
+    /**
+     * Обработчик Escape для закрытия модалки.
+     * Сохраняется для возможности удаления при закрытии.
+     * @type {function(KeyboardEvent): void | null}
+     */
+    var escHandler = null;
+
+    /**
+     * Обработчик Tab для focus trap.
+     * Сохраняется для возможности удаления при закрытии.
+     * @type {function(KeyboardEvent): void | null}
+     */
+    var trapHandler = null;
+
+    /**
+     * Счётчик открытых/закрытых модалок (для статистики).
+     * @type {{opened: number, closed: number}}
+     */
+    var stats = {
+      opened: 0,
+      closed: 0
+    };
+
+    /**
+     * Создаёт DOM-структуру модального окна при первом обращении.
+     * Overlay и container создаются один раз и переиспользуются.
+     * 
+     * Структура:
+     * <div class="mo" role="dialog" aria-modal="true">
+     *   <div class="md">
+     *     <div class="md-h">
+     *       <div class="md-t">{title}</div>
+     *       <button class="md-x" aria-label="Close">×</button>
+     *     </div>
+     *     <div class="md-b">{body}</div>
+     *     <div class="md-f">{buttons}</div>
+     *   </div>
+     * </div>
+     * 
+     * @returns {void}
+     */
+    function ensureDOM() {
+      if (overlay) return;
+      
+      if (typeof document === 'undefined') return;
+      
+      overlay = document.createElement('div');
+      overlay.className = 'mo';
+      
+      container = document.createElement('div');
+      container.className = 'md';
+      
+      overlay.appendChild(container);
+      document.body.appendChild(overlay);
+      
+      // Закрытие по клику на overlay (не на контент)
+      overlay.addEventListener('click', function(e) {
+        if (e.target === overlay) {
+          closeModal();
+        }
+      });
+    }
+
+    /**
+     * Открывает модальное окно с заданными параметрами.
+     * 
+     * Алгоритм:
+     * 1. ensureDOM() — создание overlay и container если их нет
+     * 2. Очистка container от предыдущего содержимого
+     * 3. Сохранение lastFocus для возврата при закрытии
+     * 4. Установка ARIA-атрибутов (role, aria-modal, aria-labelledby)
+     * 5. Создание header с title и кнопкой закрытия
+     * 6. Создание body (textContent для строки, appendChild для Node)
+     * 7. Создание footer с кнопками (если переданы)
+     * 8. Добавление класса 'on' для отображения
+     * 9. Установка Escape handler
+     * 10. Установка focus trap handler
+     * 11. Автоматический фокус на первый focusable элемент
+     * 
+     * @param {ModalOptions} opts - Параметры модального окна.
+     * @returns {void}
+     * 
+     * @example
+     * Modal.open({
+     *   title: 'Настройки',
+     *   body: document.createElement('div'), // или строка
+     *   buttons: [
+     *     {text: 'Отмена', onClick: function() { Modal.close(); }},
+     *     {text: 'Сохранить', primary: true, onClick: function() { save(); }}
+     *   ]
+     * });
+     */
+    function openModal(opts) {
+      stats.opened++;
+      
+      ensureDOM();
+      
+      if (!overlay || !container) {
+        if (Logger) Logger.error('Modal', 'Failed to create DOM elements');
+        return;
+      }
+      
+      // Очистка предыдущего содержимого
+      container.innerHTML = '';
+      
+      // Сохранение элемента, имевшего фокус до открытия
+      lastFocus = document.activeElement;
+
+      // Установка ARIA-атрибутов
+      overlay.setAttribute('role', 'dialog');
+      overlay.setAttribute('aria-modal', 'true');
+
+      // Создание header
+      var header = document.createElement('div');
+      header.className = 'md-h';
+      
+      var title = document.createElement('div');
+      title.className = 'md-t';
+      title.textContent = (opts && opts.title) || '';
+
+      if (opts && opts.title) {
+        title.id = 'md-title-' + Date.now();
+        overlay.setAttribute('aria-labelledby', title.id);
+      } else {
+        overlay.setAttribute('aria-label', 'Dialog');
+      }
+
+      var closeBtn = document.createElement('button');
+      closeBtn.className = 'md-x';
+      closeBtn.textContent = '×';
+      closeBtn.setAttribute('aria-label', 'Close');
+      closeBtn.onclick = closeModal;
+      
+      header.appendChild(title);
+      header.appendChild(closeBtn);
+
+      // Создание body
+      var body = document.createElement('div');
+      body.className = 'md-b';
+      
+      if (opts && opts.body) {
+        if (opts.body.nodeType) {
+          // DOM-узел
+          body.appendChild(opts.body);
+        } else {
+          // Строка
+          body.textContent = String(opts.body);
+        }
+      }
+
+      container.appendChild(header);
+      container.appendChild(body);
+
+      // Создание footer с кнопками
+      if (opts && opts.buttons && opts.buttons.length > 0) {
+        var footer = document.createElement('div');
+        footer.className = 'md-f';
+        
+        opts.buttons.forEach(function(btn) {
+          var el = document.createElement('button');
+          
+          if (btn.primary) {
+            el.className = 'btn-send';
+          } else {
+            el.className = 'md-btn md-btn-default';
+          }
+          
+          if (btn.danger) {
+            el.classList.add('danger');
+          }
+          
+          el.textContent = btn.text || 'OK';
+          
+          if (btn.disabled) {
+            el.disabled = true;
+          }
+          
+          el.onclick = function() {
+            if (btn.onClick) {
+              try {
+                btn.onClick();
+              } catch (e) {
+                if (Logger) Logger.error('Modal', 'Button onClick error', e);
+              }
+            }
+          };
+          
+          footer.appendChild(el);
+        });
+        
+        container.appendChild(footer);
+      }
+
+      // Отображение модалки
+      overlay.classList.add('on');
+
+      // Установка Escape handler
+      if (escHandler) {
+        document.removeEventListener('keydown', escHandler);
+        escHandler = null;
+      }
+      
+      escHandler = function(e) {
+        if (overlay && overlay.classList.contains('on') && e.key === 'Escape') {
+          closeModal();
+        }
+      };
+      
+      document.addEventListener('keydown', escHandler);
+
+      // Установка focus trap handler
+      if (trapHandler) {
+        overlay.removeEventListener('keydown', trapHandler);
+      }
+      
+      trapHandler = function(e) {
+        if (e.key !== 'Tab') return;
+        
+        var focusable = container.querySelectorAll(
+          'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+        );
+        
+        if (focusable.length === 0) return;
+        
+        var first = focusable[0];
+        var last = focusable[focusable.length - 1];
+        
+        if (e.shiftKey) {
+          // Shift+Tab: если фокус на первом элементе → переход на последний
+          if (document.activeElement === first) {
+            e.preventDefault();
+            last.focus();
+          }
+        } else {
+          // Tab: если фокус на последнем элементе → переход на первый
+          if (document.activeElement === last) {
+            e.preventDefault();
+            first.focus();
+          }
+        }
+      };
+      
+      overlay.addEventListener('keydown', trapHandler);
+
+      // Автоматический фокус на первый focusable элемент
+      var focusDelay = Config ? Config.get('modalFocusDelay', 50) : 50;
+      
+      setTimeout(function() {
+        var focusable = container.querySelectorAll(
+          'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+        );
+        
+        if (focusable.length > 0) {
+          focusable[0].focus();
+        }
+      }, focusDelay);
+      
+      if (Logger) {
+        Logger.debug('Modal', 'Opened', {
+          title: opts && opts.title,
+          hasBody: !!(opts && opts.body),
+          buttonsCount: opts && opts.buttons ? opts.buttons.length : 0
+        });
+      }
+    }
+
+    /**
+     * Закрывает модальное окно.
+     * 
+     * Алгоритм:
+     * 1. Удаление класса 'on' для скрытия
+     * 2. Удаление Escape handler
+     * 3. Удаление focus trap handler
+     * 4. Возврат фокуса на lastFocus (если существует)
+     * 
+     * @returns {void}
+     */
+    function closeModal() {
+      stats.closed++;
+      
+      if (overlay) {
+        overlay.classList.remove('on');
+      }
+      
+      // Удаление Escape handler
+      if (escHandler) {
+        document.removeEventListener('keydown', escHandler);
+        escHandler = null;
+      }
+      
+      // Удаление focus trap handler
+      if (trapHandler && overlay) {
+        overlay.removeEventListener('keydown', trapHandler);
+        trapHandler = null;
+      }
+      
+      // Возврат фокуса на элемент, который был активен до открытия
+      try {
+        if (lastFocus && lastFocus.focus) {
+          lastFocus.focus();
+        }
+      } catch (e) {
+        // Игнорируем ошибки возврата фокуса
+      }
+      
+      if (Logger) {
+        Logger.debug('Modal', 'Closed');
+      }
+    }
+
+    /**
+     * Проверяет, открыта ли модалка.
+     * 
+     * @returns {boolean} true если модалка открыта.
+     */
+    function isOpen() {
+      return overlay && overlay.classList.contains('on');
+    }
+
+    /**
+     * Возвращает статистику компонента.
+     * 
+     * @returns {{opened: number, closed: number}}
+     */
+    function getStats() {
+      return {
+        opened: stats.opened,
+        closed: stats.closed
+      };
+    }
+
+    /**
+     * Сбрасывает статистику.
+     * 
+     * @returns {void}
+     */
+    function resetStats() {
+      stats.opened = 0;
+      stats.closed = 0;
+    }
+
+    /**
+     * Инициализация модуля.
+     * Modal не требует автоматической инициализации —
+     * DOM создаётся лениво при первом open().
+     * 
+     * @param {AbortSignal} [signal] - Сигнал для автоочистки (не используется).
+     * @returns {void}
+     */
+    function init(signal) {
+      if (Logger) {
+        Logger.info('Modal', 'Initialized (lazy DOM creation)');
+      }
+    }
+
+    /**
+     * Уничтожение модуля.
+     * Закрывает модалку, удаляет DOM-элементы, очищает handlers.
+     * 
+     * @returns {void}
+     */
+    function destroy() {
+      // Закрытие модалки если открыта
+      if (isOpen()) {
+        closeModal();
+      }
+      
+      // Удаление DOM-элементов
+      if (overlay && overlay.parentNode) {
+        try {
+          overlay.parentNode.removeChild(overlay);
+        } catch (e) {
+          // Игнорируем ошибки удаления
+        }
+      }
+      
+      overlay = null;
+      container = null;
+      lastFocus = null;
+      escHandler = null;
+      trapHandler = null;
+      
+      resetStats();
+    }
+
+    return {
+      // Публичный API
+      open: openModal,
+      close: closeModal,
+      isOpen: isOpen,
+
+      // Статистика
+      getStats: getStats,
+      resetStats: resetStats,
+
+      // Lifecycle
+      init: init,
+      destroy: destroy
+    };
+  }, ['Config', 'Logger']);
   /* <!-- MODULE: Modal --> */
 
   /* <!-- MODULE: Toast --> */
