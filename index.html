@@ -12690,8 +12690,941 @@ kbd {
   /* <!-- MODULE: LayoutMetrics --> */
 
   /* <!-- MODULE: StateManager --> */
-  старт
-  энд
+  /**
+   * @typedef {'idle' | 'focus' | 'search'} UIMode
+   * @description Активный режим интерфейса:
+   * - `idle`: редактор пуст, фокус выключен → Live Stream, сегменты скрыты
+   * - `focus`: закреплена заметка, редактор пуст → поиск по вектору закрепа, сегменты скрыты
+   * - `search`: текст в редакторе → текстовый поиск, сегменты видны (если нет закрепа)
+   */
+
+  /**
+   * @typedef {'stream' | 'base'} ViewName
+   * @description Активная вкладка приложения.
+   */
+
+  /**
+   * @typedef {'local' | 'world' | 'seren'} Segment
+   * @description Активный сегмент карусели в режиме search.
+   */
+
+  /**
+   * @typedef {'private' | 'world'} SendMode
+   * @description Режим отправки заметки.
+   */
+
+  /**
+   * @typedef {Object} FocusedItem
+   * @description Закреплённая заметка в режиме FOCUS.
+   * @property {string} id - ID заметки.
+   * @property {string} text - Текст заметки.
+   * @property {Vector} vector - Вектор для поиска похожих.
+   * @property {string} [peer] - Короткий ID пира (для сетевых заметок).
+   */
+
+  /**
+   * @typedef {'to-idle' | 'to-focus' | 'to-search' | 'update-lists' | 'switch-segment' | 'update-stream' | 'update-editor-text'} TransitionType
+   * @description Типы переходов state machine (whitelist).
+   */
+
+  /**
+   * @typedef {Object} TransitionPayload
+   * @description Payload для переходов state machine.
+   * @property {FocusedItem} [item] - Заметка для фокуса (для to-focus).
+   * @property {string} [seg] - Ключ сегмента (для switch-segment).
+   * @property {Object} [lists] - Новые списки результатов (для update-lists).
+   * @property {SearchResult[]} [streamData] - Данные Live Stream (для update-stream).
+   * @property {boolean} [streamActive] - Флаг активности Live Stream (для update-stream).
+   * @property {string} [text] - Текст редактора (для update-editor-text).
+   * @property {FocusedItem} [focusedItem] - Актуальный focusedItem (для to-search идемпотентности).
+   */
+
+  /**
+   * @typedef {Object} AppState
+   * @description Глобальное состояние приложения (единственный источник истины).
+   * 
+   * Принцип #1 из документации v66: StateManager хранит ВСЁ.
+   * Компоненты только читают и dispatch. Сервисы не читают DOM.
+   * 
+   * @property {UIMode} uiMode - Текущий режим UI (основное состояние state machine).
+   * @property {boolean} showSegments - COMPUTED: показывать ли плашку сегментов.
+   * @property {ViewName} view - Текущая активная вкладка.
+   * @property {Segment} seg - Активный сегмент карусели (актуален только в uiMode='search').
+   * @property {SendMode} sendMode - Текущий режим отправки.
+   * @property {boolean} sendLock - Флаг блокировки кнопки отправки.
+   * @property {Vector | null} lastVec - Вектор последнего поискового запроса.
+   * @property {number} lastQuery - Timestamp последнего запроса.
+   * @property {boolean} netAuthorized - Флаг успешной авторизации в сети.
+   * @property {function(function(): void): void | null} requestNetworkAuth - Колбэк для запроса авторизации.
+   * @property {Object<string, SearchResult[]>} lists - Результаты поиска по сегментам.
+   * @property {SearchResult[]} lists.local - Локальные совпадения.
+   * @property {SearchResult[]} lists.world - Совпадения из сети.
+   * @property {SearchResult[]} lists.seren - Озарения.
+   * @property {SearchResult[]} lists.focus - Результаты поиска в режиме фокуса.
+   * @property {boolean} focusMode - COMPUTED: дублирует uiMode='focus' для совместимости.
+   * @property {FocusedItem | null} focusedItem - Данные закреплённой заметки.
+   * @property {boolean} streamActive - Показывает ли лента живой поток.
+   * @property {SearchResult[]} streamData - Массив свежих заметок из сети для live-ленты.
+   * @property {string} editorText - Текущий текст в редакторе.
+   */
+
+  /**
+   * @module StateManager
+   * @description Глобальный менеджер состояния приложения с конечным автоматом.
+   * 
+   * Зона ответственности:
+   * - Единый источник истины для всего приложения (Принцип #1)
+   * - State machine с тремя режимами: idle / focus / search
+   * - Валидация переходов через dispatch API (whitelist)
+   * - Вычисляемые поля: showSegments, focusMode
+   * - Уведомление подписчиков при каждом изменении
+   * - Эмиссия события state:changed через Bus
+   * 
+   * Архитектурные принципы:
+   * - ДВА API: dispatch (для uiMode transitions) и setState (для побочных полей)
+   * - Идемпотентность: если state не изменился → dispatch возвращает false
+   * - syncDerivedFields() вызывается после каждого изменения
+   * - Whitelist валидных transitions и сегментов (защита от опечаток)
+   * - Защита от прямой мутации uiMode через setState (deprecated warning)
+   * - Подписчики получают snapshot state (защита от мутации извне)
+   * 
+   * КЛЮЧЕВЫЕ ИЗМЕНЕНИЯ v2.0 (СТАБИЛИЗАЦИЯ ЗАКРЕПА):
+   * 
+   * 1. **Переход `to-search` больше не сбрасывает `focusedItem`.**
+   *    Это позволяет пользователю иметь активный закреп и одновременно
+   *    вводить текст в редактор. Поиск в этом случае идёт по тексту
+   *    (обрабатывается в EditorComponent и SearchCoordinator),
+   *    а закреп остаётся видимым в FocusBarComponent.
+   * 
+   * 2. **Вычисляемое поле `showSegments` учитывает `focusedItem`.**
+   *    Плашка сегментов видна ТОЛЬКО когда `uiMode === 'search'` И
+   *    `focusedItem === null`. Это предотвращает наложение FocusBar
+   *    и плашки сегментов друг на друга.
+   * 
+   * 3. **Идемпотентность перехода `to-search` с закрепом.**
+   *    Если мы уже в `search` и focusedItem не изменился, переход всё равно
+   *    может быть выполнен для обновления производных полей и UI.
+   * 
+   * 4. **Добавлено поле `editorText` в state.**
+   *    Ранее текст редактора читался напрямую из DOM, что нарушало Принцип #1.
+   *    Теперь EditorComponent dispatch'ит `update-editor-text` для синхронизации.
+   * 
+   * Слушает события: нет (вызывается напрямую из компонентов)
+   * 
+   * Эмитит события:
+   * - `state:changed` — любое изменение состояния
+   *   payload: AppState (snapshot)
+   * - `state:mode-changed` — изменение uiMode (для оптимизации)
+   *   payload: {prev: UIMode, next: UIMode}
+   * 
+   * Используется модулями:
+   * - EditorComponent → dispatch('update-editor-text', 'to-search', 'to-idle')
+   * - FocusBarComponent → dispatch('to-idle'), setState({focusedItem: null})
+   * - StreamViewComponent → dispatch('to-focus', 'switch-segment')
+   * - SearchCoordinator → dispatch('update-lists', 'update-stream')
+   * - HeaderStatusComponent → getState() для чтения netAuthorized
+   * 
+   * @namespace StateManager
+   */
+  DI.register('StateManager', function(Config, Logger, Bus) {
+    
+    /**
+     * Внутреннее состояние приложения.
+     * Инициализируется дефолтными значениями.
+     * @type {AppState}
+     */
+    var state = {
+      uiMode: 'idle',
+      showSegments: false,
+      view: 'stream',
+      seg: 'local',
+      sendMode: 'private',
+      sendLock: false,
+      lastVec: null,
+      lastQuery: 0,
+      netAuthorized: false,
+      requestNetworkAuth: null,
+      lists: { local: [], world: [], seren: [], focus: [] },
+      focusMode: false,
+      focusedItem: null,
+      streamActive: true,
+      streamData: [],
+      editorText: ''
+    };
+
+    /**
+     * Список подписчиков на изменения состояния.
+     * Каждый подписчик получает полный snapshot state.
+     * @type {Array<function(AppState): void>}
+     */
+    var listeners = [];
+
+    /**
+     * Whitelist валидных UI-режимов.
+     * Используется для валидации payload и isMode() проверок.
+     * @type {Set<UIMode>}
+     */
+    var VALID_UI_MODES = new Set(['idle', 'focus', 'search']);
+
+    /**
+     * Whitelist валидных переходов state machine.
+     * Попытка dispatch неизвестного перехода логируется и отклоняется.
+     * @type {Set<TransitionType>}
+     */
+    var VALID_TRANSITIONS = new Set([
+      'to-idle',
+      'to-focus',
+      'to-search',
+      'update-lists',
+      'switch-segment',
+      'update-stream',
+      'update-editor-text'
+    ]);
+
+    /**
+     * Whitelist валидных сегментов.
+     * @type {Set<Segment>}
+     */
+    var VALID_SEGMENTS = new Set(['local', 'world', 'seren']);
+
+    /**
+     * Whitelist валидных режимов отправки.
+     * @type {Set<SendMode>}
+     */
+    var VALID_SEND_MODES = new Set(['private', 'world']);
+
+    /**
+     * Whitelist валидных вкладок.
+     * @type {Set<ViewName>}
+     */
+    var VALID_VIEWS = new Set(['stream', 'base']);
+
+    /**
+     * Счётчик изменений состояния (для статистики).
+     * @type {number}
+     */
+    var changesCount = 0;
+
+    /**
+     * Счётчик dispatch вызовов (для статистики).
+     * @type {{total: number, accepted: number, rejected: number}}
+     */
+    var dispatchStats = {
+      total: 0,
+      accepted: 0,
+      rejected: 0
+    };
+
+    /**
+     * Счётчик setState вызовов (для статистики).
+     * @type {number}
+     */
+    var setStateCount = 0;
+
+    /**
+     * Синхронизирует вычисляемые поля с основным состоянием.
+     * Вызывается после каждого изменения state для гарантии консистентности.
+     * 
+     * КЛЮЧЕВАЯ ЛОГИКА v2.0:
+     * - `showSegments` = true только в uiMode='search' БЕЗ focusedItem
+     * - `focusMode` = true только в uiMode='focus' (дублирование для совместимости)
+     * 
+     * @returns {void}
+     */
+    function syncDerivedFields() {
+      state.showSegments = (state.uiMode === 'search') && !state.focusedItem;
+      state.focusMode = state.uiMode === 'focus';
+    }
+
+    /**
+     * Применяет частичное обновление состояния и уведомляет подписчиков.
+     * Внутренняя функция, не должна вызываться извне напрямую.
+     * 
+     * @param {Partial<AppState>} partial - Объект с изменяемыми полями.
+     * @param {string} [source='setState'] - Источник изменения для логирования.
+     * @returns {void}
+     */
+    function applyUpdate(partial, source) {
+      if (!partial || typeof partial !== 'object') return;
+
+      // Защита от прямой модификации uiMode через setState
+      if (partial.uiMode !== undefined && source === 'setState') {
+        if (Logger) {
+          Logger.warn('StateManager', 
+            'Direct uiMode mutation via setState is deprecated. Use dispatch() instead.');
+        }
+        delete partial.uiMode;
+      }
+
+      // Захват предыдущего режима для события mode-changed
+      var prevMode = state.uiMode;
+
+      // Применяем обновление
+      Object.assign(state, partial);
+      syncDerivedFields();
+
+      changesCount++;
+
+      // Уведомляем подписчиков (с snapshot для защиты от мутации)
+      var snapshot = getSnapshot();
+      for (var i = 0; i < listeners.length; i++) {
+        try {
+          listeners[i](snapshot);
+        } catch (e) {
+          if (Logger) {
+            Logger.error('StateManager', 'Listener error', e);
+          }
+        }
+      }
+
+      // Публикуем событие state:changed
+      if (Bus && Bus.emit) {
+        try {
+          Bus.emit('state:changed', snapshot);
+        } catch (e) {
+          if (Logger) {
+            Logger.error('StateManager', 'Bus.emit state:changed failed', e);
+          }
+        }
+      }
+
+      // Публикуем событие смены режима, если режим изменился
+      if (partial.uiMode !== undefined && partial.uiMode !== prevMode) {
+        if (Bus && Bus.emit) {
+          try {
+            Bus.emit('state:mode-changed', {
+              prev: prevMode,
+              next: partial.uiMode
+            });
+          } catch (e) {
+            if (Logger) {
+              Logger.error('StateManager', 'Bus.emit state:mode-changed failed', e);
+            }
+          }
+        }
+      }
+    }
+
+    /**
+     * Создаёт snapshot состояния для безопасной передачи подписчикам.
+     * Глубокое копирование списков и focusedItem для защиты от мутации.
+     * 
+     * @returns {AppState} Snapshot состояния.
+     */
+    function getSnapshot() {
+      return {
+        uiMode: state.uiMode,
+        showSegments: state.showSegments,
+        view: state.view,
+        seg: state.seg,
+        sendMode: state.sendMode,
+        sendLock: state.sendLock,
+        lastVec: state.lastVec ? state.lastVec.slice() : null,
+        lastQuery: state.lastQuery,
+        netAuthorized: state.netAuthorized,
+        requestNetworkAuth: state.requestNetworkAuth,
+        lists: {
+          local: state.lists.local.slice(),
+          world: state.lists.world.slice(),
+          seren: state.lists.seren.slice(),
+          focus: state.lists.focus.slice()
+        },
+        focusMode: state.focusMode,
+        focusedItem: state.focusedItem ? Object.assign({}, state.focusedItem) : null,
+        streamActive: state.streamActive,
+        streamData: state.streamData.slice(),
+        editorText: state.editorText
+      };
+    }
+
+    /**
+     * Конечный автомат: выполняет валидный переход с применением payload.
+     * 
+     * Возвращает boolean: true если переход выполнен, false если отклонён.
+     * Отклонение происходит при:
+     * - Неизвестном transition (не в whitelist)
+     * - Идемпотентности (state уже в целевом состоянии)
+     * - Невалидном payload (отсутствуют обязательные поля)
+     * 
+     * КЛЮЧЕВЫЕ ИЗМЕНЕНИЯ v2.0:
+     * 
+     * **Переход `to-search`:**
+     * - Больше НЕ сбрасывает `focusedItem`
+     * - Идемпотентность учитывает focusedItem:
+     *   - Если уже в search И focusedItem не изменился → return false
+     *   - Если focusedItem появился/исчез → выполняем переход
+     * 
+     * **Переход `to-focus`:**
+     * - Требует payload.item с id и vector
+     * - Идемпотентность: если та же заметка уже в фокусе → return false
+     * - Сбрасывает lists и streamActive
+     * 
+     * **Переход `to-idle`:**
+     * - Сбрасывает focusedItem
+     * - Активирует Live Stream (streamActive = true)
+     * - Очищает lists
+     * 
+     * **Переход `update-editor-text`:**
+     * - Обновляет editorText
+     * - Автоматически переключает uiMode:
+     *   - text не пуст → 'search'
+     *   - text пуст И нет focusedItem → 'idle'
+     * 
+     * @param {TransitionType} transition - Тип перехода.
+     * @param {TransitionPayload} [payload={}] - Данные для перехода.
+     * @returns {boolean} true если переход выполнен, false если отклонён.
+     * 
+     * @example
+     * StateManager.dispatch('to-idle');
+     * StateManager.dispatch('to-focus', {item: focusedNote});
+     * StateManager.dispatch('to-search');
+     * StateManager.dispatch('switch-segment', {seg: 'world'});
+     * StateManager.dispatch('update-lists', {lists: {local: [...], world: [...], seren: [...], focus: []}});
+     * StateManager.dispatch('update-stream', {streamData: [...], streamActive: true});
+     * StateManager.dispatch('update-editor-text', {text: 'медитация'});
+     */
+    function dispatch(transition, payload) {
+      dispatchStats.total++;
+
+      // Валидация типа перехода
+      if (!VALID_TRANSITIONS.has(transition)) {
+        dispatchStats.rejected++;
+        if (Logger) {
+          Logger.warn('StateManager', 'Unknown transition: ' + transition);
+        }
+        return false;
+      }
+
+      payload = payload || {};
+      var partial = {};
+
+      switch (transition) {
+        case 'to-idle':
+          // Идемпотентность: если уже в idle и нет изменений, выходим
+          if (state.uiMode === 'idle' && !state.focusedItem && state.editorText === '') {
+            dispatchStats.rejected++;
+            return false;
+          }
+          partial.uiMode = 'idle';
+          partial.focusedItem = null;
+          partial.streamActive = true;
+          partial.lists = { local: [], world: [], seren: [], focus: [] };
+          break;
+
+        case 'to-focus':
+          // Валидация payload
+          if (!payload || !payload.item || !payload.item.id || !payload.item.vector) {
+            dispatchStats.rejected++;
+            if (Logger) {
+              Logger.warn('StateManager', 'to-focus requires item with id and vector');
+            }
+            return false;
+          }
+          // Идемпотентность: если та же заметка уже в фокусе
+          if (state.uiMode === 'focus' &&
+              state.focusedItem &&
+              state.focusedItem.id === payload.item.id) {
+            dispatchStats.rejected++;
+            return false;
+          }
+          partial.uiMode = 'focus';
+          partial.focusedItem = payload.item;
+          partial.streamActive = false;
+          partial.lists = { local: [], world: [], seren: [], focus: [] };
+          break;
+
+        case 'to-search':
+          // КЛЮЧЕВОЕ ИЗМЕНЕНИЕ v2.0:
+          // Идемпотентность учитывает focusedItem:
+          var focusedItemChanged = (state.focusedItem !== payload.focusedItem) ||
+            (state.focusedItem && payload.focusedItem &&
+             state.focusedItem.id !== payload.focusedItem.id);
+
+          if (state.uiMode === 'search' && !focusedItemChanged && state.editorText !== '') {
+            dispatchStats.rejected++;
+            return false;
+          }
+
+          partial.uiMode = 'search';
+          // КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: НЕ сбрасываем focusedItem
+          partial.streamActive = false;
+          break;
+
+        case 'update-lists':
+          if (!payload || !payload.lists) {
+            dispatchStats.rejected++;
+            if (Logger) {
+              Logger.warn('StateManager', 'update-lists requires lists payload');
+            }
+            return false;
+          }
+          partial.lists = {
+            local: Array.isArray(payload.lists.local) ? payload.lists.local : [],
+            world: Array.isArray(payload.lists.world) ? payload.lists.world : [],
+            seren: Array.isArray(payload.lists.seren) ? payload.lists.seren : [],
+            focus: Array.isArray(payload.lists.focus) ? payload.lists.focus : []
+          };
+          break;
+
+        case 'switch-segment':
+          if (!payload || !payload.seg) {
+            dispatchStats.rejected++;
+            if (Logger) {
+              Logger.warn('StateManager', 'switch-segment requires seg payload');
+            }
+            return false;
+          }
+          if (!VALID_SEGMENTS.has(payload.seg)) {
+            dispatchStats.rejected++;
+            if (Logger) {
+              Logger.warn('StateManager', 'Invalid segment: ' + payload.seg);
+            }
+            return false;
+          }
+          // switch-segment имеет смысл только в режиме search
+          if (state.uiMode !== 'search') {
+            dispatchStats.rejected++;
+            if (Logger) {
+              Logger.warn('StateManager', 'switch-segment ignored: not in search mode');
+            }
+            return false;
+          }
+          partial.seg = payload.seg;
+          break;
+
+        case 'update-stream':
+          if (payload && Array.isArray(payload.streamData)) {
+            partial.streamData = payload.streamData;
+          }
+          if (payload && typeof payload.streamActive === 'boolean') {
+            partial.streamActive = payload.streamActive;
+          }
+          break;
+
+        case 'update-editor-text':
+          if (typeof payload.text !== 'string') {
+            dispatchStats.rejected++;
+            if (Logger) {
+              Logger.warn('StateManager', 'update-editor-text requires text string');
+            }
+            return false;
+          }
+          partial.editorText = payload.text;
+
+          // Автоматическое переключение режима:
+          if (payload.text.trim() !== '') {
+            // Есть текст → переход в search (фокус сохраняется благодаря v2.0)
+            partial.uiMode = 'search';
+            partial.streamActive = false;
+          } else if (!state.focusedItem) {
+            // Текст пуст и нет фокуса → переход в idle
+            partial.uiMode = 'idle';
+            partial.streamActive = true;
+            partial.lists = { local: [], world: [], seren: [], focus: [] };
+          }
+          // Если текст пуст, но есть фокус — остаёмся в текущем режиме (focus)
+          break;
+      }
+
+      // Применяем обновление
+      applyUpdate(partial, 'dispatch:' + transition);
+      dispatchStats.accepted++;
+
+      if (Logger) {
+        Logger.debug('StateManager', 'dispatch: ' + transition, {
+          uiMode: state.uiMode,
+          focusedItem: state.focusedItem ? state.focusedItem.id : null,
+          showSegments: state.showSegments
+        });
+      }
+
+      return true;
+    }
+
+    /**
+     * Возвращает ссылку на текущий объект состояния.
+     * 
+     * ВНИМАНИЕ: мутация полей напрямую ЗАПРЕЩЕНА.
+     * Используйте dispatch() для uiMode transitions
+     * или setState() для побочных полей.
+     * 
+     * Для безопасного чтения используйте getSnapshot().
+     * 
+     * @returns {AppState} Текущее состояние (прямая ссылка).
+     */
+    function getState() {
+      return state;
+    }
+
+    /**
+     * Обновляет состояние (legacy API для побочных полей).
+     * 
+     * ⚠️ Deprecated для изменения uiMode: используйте dispatch() вместо setState
+     * для переходов между режимами. setState подходит ТОЛЬКО для побочных полей:
+     * - view (вкладка)
+     * - sendMode (режим отправки)
+     * - netAuthorized (флаг авторизации)
+     * - requestNetworkAuth (колбэк)
+     * - sendLock (блокировка кнопки)
+     * - lastVec, lastQuery
+     * - focusedItem (сброс без смены uiMode)
+     * 
+     * КЛЮЧЕВОЕ ИСПОЛЬЗОВАНИЕ v2.0:
+     * FocusBarComponent.unfocusBtn использует setState({ focusedItem: null })
+     * для сброса закрепа без смены uiMode, что корректно работает благодаря
+     * syncDerivedFields() пересчитывающему showSegments.
+     * 
+     * @param {Partial<AppState>} partial - Объект с изменяемыми полями.
+     * @returns {void}
+     * 
+     * @example
+     * StateManager.setState({ view: 'base' });
+     * StateManager.setState({ sendMode: 'world' });
+     * StateManager.setState({ focusedItem: null }); // сброс закрепа
+     */
+    function setState(partial) {
+      setStateCount++;
+      applyUpdate(partial, 'setState');
+    }
+
+    /**
+     * Подписывает функцию на любые изменения глобального состояния.
+     * 
+     * Подписчик получает snapshot state при каждом изменении.
+     * Первая подписка немедленно получает текущее состояние.
+     * 
+     * @param {function(AppState): void} listener - Функция-обработчик.
+     * @returns {function(): void} Функция для отписки.
+     * 
+     * @example
+     * var unsubscribe = StateManager.subscribe(function(state) {
+     *   console.log('uiMode:', state.uiMode);
+     *   console.log('showSegments:', state.showSegments);
+     * });
+     * 
+     * // Позже:
+     * unsubscribe(); // Отписка
+     */
+    function subscribe(listener) {
+      if (typeof listener !== 'function') {
+        return function() {};
+      }
+
+      listeners.push(listener);
+
+      // Немедленно отдаём текущее состояние
+      try {
+        listener(getSnapshot());
+      } catch (e) {
+        if (Logger) {
+          Logger.error('StateManager', 'Initial listener call failed', e);
+        }
+      }
+
+      return function unsubscribe() {
+        var idx = listeners.indexOf(listener);
+        if (idx > -1) {
+          listeners.splice(idx, 1);
+        }
+      };
+    }
+
+    // ═══════════════════════════════════════════════════
+    // CONVENIENCE GETTERS
+    // ═══════════════════════════════════════════════════
+
+    /**
+     * Возвращает текущий UI-режим.
+     * Convenience getter для компонентов.
+     * 
+     * @returns {UIMode} Текущий режим.
+     */
+    function getUIMode() {
+      return state.uiMode;
+    }
+
+    /**
+     * Проверяет, активен ли указанный режим.
+     * 
+     * @param {UIMode} mode - Режим для проверки.
+     * @returns {boolean} true если режим активен.
+     * 
+     * @example
+     * if (StateManager.isMode('search')) { ... }
+     */
+    function isMode(mode) {
+      return state.uiMode === mode && VALID_UI_MODES.has(mode);
+    }
+
+    /**
+     * Возвращает вычисляемый флаг видимости сегментов.
+     * Convenience getter для StreamViewComponent.
+     * 
+     * @returns {boolean} true если сегменты должны быть видны.
+     */
+    function shouldShowSegments() {
+      return state.showSegments;
+    }
+
+    /**
+     * Возвращает вычисляемый флаг режима фокуса.
+     * Дублирует uiMode === 'focus' для совместимости.
+     * 
+     * @returns {boolean}
+     */
+    function isFocusMode() {
+      return state.focusMode;
+    }
+
+    /**
+     * Возвращает текущий текст редактора из state.
+     * 
+     * @returns {string}
+     */
+    function getEditorText() {
+      return state.editorText;
+    }
+
+    /**
+     * Возвращает активный сегмент.
+     * 
+     * @returns {Segment}
+     */
+    function getSegment() {
+      return state.seg;
+    }
+
+    /**
+     * Возвращает активную вкладку.
+     * 
+     * @returns {ViewName}
+     */
+    function getView() {
+      return state.view;
+    }
+
+    /**
+     * Возвращает текущий режим отправки.
+     * 
+     * @returns {SendMode}
+     */
+    function getSendMode() {
+      return state.sendMode;
+    }
+
+    /**
+     * Возвращает закреплённую заметку (если есть).
+     * 
+     * @returns {FocusedItem | null}
+     */
+    function getFocusedItem() {
+      return state.focusedItem ? Object.assign({}, state.focusedItem) : null;
+    }
+
+    /**
+     * Проверяет, есть ли активный закреп.
+     * 
+     * @returns {boolean}
+     */
+    function hasFocusedItem() {
+      return state.focusedItem !== null;
+    }
+
+    /**
+     * Проверяет, авторизован ли пользователь в сети.
+     * 
+     * @returns {boolean}
+     */
+    function isNetAuthorized() {
+      return state.netAuthorized;
+    }
+
+    /**
+     * Возвращает активные списки результатов.
+     * 
+     * @returns {Object<string, SearchResult[]>}
+     */
+    function getLists() {
+      return {
+        local: state.lists.local.slice(),
+        world: state.lists.world.slice(),
+        seren: state.lists.seren.slice(),
+        focus: state.lists.focus.slice()
+      };
+    }
+
+    /**
+     * Возвращает список результатов для активного сегмента.
+     * В режиме FOCUS возвращает lists.focus.
+     * В режиме IDLE возвращает streamData.
+     * 
+     * @returns {SearchResult[]}
+     */
+    function getActiveList() {
+      if (state.uiMode === 'idle') {
+        return state.streamData.slice();
+      }
+      if (state.uiMode === 'focus') {
+        return state.lists.focus.slice();
+      }
+      return (state.lists[state.seg] || []).slice();
+    }
+
+    /**
+     * Возвращает количество результатов в каждом сегменте.
+     * 
+     * @returns {{local: number, world: number, seren: number, focus: number}}
+     */
+    function getListCounts() {
+      return {
+        local: state.lists.local.length,
+        world: state.lists.world.length,
+        seren: state.lists.seren.length,
+        focus: state.lists.focus.length
+      };
+    }
+
+    /**
+     * Возвращает streamData (Live Stream).
+     * 
+     * @returns {SearchResult[]}
+     */
+    function getStreamData() {
+      return state.streamData.slice();
+    }
+
+    /**
+     * Проверяет, активен ли Live Stream.
+     * 
+     * @returns {boolean}
+     */
+    function isStreamActive() {
+      return state.streamActive;
+    }
+
+    // ═══════════════════════════════════════════════════
+    // STATISTICS & LIFECYCLE
+    // ═══════════════════════════════════════════════════
+
+    /**
+     * Возвращает статистику StateManager.
+     * 
+     * @returns {{changes: number, dispatch: Object, setState: number, listeners: number}}
+     */
+    function getStats() {
+      return {
+        changes: changesCount,
+        dispatch: {
+          total: dispatchStats.total,
+          accepted: dispatchStats.accepted,
+          rejected: dispatchStats.rejected
+        },
+        setState: setStateCount,
+        listeners: listeners.length
+      };
+    }
+
+    /**
+     * Сбрасывает статистику.
+     * 
+     * @returns {void}
+     */
+    function resetStats() {
+      changesCount = 0;
+      dispatchStats.total = 0;
+      dispatchStats.accepted = 0;
+      dispatchStats.rejected = 0;
+      setStateCount = 0;
+    }
+
+    /**
+     * Инициализация модуля.
+     * StateManager не требует автоматической инициализации —
+     * state создаётся при регистрации модуля.
+     * 
+     * @param {AbortSignal} [signal] - Сигнал для автоочистки.
+     * @returns {void}
+     */
+    function init(signal) {
+      if (Logger) {
+        Logger.info('StateManager', 'Initialized', {
+          initialMode: state.uiMode,
+          validTransitions: Array.from(VALID_TRANSITIONS),
+          validSegments: Array.from(VALID_SEGMENTS)
+        });
+      }
+    }
+
+    /**
+     * Уничтожение модуля.
+     * Очищает подписчиков и сбрасывает состояние к дефолтам.
+     * 
+     * @returns {void}
+     */
+    function destroy() {
+      listeners.length = 0;
+      resetStats();
+
+      // Сброс состояния к дефолтам
+      state = {
+        uiMode: 'idle',
+        showSegments: false,
+        view: 'stream',
+        seg: 'local',
+        sendMode: 'private',
+        sendLock: false,
+        lastVec: null,
+        lastQuery: 0,
+        netAuthorized: false,
+        requestNetworkAuth: null,
+        lists: { local: [], world: [], seren: [], focus: [] },
+        focusMode: false,
+        focusedItem: null,
+        streamActive: true,
+        streamData: [],
+        editorText: ''
+      };
+    }
+
+    return {
+      // State Machine API (основной, рекомендуемый)
+      dispatch: dispatch,
+
+      // Legacy API (для побочных полей)
+      getState: getState,
+      setState: setState,
+
+      // Subscription API
+      subscribe: subscribe,
+
+      // Convenience getters
+      getUIMode: getUIMode,
+      isMode: isMode,
+      shouldShowSegments: shouldShowSegments,
+      isFocusMode: isFocusMode,
+      getEditorText: getEditorText,
+      getSegment: getSegment,
+      getView: getView,
+      getSendMode: getSendMode,
+      getFocusedItem: getFocusedItem,
+      hasFocusedItem: hasFocusedItem,
+      isNetAuthorized: isNetAuthorized,
+      getLists: getLists,
+      getActiveList: getActiveList,
+      getListCounts: getListCounts,
+      getStreamData: getStreamData,
+      isStreamActive: isStreamActive,
+
+      // Snapshot API
+      getSnapshot: getSnapshot,
+
+      // Statistics & Lifecycle
+      getStats: getStats,
+      resetStats: resetStats,
+      init: init,
+      destroy: destroy
+    };
+  }, ['Config', 'Logger', 'Bus']);
   /* <!-- MODULE: StateManager --> */
 
   // ═══════════════════════════════════════════════════
