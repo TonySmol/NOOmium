@@ -21474,8 +21474,371 @@ kbd {
   // ═══════════════════════════════════════════════════
 
   /* <!-- MODULE: App.State --> */
-  старт
-  энд
+  /**
+   * @typedef {Object} WindowHandlers
+   * @description Коллекция обработчиков глобальных событий окна.
+   * @property {function(): void | null} resize - Обработчик изменения размера.
+   * @property {function(): void | null} focusin - Обработчик получения фокуса.
+   * @property {function(): void | null} focusout - Обработчик потери фокуса.
+   * @property {function(): void | null} orientationchange - Обработчик поворота устройства.
+   * @property {function(BeforeUnloadEvent): void | null} beforeunload - Обработчик ухода со страницы.
+   */
+
+  /**
+   * @typedef {Object} AppUIState
+   * @description Глобальное состояние UI-слоя приложения (App.State).
+   * @property {WindowHandlers} windowHandlers - Зарегистрированные обработчики окна.
+   * @property {function(Object): void | null} progressHandler - Обработчик прогресса AI.
+   * @property {function(Object): void | null} editorSearchHandler - Обработчик запроса поиска из редактора.
+   * @property {function(): void | null} editorSendHandler - Обработчик завершения отправки из редактора.
+   */
+
+  /**
+   * @module App.State
+   * @description Глобальное состояние UI-слоя и вспомогательные функции для Bootstrap.
+   * 
+   * Зона ответственности:
+   * - Хранение ссылок на window handlers (для очистки при refreshUI)
+   * - Вспомогательные функции: translate, toast, applyTheme, executeSearch, switchView
+   * - Ключевая функция refreshUI() — полный пересбор UI при смене языка
+   * - Координация переинициализации всех UI-компонентов
+   * 
+   * Архитектурные принципы:
+   * - Это НЕ DI-модуль, а набор функций в замыкании Bootstrap слоя
+   * - App.State, App.Events, App.Boot тесно связаны и образуют единый слой
+   * - Функции App.State используются App.Events и App.Boot напрямую
+   * - Резолвит другие модули через DI.resolve() внутри функций (не через deps)
+   * - Refresh DOM references при каждом обращении (защита от refreshUI)
+   * 
+   * Функция refreshUI():
+   * Вызывается при смене языка (i18n:change). Выполняет:
+   * 1. cleanup() — удаление всех window handlers и Bus подписок
+   * 2. UI.Layout.buildMarkup() — генерация новой HTML-разметки
+   * 3. Вставка разметки в #app-root
+   * 4. setupWindowListeners() — привязка новых window handlers
+   * 5. bindEvents() — привязка новых Bus подписок
+   * 6. destroy() + init() для всех UI компонентов (HeaderStatus, OfflineBar, Editor,
+   *    StreamView, FocusBar, BaseView)
+   * 7. switchView(savedView) — восстановление активной вкладки
+   * 8. executeSearch(true) — запуск поиска если AI ready
+   * 
+   * Используется модулями:
+   * - App.Events → bindEvents() вызывает refreshUI() при i18n:change
+   * - App.Boot → mountApp() использует switchView() и executeSearch()
+   * 
+   * Вызывает модули:
+   * - `UI.Layout.buildMarkup()` — генерация HTML
+   * - `I18n.t()` — переводы
+   * - `Toast.show()` — уведомления
+   * - `Config.set/save()` — сохранение темы
+   * - `SearchService.search()` — поисковые запросы
+   * - `StateManager.setState()` — переключение вкладок
+   * - `EditorComponent.destroy/init` — переинициализация редактора
+   * - `StreamViewComponent.destroy/init` — переинициализация карусели
+   * - `FocusBarComponent.destroy/init` — переинициализация панели фокуса
+   * - `BaseViewComponent.destroy/init` — переинициализация базы
+   * - `HeaderStatusComponent.destroy/init` — переинициализация индикаторов
+   * - `OfflineBarComponent.destroy/init` — переинициализация офлайн-бара
+   * 
+   * @namespace App.State
+   */
+
+  /**
+   * Локальные ссылки на основные сервисы, резолвятся один раз при загрузке модуля.
+   * Используются внутри функций App.State для избежания повторных DI.resolve().
+   * Так как этот блок выполняется после регистрации всех модулей, DI.resolve безопасен.
+   */
+  var AS_Logger = DI.resolve('Logger');
+  var AS_Bus = DI.resolve('Bus');
+  var AS_Store = DI.resolve('Store');
+  var AS_Config = DI.resolve('Config');
+  var AS_Utils = DI.resolve('Utils');
+  var AS_DB = DI.resolve('DB');
+  var AS_AI = DI.resolve('AI');
+  var AS_Net = DI.resolve('Net');
+  var AS_I18n = DI.resolve('I18n');
+  var AS_Modal = DI.resolve('Modal');
+  var AS_Toast = DI.resolve('Toast');
+  var AS_Progress = DI.resolve('Progress');
+  var AS_StateManager = DI.resolve('StateManager');
+  var AS_SearchService = DI.resolve('SearchService');
+  var AS_EditorComponent = DI.resolve('EditorComponent');
+
+  /**
+   * Внутреннее состояние UI-слоя.
+   * @type {AppUIState}
+   */
+  var uiState = {
+    windowHandlers: {
+      resize: null,
+      focusin: null,
+      focusout: null,
+      orientationchange: null,
+      beforeunload: null
+    },
+    progressHandler: null,
+    editorSearchHandler: null,
+    editorSendHandler: null
+  };
+
+  /**
+   * Счётчик вызовов refreshUI (для статистики).
+   * @type {number}
+   */
+  var refreshCount = 0;
+
+  /**
+   * Короткая обёртка над I18n.t() для использования внутри модулей Bootstrap.
+   * 
+   * @param {string} key - Ключ перевода.
+   * @param {Object<string, *>} [params] - Параметры для подстановки.
+   * @param {string} [fallback] - Значение по умолчанию.
+   * @returns {string}
+   */
+  function translate(key, params, fallback) {
+    return AS_I18n.t(key, params, fallback);
+  }
+
+  /**
+   * Короткая обёртка над Toast.show() для использования внутри App.State.
+   * 
+   * @param {string} msg - Сообщение.
+   * @param {'ok' | 'err' | 'warn' | 'info'} [type='info'] - Тип тоста.
+   * @returns {void}
+   */
+  function toast(msg, type) {
+    if (AS_Toast && AS_Toast.show) {
+      AS_Toast.show(type || 'info', msg);
+    }
+  }
+
+  /**
+   * Применяет цветовую тему.
+   * 
+   * Алгоритм:
+   * 1. Установка data-theme у document.body
+   * 2. Сохранение в Config
+   * 3. Синхронизация meta theme-color для мобильных браузеров
+   * 
+   * @param {'dark' | 'light'} theme - Название темы.
+   * @returns {void}
+   */
+  function applyTheme(theme) {
+    document.body.setAttribute('data-theme', theme);
+    
+    if (AS_Config && AS_Config.set) {
+      AS_Config.set('theme', theme);
+    }
+    if (AS_Config && AS_Config.save) {
+      AS_Config.save();
+    }
+    
+    var metaTheme = document.querySelector('meta[name="theme-color"]');
+    if (metaTheme) {
+      metaTheme.setAttribute('content', theme === 'light' ? '#fafafa' : '#0b0b10');
+    }
+    
+    if (AS_Logger) {
+      AS_Logger.debug('App.State', 'Theme applied', { theme: theme });
+    }
+  }
+
+  /**
+   * Запускает поиск по текущему тексту из редактора.
+   * После завершения публикует событие state:lists-changed для обновления UI.
+   * SearchService сам определит приоритет (текст > фокус > live stream).
+   * 
+   * @param {boolean} [force=false] - Принудительная отправка запроса в сеть.
+   * @returns {Promise<void>}
+   */
+  function executeSearch(force) {
+    var text = AS_EditorComponent.getValue();
+    
+    return AS_SearchService.search(text, force).then(function() {
+      if (AS_Bus && AS_Bus.emit) {
+        try {
+          AS_Bus.emit('state:lists-changed');
+        } catch (e) {
+          if (AS_Logger) AS_Logger.error('App.State', 'Bus.emit state:lists-changed failed', e);
+        }
+      }
+    }).catch(function(err) {
+      if (AS_Logger) AS_Logger.error('App.State', 'executeSearch failed', err);
+    });
+  }
+
+  /**
+   * Переключает активную вкладку приложения (Поток / База).
+   * 
+   * Алгоритм:
+   * 1. StateManager.setState({view: viewName})
+   * 2. Обновление CSS-классов у .btab-b кнопок
+   * 3. Управление display у #ws-stream и #ws-base
+   * 4. Эмиссия view:changed события
+   * 
+   * @param {ViewName} viewName - Имя вкладки ('stream' | 'base').
+   * @returns {void}
+   */
+  function switchView(viewName) {
+    if (AS_StateManager && AS_StateManager.setState) {
+      AS_StateManager.setState({ view: viewName });
+    }
+    
+    document.querySelectorAll('.btab-b').forEach(function(b) {
+      b.classList.toggle('on', b.getAttribute('data-v') === viewName);
+    });
+    
+    var streamEl = document.getElementById('ws-stream');
+    var baseEl = document.getElementById('ws-base');
+    
+    if (streamEl) {
+      streamEl.style.display = viewName === 'stream' ? 'flex' : 'none';
+    }
+    if (baseEl) {
+      baseEl.style.display = viewName === 'base' ? 'flex' : 'none';
+    }
+    
+    if (AS_Bus && AS_Bus.emit) {
+      try {
+        AS_Bus.emit('view:changed', { view: viewName });
+      } catch (e) {
+        if (AS_Logger) AS_Logger.error('App.State', 'Bus.emit view:changed failed', e);
+      }
+    }
+    
+    if (AS_Logger) {
+      AS_Logger.debug('App.State', 'View switched', { view: viewName });
+    }
+  }
+
+  /**
+   * Полностью пересобирает UI при смене языка.
+   * 
+   * Это ключевая функция для поддержки мультиязычности.
+   * При смене языка весь DOM пересоздаётся с новыми переводами.
+   * 
+   * Алгоритм:
+   * 1. Сохранение текущей активной вкладки
+   * 2. cleanup() — удаление всех handlers и подписок
+   * 3. Генерация новой разметки через UI.Layout.buildMarkup()
+   * 4. Вставка в #app-root
+   * 5. setupWindowListeners() — привязка новых window handlers
+   * 6. bindEvents() — привязка новых Bus подписок
+   * 7. Переинициализация всех UI компонентов (destroy + init)
+   * 8. Восстановление активной вкладки
+   * 9. Запуск поиска если AI ready
+   * 
+   * Переинициализируемые компоненты:
+   * - HeaderStatusComponent
+   * - OfflineBarComponent
+   * - EditorComponent
+   * - StreamViewComponent
+   * - FocusBarComponent
+   * - BaseViewComponent
+   * 
+   * @returns {void}
+   */
+  function refreshUI() {
+    refreshCount++;
+    
+    if (AS_Logger) {
+      AS_Logger.info('App.State', 'refreshUI started', { count: refreshCount });
+    }
+    
+    var state = AS_StateManager.getState();
+    var savedView = state.view;
+
+    // 1. Очистка старых handlers и подписок
+    if (typeof cleanup === 'function') {
+      cleanup();
+    }
+    
+    // 2. Генерация новой разметки
+    var root = document.getElementById('app-root');
+    if (root) {
+      try {
+        var UILayout = DI.resolve('UI.Layout');
+        root.innerHTML = UILayout.buildMarkup();
+      } catch (e) {
+        if (AS_Logger) AS_Logger.error('App.State', 'buildMarkup failed', e);
+        return;
+      }
+    }
+    
+    // 3. Привязка новых handlers и подписок
+    if (typeof setupWindowListeners === 'function') {
+      setupWindowListeners();
+    }
+    if (typeof bindEvents === 'function') {
+      bindEvents();
+    }
+
+    // 4. Переинициализация UI компонентов
+    var components = [
+      'HeaderStatusComponent',
+      'OfflineBarComponent',
+      'EditorComponent',
+      'StreamViewComponent',
+      'FocusBarComponent',
+      'BaseViewComponent'
+    ];
+    
+    for (var i = 0; i < components.length; i++) {
+      try {
+        var component = DI.resolve(components[i]);
+        if (component && component.destroy) {
+          component.destroy();
+        }
+        if (component && component.init) {
+          component.init();
+        }
+      } catch (e) {
+        if (AS_Logger) {
+          AS_Logger.error('App.State', components[i] + ' reinit failed', e);
+        }
+      }
+    }
+
+    // 5. Восстановление активной вкладки
+    switchView(savedView);
+
+    // 6. Запуск поиска если AI ready
+    if (AS_AI && AS_AI.ready && AS_AI.ready()) {
+      executeSearch(true);
+    }
+    
+    if (AS_Logger) {
+      AS_Logger.info('App.State', 'refreshUI completed', {
+        count: refreshCount,
+        view: savedView
+      });
+    }
+  }
+
+  /**
+   * Возвращает статистику App.State.
+   * 
+   * @returns {{refreshCount: number}}
+   */
+  function getStats() {
+    return {
+      refreshCount: refreshCount
+    };
+  }
+
+  /**
+   * Сбрасывает статистику.
+   * 
+   * @returns {void}
+   */
+  function resetStats() {
+    refreshCount = 0;
+  }
+
+  /*
+   * Примечание: App.State не имеет init/destroy, так как это набор функций,
+   * а не DI-модуль. Lifecycle управляется через App.Events и App.Boot.
+   */
   /* <!-- MODULE: App.State --> */
 
   /* <!-- MODULE: App.Events --> */
