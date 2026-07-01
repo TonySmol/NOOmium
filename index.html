@@ -1,7 +1,7 @@
 <!doctype html>
 <html lang="ru">
 <head>
-  <meta name="app-version" content="2.0.0">
+  <meta name="app-version" content="2.0.1">
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,maximum-scale=1">
   <meta name="mobile-web-app-capable" content="yes">
@@ -296,11 +296,533 @@ kbd{padding:2px 6px;background:var(--surface-3);border:1px solid var(--line);bor
   // INFRASTRUCTURE LAYER
   // ═══════════════════════════════════════════════════
 
-  /* <!-- MODULE: DI --> */
-  /* <!-- MODULE: DI --> */
+/* <!-- MODULE: DI --> */
+/**
+ * @module DI
+ * @description Минималистичный Dependency Injection контейнер.
+ * 
+ * Обеспечивает:
+ * - Ленивое создание инстансов при первом обращении (Singleton)
+ * - Детекцию циклических зависимостей через visiting Set
+ * - Централизованный lifecycle: initAll(signal) / destroyAll()
+ * - Защиту от повторной регистрации модулей
+ * 
+ * Архитектурные принципы:
+ * - Все модули регистрируются ДО вызова resolve()
+ * - Зависимости декларативны (массив строк)
+ * - Каждый модуль опционально имеет init(signal) и destroy() методы
+ * 
+ * @namespace DI
+ */
+var DI = (function() {
+  
+  /**
+   * Реестр зарегистрированных фабрик модулей.
+   * @type {Map<string, {factory: Function, deps: string[]}>}
+   */
+  var factories = new Map();
+  
+  /**
+   * Кэш созданных инстансов (Singleton pattern).
+   * @type {Map<string, Object>}
+   */
+  var instances = new Map();
 
-  /* <!-- MODULE: Utils --> */
-  /* <!-- MODULE: Utils --> */
+  /**
+   * Регистрирует модуль в контейнере.
+   * 
+   * @param {string} name - Уникальное имя модуля.
+   * @param {Function} factory - Функция, возвращающая публичный API модуля.
+   *   Принимает разрешённые зависимости как аргументы.
+   * @param {string[]} [deps=[]] - Массив имён зависимостей.
+   * @returns {void}
+   * @throws {Error} Если модуль с таким именем уже зарегистрирован.
+   */
+  function register(name, factory, deps) {
+    if (factories.has(name)) {
+      console.warn('[DI] Module "' + name + '" already registered, overwriting');
+    }
+    factories.set(name, {
+      factory: factory,
+      deps: deps || []
+    });
+  }
+
+  /**
+   * Разрешает модуль, создавая его при первом обращении.
+   * 
+   * Алгоритм:
+   * 1. Проверка кэша инстансов (возврат если уже создан)
+   * 2. Проверка visiting Set (детекция цикла)
+   * 3. Рекурсивное разрешение зависимостей
+   * 4. Вызов factory с разрешёнными зависимостями
+   * 5. Сохранение инстанса в кэш
+   * 6. Удаление из visiting (ПОСЛЕ создания, не до!)
+   * 
+   * @param {string} name - Имя модуля для разрешения.
+   * @param {Set<string>} [visiting] - Set модулей в текущей цепочке разрешения.
+   * @returns {Object} Публичный API модуля.
+   * @throws {Error} Если модуль не найден или обнаружена циклическая зависимость.
+   */
+  function resolve(name, visiting) {
+    if (instances.has(name)) {
+      return instances.get(name);
+    }
+    
+    var def = factories.get(name);
+    if (!def) {
+      throw new Error('[DI] Module not found: ' + name);
+    }
+    
+    if (!visiting) {
+      visiting = new Set();
+    }
+    
+    if (visiting.has(name)) {
+      throw new Error('[DI] Circular dependency detected: ' + name);
+    }
+    visiting.add(name);
+    
+    var resolvedDeps = [];
+    try {
+      for (var i = 0; i < def.deps.length; i++) {
+        resolvedDeps.push(resolve(def.deps[i], visiting));
+      }
+    } catch (err) {
+      visiting.delete(name);
+      throw err;
+    }
+    
+    var instance;
+    try {
+      instance = def.factory.apply(null, resolvedDeps);
+    } catch (err) {
+      visiting.delete(name);
+      throw new Error('[DI] Factory error for "' + name + '": ' + (err.message || err));
+    }
+    
+    instances.set(name, instance);
+    visiting.delete(name);
+    
+    return instance;
+  }
+
+  /**
+   * Инициализирует все зарегистрированные модули.
+   * Вызывает init(signal) для каждого модуля, который имеет этот метод.
+   * 
+   * @param {AbortSignal} signal - Сигнал для автоматической отписки при уничтожении.
+   * @returns {void}
+   */
+  function initAll(signal) {
+    var names = Array.from(factories.keys());
+    
+    for (var i = 0; i < names.length; i++) {
+      var name = names[i];
+      try {
+        var instance = resolve(name);
+        if (instance && typeof instance.init === 'function') {
+          instance.init(signal);
+        }
+      } catch (err) {
+        console.error('[DI] init() failed for "' + name + '":', err);
+      }
+    }
+  }
+
+  /**
+   * Уничтожает все созданные инстансы модулей.
+   * Вызывает destroy() для каждого модуля, который имеет этот метод.
+   * Очищает кэш инстансов.
+   * 
+   * @returns {void}
+   */
+  function destroyAll() {
+    var names = Array.from(instances.keys()).reverse();
+    
+    for (var i = 0; i < names.length; i++) {
+      var name = names[i];
+      var instance = instances.get(name);
+      
+      if (instance && typeof instance.destroy === 'function') {
+        try {
+          instance.destroy();
+        } catch (err) {
+          console.error('[DI] destroy() failed for "' + name + '":', err);
+        }
+      }
+    }
+    
+    instances.clear();
+  }
+
+  /**
+   * Возвращает список всех зарегистрированных модулей.
+   * 
+   * @returns {string[]} Массив имён модулей.
+   */
+  function listModules() {
+    return Array.from(factories.keys());
+  }
+
+  /**
+   * Проверяет, зарегистрирован ли модуль.
+   * 
+   * @param {string} name - Имя модуля.
+   * @returns {boolean} true если модуль зарегистрирован.
+   */
+  function hasModule(name) {
+    return factories.has(name);
+  }
+
+  return {
+    register: register,
+    resolve: resolve,
+    initAll: initAll,
+    destroyAll: destroyAll,
+    listModules: listModules,
+    hasModule: hasModule
+  };
+})();
+/* <!-- MODULE: DI --> */
+
+/* <!-- MODULE: Utils --> */
+/**
+ * @module Utils
+ * @description Набор утилит общего назначения.
+ * 
+ * Все функции чистые, без побочных эффектов.
+ * Не имеет зависимостей от других модулей.
+ * 
+ * Предоставляет:
+ * - XSS-safe экранирование HTML и RegExp
+ * - Локализованное склонение числительных
+ * - Форматирование дат и времени
+ * - Генерацию уникальных ID
+ * - Обрезку строк с многоточием
+ * 
+ * @namespace Utils
+ */
+DI.register('Utils', function() {
+  
+  /**
+   * Экранирует специальные HTML-символы для безопасной вставки в DOM.
+   * Предотвращает XSS-атаки при отображении пользовательского контента.
+   * 
+   * Обрабатываемые символы: & < > " '
+   * 
+   * @param {*} s - Входное значение (любой тип будет приведён к строке).
+   *   null и undefined возвращают пустую строку.
+   * @returns {string} Экранированная строка.
+   * 
+   * @example
+   * esc('<script>alert("xss")</script>')
+   * // → '&lt;script&gt;alert(&quot;xss&quot;)&lt;/script&gt;'
+   */
+  function esc(s) {
+    if (s == null) return '';
+    return String(s).replace(/[&<>"']/g, function(c) {
+      return {
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;'
+      }[c];
+    });
+  }
+
+  /**
+   * Экранирует специальные символы регулярных выражений.
+   * Используется для безопасного создания RegExp из пользовательского ввода.
+   * 
+   * Экранирует: . * + ? ^ $ { } ( ) | [ ] \
+   * 
+   * @param {*} s - Входное значение.
+   *   null и undefined возвращают пустую строку.
+   * @returns {string} Строка, безопасная для использования в RegExp.
+   * 
+   * @example
+   * escRe('hello.world*')
+   * // → 'hello\\.world\\*'
+   */
+  function escRe(s) {
+    if (s == null) return '';
+    return String(s).replace(/[.*+?^${}()|\[\]\\]/g, '\\$&');
+  }
+
+  /**
+   * Возвращает правильную форму слова для русского/английского языка
+   * в зависимости от числа.
+   * 
+   * Поддерживает славянские правила склонения:
+   * - 1, 21, 31, ... → форма "один"
+   * - 2-4, 22-24, ... → форма "два-четыре"
+   * - 5-20, 25-30, 11-14, ... → форма "пять-двадцать"
+   * 
+   * @param {number} n - Количество.
+   * @param {string} one - Форма для 1 (например, «символ» / «char»).
+   * @param {string} few - Форма для 2-4 (например, «символа» / «chars»).
+   * @param {string} many - Форма для остальных (например, «символов» / «chars»).
+   * @returns {string} Выбранная форма слова.
+   * 
+   * @example
+   * plural(1, 'символ', 'символа', 'символов')  // → 'символ'
+   * plural(3, 'символ', 'символа', 'символов')  // → 'символа'
+   * plural(5, 'символ', 'символа', 'символов')  // → 'символов'
+   * plural(21, 'символ', 'символа', 'символов') // → 'символ'
+   * plural(111, 'символ', 'символа', 'символов') // → 'символов'
+   */
+  function plural(n, one, few, many) {
+    n = Math.abs(n);
+    var a = n % 10;
+    var b = n % 100;
+    
+    if (a === 1 && b !== 11) return one;
+    if (a >= 2 && a <= 4 && (b < 10 || b >= 20)) return few;
+    return many;
+  }
+
+  /**
+   * Словарь генераторов строк с числительными для разных сущностей.
+   * @type {Object<string, function(number, string): string>}
+   */
+  var words = {
+    
+    /**
+     * Строка вида «N символ(ов)» / «N char(s)».
+     * @param {number} n - Количество.
+     * @param {string} l - Язык ('ru' | 'en').
+     * @returns {string}
+     */
+    symbols: function(n, l) {
+      return n + ' ' + (l === 'en'
+        ? plural(n, 'char', 'chars', 'chars')
+        : plural(n, 'символ', 'символа', 'символов'));
+    },
+
+    /**
+     * Строка вида «N узел(ов)» / «N peer(s)».
+     * @param {number} n - Количество.
+     * @param {string} l - Язык ('ru' | 'en').
+     * @returns {string}
+     */
+    peers: function(n, l) {
+      return n + ' ' + (l === 'en'
+        ? plural(n, 'peer', 'peers', 'peers')
+        : plural(n, 'узел', 'узла', 'узлов'));
+    },
+
+    /**
+     * Строка вида «N мысль(ей)» / «N note(s)».
+     * @param {number} n - Количество.
+     * @param {string} l - Язык ('ru' | 'en').
+     * @returns {string}
+     */
+    thoughts: function(n, l) {
+      return n + ' ' + (l === 'en'
+        ? plural(n, 'note', 'notes', 'notes')
+        : plural(n, 'мысль', 'мысли', 'мыслей'));
+    }
+  };
+
+  /**
+   * Публичная обёртка для получения строки с числительным по ключу сущности.
+   * 
+   * @param {string} key - Ключ сущности ('symbols' | 'peers' | 'thoughts').
+   * @param {number} n - Количество.
+   * @param {string} lang - Язык ('ru' | 'en').
+   * @returns {string} Отформатированная строка.
+   * 
+   * @example
+   * word('symbols', 5, 'ru')  // → '5 символов'
+   * word('peers', 3, 'en')    // → '3 peers'
+   */
+  function word(key, n, lang) {
+    var fn = words[key];
+    return fn ? fn(n, lang) : String(n);
+  }
+
+  /**
+   * Форматирует timestamp в короткую дату (например, «05 июн.»).
+   * Возвращает пустую строку при невалидном timestamp или ошибке форматирования.
+   * 
+   * @param {number} ts - Timestamp в миллисекундах.
+   * @param {string} lang - Язык ('ru' | 'en').
+   * @returns {string} Отформатированная дата или пустая строка при ошибке.
+   * 
+   * @example
+   * fmtDate(1717459200000, 'ru')  // → '04 июн.'
+   * fmtDate(1717459200000, 'en')  // → 'Jun 04'
+   */
+  function fmtDate(ts, lang) {
+    if (!ts || typeof ts !== 'number') return '';
+    var d = new Date(ts);
+    if (isNaN(d.getTime())) return '';
+    
+    var loc = lang === 'en' ? 'en-US' : 'ru-RU';
+    try {
+      return d.toLocaleDateString(loc, {
+        day: '2-digit',
+        month: 'short'
+      });
+    } catch (e) {
+      return '';
+    }
+  }
+
+  /**
+   * Форматирует timestamp в короткое время (например, «14:30»).
+   * Возвращает пустую строку при невалидном timestamp или ошибке форматирования.
+   * 
+   * @param {number} ts - Timestamp в миллисекундах.
+   * @param {string} lang - Язык ('ru' | 'en').
+   * @returns {string} Отформатированное время или пустая строка при ошибке.
+   * 
+   * @example
+   * fmtTime(1717459200000, 'ru')  // → '14:30'
+   */
+  function fmtTime(ts, lang) {
+    if (!ts || typeof ts !== 'number') return '';
+    var d = new Date(ts);
+    if (isNaN(d.getTime())) return '';
+    
+    var loc = lang === 'en' ? 'en-US' : 'ru-RU';
+    try {
+      return d.toLocaleTimeString(loc, {
+        hour: '2-digit',
+        minute: '2-digit'
+      });
+    } catch (e) {
+      return '';
+    }
+  }
+
+  /**
+   * Генерирует уникальный идентификатор.
+   * Комбинирует случайную строку и timestamp для гарантированной уникальности.
+   * 
+   * @returns {string} Уникальный ID (например, 'a3f2c1b9m5x7k2').
+   * 
+   * @example
+   * uid()  // → 'k9m2x8p4l1736543210abc'
+   */
+  function uid() {
+    return Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+  }
+
+  /**
+   * Обрезает строку до указанной длины с добавлением многоточия.
+   * Если строка короче max — возвращается без изменений.
+   * 
+   * @param {string} str - Исходная строка.
+   * @param {number} [max=100] - Максимальная длина.
+   * @returns {string} Обрезанная строка.
+   * 
+   * @example
+   * truncate('Очень длинный текст', 10)  // → 'Очень длин…'
+   * truncate('Короткий', 100)            // → 'Короткий'
+   */
+  function truncate(str, max) {
+    if (typeof str !== 'string') return '';
+    max = max || 100;
+    if (str.length <= max) return str;
+    return str.slice(0, max).trim() + '…';
+  }
+
+  /**
+   * Безопасно парсит JSON-строку.
+   * Возвращает значение по умолчанию при ошибке парсинга.
+   * 
+   * @param {string} str - JSON-строка.
+   * @param {*} [def=null] - Значение по умолчанию.
+   * @returns {*} Распарсенный объект или def.
+   * 
+   * @example
+   * safeJsonParse('{"key":"value"}', {})  // → {key: 'value'}
+   * safeJsonParse('invalid', {})          // → {}
+   */
+  function safeJsonParse(str, def) {
+    if (typeof str !== 'string') return def !== undefined ? def : null;
+    try {
+      return JSON.parse(str);
+    } catch (e) {
+      return def !== undefined ? def : null;
+    }
+  }
+
+  /**
+   * Клонирует объект (глубокое копирование для простых типов).
+   * Массивы и объекты копируются рекурсивно.
+   * Функции, Date, RegExp не клонируются (возвращаются как есть).
+   * 
+   * @param {*} obj - Объект для клонирования.
+   * @returns {*} Клон объекта.
+   * 
+   * @example
+   * clone({a: 1, b: {c: 2}})  // → {a: 1, b: {c: 2}} (новый объект)
+   */
+  function clone(obj) {
+    if (obj === null || typeof obj !== 'object') return obj;
+    if (Array.isArray(obj)) {
+      var arr = [];
+      for (var i = 0; i < obj.length; i++) {
+        arr.push(clone(obj[i]));
+      }
+      return arr;
+    }
+    var result = {};
+    for (var key in obj) {
+      if (obj.hasOwnProperty(key)) {
+        result[key] = clone(obj[key]);
+      }
+    }
+    return result;
+  }
+
+  /**
+   * Проверяет, является ли значение пустым.
+   * Пустыми считаются: null, undefined, пустая строка, пустой массив, пустой объект.
+   * 
+   * @param {*} value - Значение для проверки.
+   * @returns {boolean} true если значение пустое.
+   * 
+   * @example
+   * isEmpty(null)      // → true
+   * isEmpty('')        // → true
+   * isEmpty([])        // → true
+   * isEmpty({})        // → true
+   * isEmpty('text')    // → false
+   * isEmpty([1, 2])    // → false
+   */
+  function isEmpty(value) {
+    if (value == null) return true;
+    if (typeof value === 'string') return value.trim() === '';
+    if (Array.isArray(value)) return value.length === 0;
+    if (typeof value === 'object') {
+      for (var key in value) {
+        if (value.hasOwnProperty(key)) return false;
+      }
+      return true;
+    }
+    return false;
+  }
+
+  return {
+    esc: esc,
+    escRe: escRe,
+    plural: plural,
+    word: word,
+    fmtDate: fmtDate,
+    fmtTime: fmtTime,
+    uid: uid,
+    truncate: truncate,
+    safeJsonParse: safeJsonParse,
+    clone: clone,
+    isEmpty: isEmpty
+  };
+}, []);
+/* <!-- MODULE: Utils --> */
 
   /* <!-- MODULE: Logger --> */
   /* <!-- MODULE: Logger --> */
@@ -410,11 +932,640 @@ kbd{padding:2px 6px;background:var(--surface-3);border:1px solid var(--line);bor
   /* <!-- MODULE: Progress --> */
   /* <!-- MODULE: Progress --> */
 
-  /* <!-- MODULE: UI.Layout --> */
-  /* <!-- MODULE: UI.Layout --> */
+/* <!-- MODULE: UI.Layout --> */
+/**
+ * @module UI.Layout
+ * @description Генерация HTML-разметки всего приложения.
+ *
+ * @namespace UI.Layout
+ */
+DI.register('UI.Layout', function(Config, I18n, Utils) {
 
-  /* <!-- MODULE: UI.Menu --> */
-  /* <!-- MODULE: UI.Menu --> */
+  /**
+   * @param {string} key
+   * @param {string} fallback
+   * @returns {string}
+   */
+  function t(key, fallback) {
+    return I18n ? I18n.t(key, {}, fallback) : fallback;
+  }
+
+  /**
+   * @returns {string}
+   */
+  function buildHeaderMarkup() {
+    return '<div class="hdr">' +
+      '<div class="logo">' +
+        '<span class="logo-mark">N</span>' +
+        '<span>NOO<span class="logo-dot">.</span>mium</span>' +
+      '</div>' +
+      '<div class="hdr-status">' +
+        '<span class="hdr-st-item">' +
+          '<span class="hdr-st-dot load" id="st-net-dot"></span>' +
+          '<span id="st-net-txt">' + t('st.net', 'сеть') + '</span>' +
+        '</span>' +
+        '<span class="hdr-st-sep">·</span>' +
+        '<span class="hdr-st-item">' +
+          '<span class="hdr-st-dot load" id="st-ai-dot"></span>' +
+          '<span id="st-ai-txt">' + t('st.ai.loading', 'модель') + '</span>' +
+        '</span>' +
+      '</div>' +
+      '<button class="burger" id="btn-menu" aria-label="' + Utils.esc(t('menu.settings', 'Меню')) + '" aria-expanded="false">' +
+        '<span class="burger-line"></span>' +
+        '<span class="burger-line"></span>' +
+        '<span class="burger-line"></span>' +
+      '</button>' +
+    '</div>' +
+    '<div id="offline-bar" class="offline-bar-init">' +
+      '<span id="offline-text">' + t('offline.bar', 'Офлайн-очередь') + '</span>' +
+      '<span id="offline-queue" class="offline-queue-init"></span>' +
+    '</div>';
+  }
+
+  /**
+   * @returns {string}
+   */
+  function buildSegmentsMarkup() {
+    return '<div class="seg">' +
+      '<button class="seg-b on" data-k="local">' +
+        '<span class="lbl">' + t('seg.local', 'Моё') + '</span>' +
+        '<span class="cnt" id="c-local">0</span>' +
+      '</button>' +
+      '<button class="seg-b" data-k="world">' +
+        '<span class="lbl">' + t('seg.world', 'Мир') + '</span>' +
+        '<span class="cnt" id="c-world">0</span>' +
+      '</button>' +
+      '<button class="seg-b" data-k="seren">' +
+        '<span class="lbl">' + t('seg.seren', 'Озарения') + '</span>' +
+        '<span class="cnt" id="c-seren">0</span>' +
+      '</button>' +
+    '</div>';
+  }
+
+  /**
+   * @returns {string}
+   */
+  function buildFocusBarMarkup() {
+    return '<div id="focus-bar" class="focus-bar-init"></div>';
+  }
+
+  /**
+   * @returns {string}
+   */
+  function buildCarouselWrapMarkup() {
+    return '<div class="carousel-wrap" id="carousel-wrap">' +
+      '<div class="carousel" id="carousel" tabindex="0"></div>' +
+      '<div class="pagination-controls" id="pagination-controls">' +
+        '<button class="pagination-btn" id="pagination-prev" disabled aria-label="' + Utils.esc(t('btn.prev', 'Предыдущая')) + '">‹</button>' +
+        '<div class="carousel-dots" id="carousel-dots"></div>' +
+        '<span class="carousel-counter" id="carousel-counter">0 / 0</span>' +
+        '<button class="pagination-btn" id="pagination-next" aria-label="' + Utils.esc(t('btn.next', 'Следующая')) + '">›</button>' +
+      '</div>' +
+    '</div>';
+  }
+
+  /**
+   * @returns {string}
+   */
+  function buildEditorMarkup() {
+    var placeholder = Utils.esc(t('ed.placeholder', 'О чём думаешь?'));
+    var charsLabel = t('ed.chars', 'симв.');
+    var privateLabel = t('btn.private', 'Личное');
+    var publicLabel = t('btn.public', 'Мир');
+    var sendLabel = Utils.esc(t('btn.send', 'Послать'));
+
+    return '<div class="ed">' +
+      '<textarea id="ed-ta" class="ed-ta" placeholder="' + placeholder + '"></textarea>' +
+      '<div class="ed-foot">' +
+        '<span id="ed-cnt" class="ed-cnt">0 ' + charsLabel + '</span>' +
+        '<div class="ed-acts">' +
+          '<div class="tog-sw" id="mode-toggle" data-mode="private">' +
+            '<div class="tog-sw-thumb"></div>' +
+            '<div class="tog-sw-opt on" data-v="private">' + privateLabel + '</div>' +
+            '<div class="tog-sw-opt" data-v="world">' + publicLabel + '</div>' +
+          '</div>' +
+          '<button class="btn-send" id="btn-send" aria-label="' + sendLabel + '">' +
+            '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+              '<line x1="22" y1="2" x2="11" y2="13"/>' +
+              '<polygon points="22 2 15 22 11 13 2 9 22 2"/>' +
+            '</svg>' +
+          '</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  }
+
+  /**
+   * @returns {string}
+   */
+  function buildBaseMarkup() {
+    var searchPlaceholder = Utils.esc(t('base.search', 'поиск...'));
+    var sortNewLabel = t('base.sort.new', 'новые');
+    var sortOldLabel = t('base.sort.old', 'старые');
+    var sortAZLabel = t('base.sort.az', 'а-я');
+
+    return '<div class="ws base ws-base-init" id="ws-base">' +
+      '<div class="base-h">' +
+        '<div class="base-stats" id="base-stats"></div>' +
+        '<div class="base-ctrls">' +
+          '<input type="text" class="base-search" id="base-q" placeholder="' + searchPlaceholder + '" />' +
+          '<select class="base-sort" id="base-sort">' +
+            '<option value="new">' + sortNewLabel + '</option>' +
+            '<option value="old">' + sortOldLabel + '</option>' +
+            '<option value="az">' + sortAZLabel + '</option>' +
+          '</select>' +
+        '</div>' +
+      '</div>' +
+      '<div class="base-list" id="base-list"></div>' +
+    '</div>';
+  }
+
+  /**
+   * @returns {string}
+   */
+  function buildBottomTabMarkup() {
+    return '<div class="btab">' +
+      '<button class="btab-b on" data-v="stream">' +
+        '<span class="btab-ic">◇</span>' +
+        '<span>' + t('tab.stream', 'Поток') + '</span>' +
+      '</button>' +
+      '<button class="btab-b" data-v="base">' +
+        '<span class="btab-ic">▤</span>' +
+        '<span>' + t('tab.base', 'База') + '</span>' +
+      '</button>' +
+    '</div>';
+  }
+
+  /**
+   * @returns {string}
+   */
+  function buildMarkup() {
+    return buildHeaderMarkup() +
+      '<div class="ws" id="ws-stream">' +
+        buildSegmentsMarkup() +
+        buildFocusBarMarkup() +
+        buildCarouselWrapMarkup() +
+        buildEditorMarkup() +
+      '</div>' +
+      buildBaseMarkup() +
+      buildBottomTabMarkup();
+  }
+
+  /**
+   * @param {AbortSignal} [signal]
+   * @returns {void}
+   */
+  function init(signal) {}
+
+  /**
+   * @returns {void}
+   */
+  function destroy() {}
+
+  return {
+    buildMarkup: buildMarkup,
+    buildHeaderMarkup: buildHeaderMarkup,
+    buildSegmentsMarkup: buildSegmentsMarkup,
+    buildFocusBarMarkup: buildFocusBarMarkup,
+    buildCarouselWrapMarkup: buildCarouselWrapMarkup,
+    buildEditorMarkup: buildEditorMarkup,
+    buildBaseMarkup: buildBaseMarkup,
+    buildBottomTabMarkup: buildBottomTabMarkup,
+    init: init,
+    destroy: destroy
+  };
+}, ['Config', 'I18n', 'Utils']);
+/* <!-- MODULE: UI.Layout --> */
+
+/* <!-- MODULE: UI.Menu --> */
+/**
+ * @module UI.Menu
+ * @description Модальное окно настроек приложения.
+ *
+ * @namespace UI.Menu
+ */
+DI.register('UI.Menu', function(Config, Logger, Bus, I18n, Modal, Net, Toast, AuthService) {
+
+  /** @type {number} */
+  var openCount = 0;
+
+  /** @type {number} */
+  var saveCount = 0;
+
+  /**
+   * @param {string} key
+   * @param {string} fallback
+   * @returns {string}
+   */
+  function t(key, fallback) {
+    return I18n ? I18n.t(key, {}, fallback) : fallback;
+  }
+
+  /**
+   * @param {string} titleKey
+   * @param {string} titleFallback
+   * @returns {HTMLDivElement}
+   */
+  function createSection(titleKey, titleFallback) {
+    var section = document.createElement('div');
+    section.className = 'set-sec';
+    var title = document.createElement('div');
+    title.className = 'set-sec-t';
+    title.textContent = t(titleKey, titleFallback);
+    section.appendChild(title);
+    return section;
+  }
+
+  /**
+   * @param {string} labelKey
+   * @param {string} labelFallback
+   * @param {HTMLElement} input
+   * @param {string} [hintKey]
+   * @param {string} [hintFallback]
+   * @returns {HTMLDivElement}
+   */
+  function createFieldGroup(labelKey, labelFallback, input, hintKey, hintFallback) {
+    var group = document.createElement('div');
+    group.className = 'fg';
+    var label = document.createElement('label');
+    label.className = 'fl';
+    label.textContent = t(labelKey, labelFallback);
+    group.appendChild(label);
+    group.appendChild(input);
+    if (hintKey) {
+      var hint = document.createElement('div');
+      hint.className = 'fh';
+      hint.textContent = t(hintKey, hintFallback);
+      group.appendChild(hint);
+    }
+    return group;
+  }
+
+  /**
+   * @param {'dark'|'light'} theme
+   * @returns {void}
+   */
+  function applyTheme(theme) {
+    document.body.setAttribute('data-theme', theme);
+    if (Config && Config.set) Config.set('theme', theme);
+    if (Config && Config.save) Config.save();
+    var metaTheme = document.querySelector('meta[name="theme-color"]');
+    if (metaTheme) {
+      metaTheme.setAttribute('content', theme === 'light' ? '#fafafa' : '#0b0b10');
+    }
+  }
+
+  /**
+   * @returns {{section: HTMLDivElement, cleanup: function}}
+   */
+  function buildAppSection() {
+    var section = createSection('menu.settings', 'Настройки');
+
+    var currentTheme = Config ? Config.get('theme', 'dark') : 'dark';
+    var themeRow = document.createElement('button');
+    themeRow.className = 'tog' + (currentTheme === 'light' ? ' on' : '');
+    themeRow.innerHTML = '<span class="tog-ic">◐</span>' +
+      '<span class="tog-lbl">' + t('menu.theme', 'Тема') + '</span>' +
+      '<div class="tog-track"><div class="tog-thumb"></div></div>';
+    themeRow.onclick = function() {
+      var current = Config ? Config.get('theme', 'dark') : 'dark';
+      var next = current === 'dark' ? 'light' : 'dark';
+      applyTheme(next);
+      themeRow.classList.toggle('on', next === 'light');
+    };
+    section.appendChild(themeRow);
+
+    var langRow = document.createElement('div');
+    langRow.style.marginTop = '8px';
+    var langLabel = document.createElement('div');
+    langLabel.className = 'fl mb-5';
+    langLabel.textContent = t('menu.lang', 'Язык');
+    langRow.appendChild(langLabel);
+    var langSwitch = document.createElement('div');
+    langSwitch.className = 'lang-sw';
+    ['ru', 'en'].forEach(function(lang) {
+      var langBtn = document.createElement('button');
+      langBtn.className = 'lang-sw-b' + (I18n && I18n.getLang() === lang ? ' on' : '');
+      langBtn.textContent = lang.toUpperCase();
+      langBtn.onclick = function() {
+        if (I18n && I18n.setLang) I18n.setLang(lang);
+        if (Modal && Modal.close) Modal.close();
+      };
+      langSwitch.appendChild(langBtn);
+    });
+    langRow.appendChild(langSwitch);
+    section.appendChild(langRow);
+
+    var helpBtn = document.createElement('button');
+    helpBtn.className = 'tog';
+    helpBtn.style.marginTop = '8px';
+    helpBtn.innerHTML = '<span class="tog-ic">?</span>' +
+      '<span class="tog-lbl">' + t('menu.help', 'Как это работает') + '</span>' +
+      '<span class="tog-arr">→</span>';
+    helpBtn.onclick = function() {
+      if (Modal && Modal.close) Modal.close();
+      setTimeout(function() {
+        try {
+          var UIHelp = DI.resolve('UI.Help');
+          if (UIHelp && UIHelp.openHelp) UIHelp.openHelp(false);
+        } catch (e) {
+          if (Logger) Logger.error('UI.Menu', 'Failed to open help', e);
+        }
+      }, 200);
+    };
+    section.appendChild(helpBtn);
+
+    return {
+      section: section,
+      cleanup: function() {
+        themeRow.onclick = null;
+        helpBtn.onclick = null;
+      }
+    };
+  }
+
+  /**
+   * @returns {{section: HTMLDivElement, getValues: function, cleanup: function}}
+   */
+  function buildNetSection() {
+    var section = createSection('set.advanced', 'Расширенные');
+
+    var roomInput = document.createElement('input');
+    roomInput.type = 'text';
+    roomInput.className = 'fi-input';
+    roomInput.value = Config ? Config.get('room', 'noomium-main') : 'noomium-main';
+    section.appendChild(createFieldGroup('set.room', 'Комната', roomInput, 'set.room.hint', 'Nostr-топик группы'));
+
+    var thresholdInput = document.createElement('input');
+    thresholdInput.type = 'range';
+    thresholdInput.className = 'fr';
+    thresholdInput.min = '0';
+    thresholdInput.max = '1';
+    thresholdInput.step = '0.01';
+    thresholdInput.value = String(Config ? Config.get('threshold', 0.7) : 0.7);
+    var thresholdValue = document.createElement('span');
+    thresholdValue.className = 'rv';
+    thresholdValue.textContent = Number(thresholdInput.value).toFixed(2);
+    thresholdInput.oninput = function(e) {
+      thresholdValue.textContent = parseFloat(e.target.value).toFixed(2);
+    };
+    var thresholdWrapper = document.createElement('div');
+    thresholdWrapper.appendChild(thresholdInput);
+    thresholdWrapper.appendChild(thresholdValue);
+    section.appendChild(createFieldGroup('set.threshold', 'Порог', thresholdWrapper, 'set.threshold.hint', 'выше = строже'));
+
+    var serenInput = document.createElement('input');
+    serenInput.type = 'range';
+    serenInput.className = 'fr';
+    serenInput.min = '0';
+    serenInput.max = '1';
+    serenInput.step = '0.01';
+    serenInput.value = String(Config ? Config.get('serendipity', 0.3) : 0.3);
+    var serenValue = document.createElement('span');
+    serenValue.className = 'rv';
+    serenValue.textContent = Number(serenInput.value).toFixed(2);
+    serenInput.oninput = function(e) {
+      serenValue.textContent = parseFloat(e.target.value).toFixed(2);
+    };
+    var serenWrapper = document.createElement('div');
+    serenWrapper.appendChild(serenInput);
+    serenWrapper.appendChild(serenValue);
+    section.appendChild(createFieldGroup('set.seren', 'Дельта озарений', serenWrapper, 'set.seren.hint', 'ширина поиска'));
+
+    var relaysInput = document.createElement('textarea');
+    relaysInput.className = 'fi-textarea';
+    relaysInput.value = Config ? Config.get('relays', []).join('\n') : '';
+    section.appendChild(createFieldGroup('set.relays', 'Релеи', relaysInput, 'set.relays.hint', 'один wss:// на строку'));
+
+    return {
+      section: section,
+      getValues: function() {
+        return {
+          room: roomInput.value.trim() || 'noomium-main',
+          threshold: parseFloat(thresholdInput.value),
+          serendipity: parseFloat(serenInput.value),
+          relays: relaysInput.value.trim()
+            ? relaysInput.value.trim().split(/[\n,]+/).map(function(r) { return r.trim(); }).filter(function(r) { return r && /^wss?:\/\//.test(r); })
+            : (Config && Config.defaults ? Config.defaults().relays : [])
+        };
+      },
+      cleanup: function() {
+        thresholdInput.oninput = null;
+        serenInput.oninput = null;
+      }
+    };
+  }
+
+  /**
+   * @returns {{section: HTMLDivElement, cleanup: function}}
+   */
+  function buildDataSection() {
+    var section = createSection('set.data', 'Данные');
+
+    var exportBtn = document.createElement('button');
+    exportBtn.className = 'tog';
+    exportBtn.style.marginTop = '4px';
+    exportBtn.innerHTML = '<span class="tog-ic">↓</span>' +
+      '<span class="tog-lbl">' + t('menu.export', 'Экспорт') + '</span>' +
+      '<span class="tog-arr">→</span>';
+    exportBtn.onclick = function() {
+      if (Modal && Modal.close) Modal.close();
+      setTimeout(function() {
+        try {
+          var BaseView = DI.resolve('BaseViewComponent');
+          if (BaseView && BaseView.exportData) BaseView.exportData();
+        } catch (err) {
+          if (Toast && Toast.show) Toast.show('err', String(err && err.message || err) || 'Export failed');
+        }
+      }, 200);
+    };
+    section.appendChild(exportBtn);
+
+    var importBtn = document.createElement('button');
+    importBtn.className = 'tog';
+    importBtn.style.marginTop = '4px';
+    importBtn.innerHTML = '<span class="tog-ic">↑</span>' +
+      '<span class="tog-lbl">' + t('menu.import', 'Импорт') + '</span>' +
+      '<span class="tog-arr">→</span>';
+    importBtn.onclick = function() {
+      if (Modal && Modal.close) Modal.close();
+      setTimeout(function() {
+        try {
+          var BaseView = DI.resolve('BaseViewComponent');
+          if (BaseView && BaseView.importData) BaseView.importData();
+        } catch (err) {
+          if (Toast && Toast.show) Toast.show('err', String(err && err.message || err) || 'Import failed');
+        }
+      }, 200);
+    };
+    section.appendChild(importBtn);
+
+    return {
+      section: section,
+      cleanup: function() {
+        exportBtn.onclick = null;
+        importBtn.onclick = null;
+      }
+    };
+  }
+
+  /**
+   * @returns {{section: HTMLDivElement, cleanup: function}}
+   */
+  function buildDangerSection() {
+    var section = createSection('set.danger', 'Опасная зона');
+
+    var clearCacheBtn = document.createElement('button');
+    clearCacheBtn.className = 'btn-send full-width mb-8';
+    clearCacheBtn.textContent = t('btn.clear_cache', 'Сбросить кеш');
+    clearCacheBtn.onclick = function() {
+      if (window.caches) {
+        caches.keys().then(function(keys) {
+          return Promise.all(keys.map(function(key) { return caches.delete(key); }));
+        }).then(function() {
+          if (Toast && Toast.show) Toast.show('ok', t('toast.cache_cleared', 'Кеш сброшен'));
+          setTimeout(function() { location.reload(true); }, 500);
+        }).catch(function() {
+          setTimeout(function() { location.reload(true); }, 500);
+        });
+      } else {
+        setTimeout(function() { location.reload(true); }, 500);
+      }
+    };
+    section.appendChild(clearCacheBtn);
+
+    var wipeBtn = document.createElement('button');
+    wipeBtn.className = 'btn-send full-width danger-bg';
+    wipeBtn.textContent = t('base.wipe', 'Стереть базу');
+    wipeBtn.onclick = function() {
+      var confirmMsg = t('base.wipe.confirm', 'Удалить все ваши мысли навсегда?');
+      if (!confirm(confirmMsg)) return;
+      try {
+        if (AuthService && AuthService.resetStorage) {
+          AuthService.resetStorage().then(function() {
+            if (Toast && Toast.show) Toast.show('ok', t('toast.base.wiped', 'база стёрта'));
+            setTimeout(function() { location.reload(); }, 500);
+          });
+        }
+      } catch (e) {
+        setTimeout(function() { location.reload(); }, 500);
+      }
+    };
+    section.appendChild(wipeBtn);
+
+    return {
+      section: section,
+      cleanup: function() {
+        clearCacheBtn.onclick = null;
+        wipeBtn.onclick = null;
+      }
+    };
+  }
+
+  /**
+   * @returns {void}
+   */
+  function openMenu() {
+    openCount++;
+    var body = document.createElement('div');
+    var appSection = buildAppSection();
+    var netSection = buildNetSection();
+    var dataSection = buildDataSection();
+    var dangerSection = buildDangerSection();
+    body.appendChild(appSection.section);
+    body.appendChild(netSection.section);
+    body.appendChild(dataSection.section);
+    body.appendChild(dangerSection.section);
+
+    if (Modal && Modal.open) {
+      Modal.open({
+        title: '',
+        body: body,
+        buttons: [
+          {
+            text: t('btn.cancel', 'Отмена'),
+            primary: false,
+            onClick: function() {
+              if (Modal && Modal.close) Modal.close();
+              cleanup();
+            }
+          },
+          {
+            text: t('btn.save', 'Сохранить'),
+            primary: true,
+            onClick: function() {
+              saveCount++;
+              var netValues = netSection.getValues();
+              if (Config && Config.set) {
+                Config.set('room', netValues.room);
+                Config.set('threshold', netValues.threshold);
+                Config.set('serendipity', netValues.serendipity);
+                Config.set('relays', netValues.relays);
+              }
+              if (Config && Config.save) Config.save();
+              if (Modal && Modal.close) Modal.close();
+              if (Toast && Toast.show) Toast.show('info', t('toast.net.restart', 'перезапуск сети...'));
+              setTimeout(function() {
+                if (Net && Net.restart) {
+                  Net.restart(function() {
+                    if (Bus && Bus.emit) {
+                      try { Bus.emit('editor:search-request', { force: true }); } catch (e) {}
+                    }
+                  });
+                }
+              }, 300);
+              cleanup();
+            }
+          }
+        ]
+      });
+    }
+
+    function cleanup() {
+      appSection.cleanup();
+      netSection.cleanup();
+      dataSection.cleanup();
+      dangerSection.cleanup();
+    }
+  }
+
+  /**
+   * @returns {{opened: number, saved: number}}
+   */
+  function getStats() {
+    return { opened: openCount, saved: saveCount };
+  }
+
+  /**
+   * @returns {void}
+   */
+  function resetStats() {
+    openCount = 0;
+    saveCount = 0;
+  }
+
+  /**
+   * @param {AbortSignal} [signal]
+   * @returns {void}
+   */
+  function init(signal) {}
+
+  /**
+   * @returns {void}
+   */
+  function destroy() {
+    resetStats();
+  }
+
+  return {
+    openMenu: openMenu,
+    getStats: getStats,
+    resetStats: resetStats,
+    init: init,
+    destroy: destroy
+  };
+}, ['Config', 'Logger', 'Bus', 'I18n', 'Modal', 'Net', 'Toast', 'AuthService']);
+/* <!-- MODULE: UI.Menu --> */
 
   /* <!-- MODULE: UI.Help --> */
   /* <!-- MODULE: UI.Help --> */
