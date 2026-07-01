@@ -2239,353 +2239,353 @@ kbd {
       listModules: listModules,
       hasModule: hasModule
     };
-  })();
-  /* <!-- MODULE: DI --> */
+}, []);
+/* <!-- MODULE: DI --> */
 
-  /* <!-- MODULE: Utils --> */
+/* <!-- MODULE: Utils --> */
+/**
+ * @module Utils
+ * @description Набор утилит общего назначения.
+ * 
+ * Все функции чистые, без побочных эффектов.
+ * Не имеет зависимостей от других модулей.
+ * 
+ * Предоставляет:
+ * - XSS-safe экранирование HTML и RegExp
+ * - Локализованное склонение числительных
+ * - Форматирование дат и времени
+ * - Генерацию уникальных ID
+ * - Обрезку строк с многоточием
+ * 
+ * @namespace Utils
+ */
+DI.register('Utils', function() {
+
   /**
-   * @module Utils
-   * @description Набор утилит общего назначения.
+   * Экранирует специальные HTML-символы для безопасной вставки в DOM.
+   * Предотвращает XSS-атаки при отображении пользовательского контента.
    * 
-   * Все функции чистые, без побочных эффектов.
-   * Не имеет зависимостей от других модулей.
+   * Обрабатываемые символы: & < > " '
    * 
-   * Предоставляет:
-   * - XSS-safe экранирование HTML и RegExp
-   * - Локализованное склонение числительных
-   * - Форматирование дат и времени
-   * - Генерацию уникальных ID
-   * - Обрезку строк с многоточием
+   * @param {*} s - Входное значение (любой тип будет приведён к строке).
+   *   null и undefined возвращают пустую строку.
+   * @returns {string} Экранированная строка.
    * 
-   * @namespace Utils
+   * @example
+   * esc('<script>alert("xss")</script>')
+   * // → '&lt;script&gt;alert(&quot;xss&quot;)&lt;/script&gt;'
    */
-  DI.register('Utils', function() {
-    
+  function esc(s) {
+    if (s == null) return '';
+    return String(s).replace(/[&<>"']/g, function(c) {
+      return {
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;'
+      }[c];
+    });
+  }
+
+  /**
+   * Экранирует специальные символы регулярных выражений.
+   * Используется для безопасного создания RegExp из пользовательского ввода.
+   * 
+   * Экранирует: . * + ? ^ $ { } ( ) | [ ] \
+   * 
+   * ИСПРАВЛЕНИЕ v2.0.1:
+   * Символ `[` внутри character class должен быть экранирован как `\[`,
+   * иначе Chrome выдаёт SyntaxError: Unterminated character class.
+   * 
+   * @param {*} s - Входное значение.
+   *   null и undefined возвращают пустую строку.
+   * @returns {string} Строка, безопасная для использования в RegExp.
+   * 
+   * @example
+   * escRe('hello.world*')
+   * // → 'hello\\.world\\*'
+   * 
+   * escRe('test[0]')
+   * // → 'test\\[0\\]'
+   */
+  function escRe(s) {
+    if (s == null) return '';
+    return String(s).replace(/[.*+?^${}()|\[\]\\]/g, '\\$&');
+  }
+
+  /**
+   * Возвращает правильную форму слова для русского/английского языка
+   * в зависимости от числа.
+   * 
+   * Поддерживает славянские правила склонения:
+   * - 1, 21, 31, ... → форма "один"
+   * - 2-4, 22-24, ... → форма "два-четыре"
+   * - 5-20, 25-30, 11-14, ... → форма "пять-двадцать"
+   * 
+   * @param {number} n - Количество.
+   * @param {string} one - Форма для 1 (например, «символ» / «char»).
+   * @param {string} few - Форма для 2-4 (например, «символа» / «chars»).
+   * @param {string} many - Форма для остальных (например, «символов» / «chars»).
+   * @returns {string} Выбранная форма слова.
+   * 
+   * @example
+   * plural(1, 'символ', 'символа', 'символов')  // → 'символ'
+   * plural(3, 'символ', 'символа', 'символов')  // → 'символа'
+   * plural(5, 'символ', 'символа', 'символов')  // → 'символов'
+   * plural(21, 'символ', 'символа', 'символов') // → 'символ'
+   * plural(111, 'символ', 'символа', 'символов') // → 'символов'
+   */
+  function plural(n, one, few, many) {
+    n = Math.abs(n);
+    var a = n % 10;
+    var b = n % 100;
+
+    if (a === 1 && b !== 11) return one;
+    if (a >= 2 && a <= 4 && (b < 10 || b >= 20)) return few;
+    return many;
+  }
+
+  /**
+   * Словарь генераторов строк с числительными для разных сущностей.
+   * @type {Object<string, function(number, string): string>}
+   */
+  var words = {
+
     /**
-     * Экранирует специальные HTML-символы для безопасной вставки в DOM.
-     * Предотвращает XSS-атаки при отображении пользовательского контента.
-     * 
-     * Обрабатываемые символы: & < > " '
-     * 
-     * @param {*} s - Входное значение (любой тип будет приведён к строке).
-     *   null и undefined возвращают пустую строку.
-     * @returns {string} Экранированная строка.
-     * 
-     * @example
-     * esc('<script>alert("xss")</script>')
-     * // → '&lt;script&gt;alert(&quot;xss&quot;)&lt;/script&gt;'
+     * Строка вида «N символ(ов)» / «N char(s)».
+     * @param {number} n - Количество.
+     * @param {string} l - Язык ('ru' | 'en').
+     * @returns {string}
      */
-    function esc(s) {
-      if (s == null) return '';
-      return String(s).replace(/[&<>"']/g, function(c) {
-        return {
-          '&': '&amp;',
-          '<': '&lt;',
-          '>': '&gt;',
-          '"': '&quot;',
-          "'": '&#39;'
-        }[c];
+    symbols: function(n, l) {
+      return n + ' ' + (l === 'en'
+        ? plural(n, 'char', 'chars', 'chars')
+        : plural(n, 'символ', 'символа', 'символов'));
+    },
+
+    /**
+     * Строка вида «N узел(ов)» / «N peer(s)».
+     * @param {number} n - Количество.
+     * @param {string} l - Язык ('ru' | 'en').
+     * @returns {string}
+     */
+    peers: function(n, l) {
+      return n + ' ' + (l === 'en'
+        ? plural(n, 'peer', 'peers', 'peers')
+        : plural(n, 'узел', 'узла', 'узлов'));
+    },
+
+    /**
+     * Строка вида «N мысль(ей)» / «N note(s)».
+     * @param {number} n - Количество.
+     * @param {string} l - Язык ('ru' | 'en').
+     * @returns {string}
+     */
+    thoughts: function(n, l) {
+      return n + ' ' + (l === 'en'
+        ? plural(n, 'note', 'notes', 'notes')
+        : plural(n, 'мысль', 'мысли', 'мыслей'));
+    }
+  };
+
+  /**
+   * Публичная обёртка для получения строки с числительным по ключу сущности.
+   * 
+   * @param {string} key - Ключ сущности ('symbols' | 'peers' | 'thoughts').
+   * @param {number} n - Количество.
+   * @param {string} lang - Язык ('ru' | 'en').
+   * @returns {string} Отформатированная строка.
+   * 
+   * @example
+   * word('symbols', 5, 'ru')  // → '5 символов'
+   * word('peers', 3, 'en')    // → '3 peers'
+   */
+  function word(key, n, lang) {
+    var fn = words[key];
+    return fn ? fn(n, lang) : String(n);
+  }
+
+  /**
+   * Форматирует timestamp в короткую дату (например, «05 июн.»).
+   * Возвращает пустую строку при невалидном timestamp или ошибке форматирования.
+   * 
+   * @param {number} ts - Timestamp в миллисекундах.
+   * @param {string} lang - Язык ('ru' | 'en').
+   * @returns {string} Отформатированная дата или пустая строка при ошибке.
+   * 
+   * @example
+   * fmtDate(1717459200000, 'ru')  // → '04 июн.'
+   * fmtDate(1717459200000, 'en')  // → 'Jun 04'
+   */
+  function fmtDate(ts, lang) {
+    if (!ts || typeof ts !== 'number') return '';
+    var d = new Date(ts);
+    if (isNaN(d.getTime())) return '';
+
+    var loc = lang === 'en' ? 'en-US' : 'ru-RU';
+    try {
+      return d.toLocaleDateString(loc, {
+        day: '2-digit',
+        month: 'short'
       });
+    } catch (e) {
+      return '';
     }
+  }
 
-    /**
-     * Экранирует специальные символы регулярных выражений.
-     * Используется для безопасного создания RegExp из пользовательского ввода.
-     * 
-     * Экранирует: . * + ? ^ $ { } ( ) | [ ] \
-     * 
-     * ИСПРАВЛЕНИЕ v2.0.1:
-     * Символ `[` внутри character class должен быть экранирован как `\[`,
-     * иначе Chrome выдаёт SyntaxError: Unterminated character class.
-     * 
-     * @param {*} s - Входное значение.
-     *   null и undefined возвращают пустую строку.
-     * @returns {string} Строка, безопасная для использования в RegExp.
-     * 
-     * @example
-     * escRe('hello.world*')
-     * // → 'hello\\.world\\*'
-     * 
-     * escRe('test[0]')
-     * // → 'test\\[0\\]'
-     */
-    function escRe(s) {
-      if (s == null) return '';
-      return String(s).replace(/[.*+?^${}()|\[\]\\]/g, '\\$&');
+  /**
+   * Форматирует timestamp в короткое время (например, «14:30»).
+   * Возвращает пустую строку при невалидном timestamp или ошибке форматирования.
+   * 
+   * @param {number} ts - Timestamp в миллисекундах.
+   * @param {string} lang - Язык ('ru' | 'en').
+   * @returns {string} Отформатированное время или пустая строка при ошибке.
+   * 
+   * @example
+   * fmtTime(1717459200000, 'ru')  // → '14:30'
+   */
+  function fmtTime(ts, lang) {
+    if (!ts || typeof ts !== 'number') return '';
+    var d = new Date(ts);
+    if (isNaN(d.getTime())) return '';
+
+    var loc = lang === 'en' ? 'en-US' : 'ru-RU';
+    try {
+      return d.toLocaleTimeString(loc, {
+        hour: '2-digit',
+        minute: '2-digit'
+      });
+    } catch (e) {
+      return '';
     }
+  }
 
-    /**
-     * Возвращает правильную форму слова для русского/английского языка
-     * в зависимости от числа.
-     * 
-     * Поддерживает славянские правила склонения:
-     * - 1, 21, 31, ... → форма "один"
-     * - 2-4, 22-24, ... → форма "два-четыре"
-     * - 5-20, 25-30, 11-14, ... → форма "пять-двадцать"
-     * 
-     * @param {number} n - Количество.
-     * @param {string} one - Форма для 1 (например, «символ» / «char»).
-     * @param {string} few - Форма для 2-4 (например, «символа» / «chars»).
-     * @param {string} many - Форма для остальных (например, «символов» / «chars»).
-     * @returns {string} Выбранная форма слова.
-     * 
-     * @example
-     * plural(1, 'символ', 'символа', 'символов')  // → 'символ'
-     * plural(3, 'символ', 'символа', 'символов')  // → 'символа'
-     * plural(5, 'символ', 'символа', 'символов')  // → 'символов'
-     * plural(21, 'символ', 'символа', 'символов') // → 'символ'
-     * plural(111, 'символ', 'символа', 'символов') // → 'символов'
-     */
-    function plural(n, one, few, many) {
-      n = Math.abs(n);
-      var a = n % 10;
-      var b = n % 100;
-      
-      if (a === 1 && b !== 11) return one;
-      if (a >= 2 && a <= 4 && (b < 10 || b >= 20)) return few;
-      return many;
+  /**
+   * Генерирует уникальный идентификатор.
+   * Комбинирует случайную строку и timestamp для гарантированной уникальности.
+   * 
+   * @returns {string} Уникальный ID (например, 'a3f2c1b9m5x7k2').
+   * 
+   * @example
+   * uid()  // → 'k9m2x8p4l1736543210abc'
+   */
+  function uid() {
+    return Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+  }
+
+  /**
+   * Обрезает строку до указанной длины с добавлением многоточия.
+   * Если строка короче max — возвращается без изменений.
+   * 
+   * @param {string} str - Исходная строка.
+   * @param {number} [max=100] - Максимальная длина.
+   * @returns {string} Обрезанная строка.
+   * 
+   * @example
+   * truncate('Очень длинный текст', 10)  // → 'Очень длин…'
+   * truncate('Короткий', 100)            // → 'Короткий'
+   */
+  function truncate(str, max) {
+    if (typeof str !== 'string') return '';
+    max = max || 100;
+    if (str.length <= max) return str;
+    return str.slice(0, max).trim() + '…';
+  }
+
+  /**
+   * Безопасно парсит JSON-строку.
+   * Возвращает значение по умолчанию при ошибке парсинга.
+   * 
+   * @param {string} str - JSON-строка.
+   * @param {*} [def=null] - Значение по умолчанию.
+   * @returns {*} Распарсенный объект или def.
+   * 
+   * @example
+   * safeJsonParse('{"key":"value"}', {})  // → {key: 'value'}
+   * safeJsonParse('invalid', {})          // → {}
+   */
+  function safeJsonParse(str, def) {
+    if (typeof str !== 'string') return def !== undefined ? def : null;
+    try {
+      return JSON.parse(str);
+    } catch (e) {
+      return def !== undefined ? def : null;
     }
+  }
 
-    /**
-     * Словарь генераторов строк с числительными для разных сущностей.
-     * @type {Object<string, function(number, string): string>}
-     */
-    var words = {
-      
-      /**
-       * Строка вида «N символ(ов)» / «N char(s)».
-       * @param {number} n - Количество.
-       * @param {string} l - Язык ('ru' | 'en').
-       * @returns {string}
-       */
-      symbols: function(n, l) {
-        return n + ' ' + (l === 'en'
-          ? plural(n, 'char', 'chars', 'chars')
-          : plural(n, 'символ', 'символа', 'символов'));
-      },
-
-      /**
-       * Строка вида «N узел(ов)» / «N peer(s)».
-       * @param {number} n - Количество.
-       * @param {string} l - Язык ('ru' | 'en').
-       * @returns {string}
-       */
-      peers: function(n, l) {
-        return n + ' ' + (l === 'en'
-          ? plural(n, 'peer', 'peers', 'peers')
-          : plural(n, 'узел', 'узла', 'узлов'));
-      },
-
-      /**
-       * Строка вида «N мысль(ей)» / «N note(s)».
-       * @param {number} n - Количество.
-       * @param {string} l - Язык ('ru' | 'en').
-       * @returns {string}
-       */
-      thoughts: function(n, l) {
-        return n + ' ' + (l === 'en'
-          ? plural(n, 'note', 'notes', 'notes')
-          : plural(n, 'мысль', 'мысли', 'мыслей'));
+  /**
+   * Клонирует объект (глубокое копирование для простых типов).
+   * Массивы и объекты копируются рекурсивно.
+   * Функции, Date, RegExp не клонируются (возвращаются как есть).
+   * 
+   * @param {*} obj - Объект для клонирования.
+   * @returns {*} Клон объекта.
+   * 
+   * @example
+   * clone({a: 1, b: {c: 2}})  // → {a: 1, b: {c: 2}} (новый объект)
+   */
+  function clone(obj) {
+    if (obj === null || typeof obj !== 'object') return obj;
+    if (Array.isArray(obj)) {
+      var arr = [];
+      for (var i = 0; i < obj.length; i++) {
+        arr.push(clone(obj[i]));
       }
-    };
-
-    /**
-     * Публичная обёртка для получения строки с числительным по ключу сущности.
-     * 
-     * @param {string} key - Ключ сущности ('symbols' | 'peers' | 'thoughts').
-     * @param {number} n - Количество.
-     * @param {string} lang - Язык ('ru' | 'en').
-     * @returns {string} Отформатированная строка.
-     * 
-     * @example
-     * word('symbols', 5, 'ru')  // → '5 символов'
-     * word('peers', 3, 'en')    // → '3 peers'
-     */
-    function word(key, n, lang) {
-      var fn = words[key];
-      return fn ? fn(n, lang) : String(n);
+      return arr;
     }
-
-    /**
-     * Форматирует timestamp в короткую дату (например, «05 июн.»).
-     * Возвращает пустую строку при невалидном timestamp или ошибке форматирования.
-     * 
-     * @param {number} ts - Timestamp в миллисекундах.
-     * @param {string} lang - Язык ('ru' | 'en').
-     * @returns {string} Отформатированная дата или пустая строка при ошибке.
-     * 
-     * @example
-     * fmtDate(1717459200000, 'ru')  // → '04 июн.'
-     * fmtDate(1717459200000, 'en')  // → 'Jun 04'
-     */
-    function fmtDate(ts, lang) {
-      if (!ts || typeof ts !== 'number') return '';
-      var d = new Date(ts);
-      if (isNaN(d.getTime())) return '';
-      
-      var loc = lang === 'en' ? 'en-US' : 'ru-RU';
-      try {
-        return d.toLocaleDateString(loc, {
-          day: '2-digit',
-          month: 'short'
-        });
-      } catch (e) {
-        return '';
+    var result = {};
+    for (var key in obj) {
+      if (obj.hasOwnProperty(key)) {
+        result[key] = clone(obj[key]);
       }
     }
+    return result;
+  }
 
-    /**
-     * Форматирует timestamp в короткое время (например, «14:30»).
-     * Возвращает пустую строку при невалидном timestamp или ошибке форматирования.
-     * 
-     * @param {number} ts - Timestamp в миллисекундах.
-     * @param {string} lang - Язык ('ru' | 'en').
-     * @returns {string} Отформатированное время или пустая строка при ошибке.
-     * 
-     * @example
-     * fmtTime(1717459200000, 'ru')  // → '14:30'
-     */
-    function fmtTime(ts, lang) {
-      if (!ts || typeof ts !== 'number') return '';
-      var d = new Date(ts);
-      if (isNaN(d.getTime())) return '';
-      
-      var loc = lang === 'en' ? 'en-US' : 'ru-RU';
-      try {
-        return d.toLocaleTimeString(loc, {
-          hour: '2-digit',
-          minute: '2-digit'
-        });
-      } catch (e) {
-        return '';
+  /**
+   * Проверяет, является ли значение пустым.
+   * Пустыми считаются: null, undefined, пустая строка, пустой массив, пустой объект.
+   * 
+   * @param {*} value - Значение для проверки.
+   * @returns {boolean} true если значение пустое.
+   * 
+   * @example
+   * isEmpty(null)      // → true
+   * isEmpty('')        // → true
+   * isEmpty([])        // → true
+   * isEmpty({})        // → true
+   * isEmpty('text')    // → false
+   * isEmpty([1, 2])    // → false
+   */
+  function isEmpty(value) {
+    if (value == null) return true;
+    if (typeof value === 'string') return value.trim() === '';
+    if (Array.isArray(value)) return value.length === 0;
+    if (typeof value === 'object') {
+      for (var key in value) {
+        if (value.hasOwnProperty(key)) return false;
       }
+      return true;
     }
+    return false;
+  }
 
-    /**
-     * Генерирует уникальный идентификатор.
-     * Комбинирует случайную строку и timestamp для гарантированной уникальности.
-     * 
-     * @returns {string} Уникальный ID (например, 'a3f2c1b9m5x7k2').
-     * 
-     * @example
-     * uid()  // → 'k9m2x8p4l1736543210abc'
-     */
-    function uid() {
-      return Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
-    }
-
-    /**
-     * Обрезает строку до указанной длины с добавлением многоточия.
-     * Если строка короче max — возвращается без изменений.
-     * 
-     * @param {string} str - Исходная строка.
-     * @param {number} [max=100] - Максимальная длина.
-     * @returns {string} Обрезанная строка.
-     * 
-     * @example
-     * truncate('Очень длинный текст', 10)  // → 'Очень длин…'
-     * truncate('Короткий', 100)            // → 'Короткий'
-     */
-    function truncate(str, max) {
-      if (typeof str !== 'string') return '';
-      max = max || 100;
-      if (str.length <= max) return str;
-      return str.slice(0, max).trim() + '…';
-    }
-
-    /**
-     * Безопасно парсит JSON-строку.
-     * Возвращает значение по умолчанию при ошибке парсинга.
-     * 
-     * @param {string} str - JSON-строка.
-     * @param {*} [def=null] - Значение по умолчанию.
-     * @returns {*} Распарсенный объект или def.
-     * 
-     * @example
-     * safeJsonParse('{"key":"value"}', {})  // → {key: 'value'}
-     * safeJsonParse('invalid', {})          // → {}
-     */
-    function safeJsonParse(str, def) {
-      if (typeof str !== 'string') return def !== undefined ? def : null;
-      try {
-        return JSON.parse(str);
-      } catch (e) {
-        return def !== undefined ? def : null;
-      }
-    }
-
-    /**
-     * Клонирует объект (глубокое копирование для простых типов).
-     * Массивы и объекты копируются рекурсивно.
-     * Функции, Date, RegExp не клонируются (возвращаются как есть).
-     * 
-     * @param {*} obj - Объект для клонирования.
-     * @returns {*} Клон объекта.
-     * 
-     * @example
-     * clone({a: 1, b: {c: 2}})  // → {a: 1, b: {c: 2}} (новый объект)
-     */
-    function clone(obj) {
-      if (obj === null || typeof obj !== 'object') return obj;
-      if (Array.isArray(obj)) {
-        var arr = [];
-        for (var i = 0; i < obj.length; i++) {
-          arr.push(clone(obj[i]));
-        }
-        return arr;
-      }
-      var result = {};
-      for (var key in obj) {
-        if (obj.hasOwnProperty(key)) {
-          result[key] = clone(obj[key]);
-        }
-      }
-      return result;
-    }
-
-    /**
-     * Проверяет, является ли значение пустым.
-     * Пустыми считаются: null, undefined, пустая строка, пустой массив, пустой объект.
-     * 
-     * @param {*} value - Значение для проверки.
-     * @returns {boolean} true если значение пустое.
-     * 
-     * @example
-     * isEmpty(null)      // → true
-     * isEmpty('')        // → true
-     * isEmpty([])        // → true
-     * isEmpty({})        // → true
-     * isEmpty('text')    // → false
-     * isEmpty([1, 2])    // → false
-     */
-    function isEmpty(value) {
-      if (value == null) return true;
-      if (typeof value === 'string') return value.trim() === '';
-      if (Array.isArray(value)) return value.length === 0;
-      if (typeof value === 'object') {
-        for (var key in value) {
-          if (value.hasOwnProperty(key)) return false;
-        }
-        return true;
-      }
-      return false;
-    }
-
-    return {
-      esc: esc,
-      escRe: escRe,
-      plural: plural,
-      word: word,
-      fmtDate: fmtDate,
-      fmtTime: fmtTime,
-      uid: uid,
-      truncate: truncate,
-      safeJsonParse: safeJsonParse,
-      clone: clone,
-      isEmpty: isEmpty
-    };
-  }, []);
-  /* <!-- MODULE: Utils --> */
+  return {
+    esc: esc,
+    escRe: escRe,
+    plural: plural,
+    word: word,
+    fmtDate: fmtDate,
+    fmtTime: fmtTime,
+    uid: uid,
+    truncate: truncate,
+    safeJsonParse: safeJsonParse,
+    clone: clone,
+    isEmpty: isEmpty
+  };
+}, []);
+/* <!-- MODULE: Utils --> */
 
   /* <!-- MODULE: Logger --> */
   /**
