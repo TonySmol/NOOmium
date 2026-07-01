@@ -14259,6 +14259,279 @@ kbd {
   }, ['Config', 'Logger', 'Bus', 'StateManager', 'TextSearchStrategy', 'FocusSearchStrategy', 'NetTransport']);
   /* <!-- MODULE: SearchCoordinator --> */
 
+  /* <!-- MODULE: SearchService --> */
+/**
+ * @module SearchService
+ * @description Фасад для поисковых операций и публикации заметок.
+ * 
+ * Зона ответственности:
+ * - Делегирование поиска в SearchCoordinator
+ * - Создание и сохранение заметок в DB
+ * - Публикация заметок в сеть через NotePublisher
+ * - Вычисление вектора через AI
+ * - Координация между EditorComponent, SearchCoordinator, NotePublisher
+ * 
+ * Архитектурные принципы:
+ * - Фасад над SearchCoordinator + NotePublisher + DB + AI
+ * - НЕ знает о UI, StateManager напрямую
+ * - Делегирует поиск в SearchCoordinator
+ * - Делегирует публикацию в NotePublisher
+ * - Try/catch на каждом шаге pipeline
+ * 
+ * Методы:
+ * - `send(text, mode, parentId)` — создание заметки, сохранение, публикация
+ * - `search(text, force)` — делегирование в SearchCoordinator.search
+ * - `searchByVector(vector)` — делегирование в SearchCoordinator.searchByVector
+ * 
+ * Используется модулями:
+ * - EditorComponent → send() для отправки заметок
+ * - FocusBarComponent → search() для поиска после снятия фокуса
+ * - StreamViewComponent → searchByVector() для поиска по вектору
+ * - BaseViewComponent → в зависимостях (для future-proof)
+ * - App.Boot → init() при старте
+ * 
+ * @namespace SearchService
+ */
+DI.register('SearchService', function(
+  Config, Logger, Bus, SearchCoordinator, NotePublisher, DB, AI, Utils
+) {
+  
+  /**
+   * Счётчик операций (для статистики).
+   * @type {{sends: number, searches: number, errors: number}}
+   */
+  var stats = {
+    sends: 0,
+    searches: 0,
+    errors: 0
+  };
+
+  /**
+   * Отправляет заметку: создаёт, сохраняет в DB, публикует в сеть.
+   * 
+   * Pipeline:
+   * 1. Валидация текста (не пустой)
+   * 2. Проверка готовности AI
+   * 3. Создание заметки с ID, timestamp
+   * 4. AI.embed(text) → вектор
+   * 5. DB.put(note) → сохранение в IndexedDB
+   * 6. Если mode === 'world' → NotePublisher.publishNote()
+   * 7. Эмиссия editor:send-complete
+   * 
+   * @param {string} text - Текст заметки.
+   * @param {SendMode} mode - Режим отправки ('private' | 'world').
+   * @param {string} [parentId] - ID родительской заметки (только для локальных).
+   * @returns {Promise<void>} Promise, разрешающийся после завершения.
+   */
+  function send(text, mode, parentId) {
+    stats.sends++;
+    
+    var trimmed = (text || '').trim();
+    
+    if (!trimmed) {
+      stats.errors++;
+      if (Logger) Logger.warn('SearchService', 'send: empty text');
+      return Promise.reject(new Error('Empty text'));
+    }
+    
+    if (!AI || !AI.ready()) {
+      stats.errors++;
+      if (Logger) Logger.warn('SearchService', 'send: AI not ready');
+      return Promise.reject(new Error('AI not ready'));
+    }
+    
+    if (Logger) {
+      Logger.debug('SearchService', 'Sending note', {
+        textLength: trimmed.length,
+        mode: mode,
+        hasParent: !!parentId
+      });
+    }
+    
+    // Создание заметки
+    var note = {
+      id: Utils.uid(),
+      text: trimmed,
+      vector: null,
+      shared: mode === 'world',
+      createdAt: Date.now(),
+      parentId: parentId || undefined,
+      children: []
+    };
+    
+    // Вычисление вектора
+    return AI.embed(trimmed).then(function(vector) {
+      note.vector = vector;
+      
+      // Сохранение в DB
+      return DB.put(note);
+    }).then(function() {
+      if (Logger) {
+        Logger.info('SearchService', 'Note saved to DB', {
+          id: note.id.slice(0, 8),
+          shared: note.shared
+        });
+      }
+      
+      // Публикация в сеть если mode === 'world'
+      if (note.shared && NotePublisher && NotePublisher.publishNote) {
+        return NotePublisher.publishNote(note, parentId);
+      }
+      
+      return Promise.resolve();
+    }).then(function() {
+      // Эмиссия события завершения отправки
+      if (Bus && Bus.emit) {
+        try {
+          Bus.emit('editor:send-complete');
+        } catch (e) {
+          if (Logger) Logger.error('SearchService', 'Bus.emit editor:send-complete failed', e);
+        }
+      }
+      
+      if (Logger) {
+        Logger.info('SearchService', 'Note sent successfully', {
+          id: note.id.slice(0, 8),
+          mode: mode
+        });
+      }
+    }).catch(function(err) {
+      stats.errors++;
+      if (Logger) Logger.error('SearchService', 'send failed', err);
+      throw err;
+    });
+  }
+
+  /**
+   * Запускает поиск по тексту.
+   * Делегирует в SearchCoordinator.search().
+   * 
+   * @param {string} text - Поисковый запрос.
+   * @param {boolean} [force=false] - Принудительная отправка в сеть.
+   * @returns {Promise<void>} Promise, разрешающийся после завершения поиска.
+   */
+  function search(text, force) {
+    stats.searches++;
+    
+    if (!SearchCoordinator || !SearchCoordinator.search) {
+      stats.errors++;
+      if (Logger) Logger.warn('SearchService', 'search: SearchCoordinator not available');
+      return Promise.reject(new Error('SearchCoordinator not available'));
+    }
+    
+    if (Logger) {
+      Logger.debug('SearchService', 'Searching', {
+        textLength: (text || '').length,
+        force: force
+      });
+    }
+    
+    return SearchCoordinator.search(text, force).catch(function(err) {
+      stats.errors++;
+      if (Logger) Logger.error('SearchService', 'search failed', err);
+      throw err;
+    });
+  }
+
+  /**
+   * Запускает поиск по вектору.
+   * Делегирует в SearchCoordinator.searchByVector().
+   * 
+   * @param {Vector} vector - Вектор для поиска.
+   * @returns {Promise<void>} Promise, разрешающийся после завершения поиска.
+   */
+  function searchByVector(vector) {
+    stats.searches++;
+    
+    if (!SearchCoordinator || !SearchCoordinator.searchByVector) {
+      stats.errors++;
+      if (Logger) Logger.warn('SearchService', 'searchByVector: SearchCoordinator not available');
+      return Promise.reject(new Error('SearchCoordinator not available'));
+    }
+    
+    if (!vector || !Array.isArray(vector) || vector.length === 0) {
+      stats.errors++;
+      if (Logger) Logger.warn('SearchService', 'searchByVector: invalid vector');
+      return Promise.reject(new Error('Invalid vector'));
+    }
+    
+    if (Logger) {
+      Logger.debug('SearchService', 'Searching by vector', {
+        vectorDim: vector.length
+      });
+    }
+    
+    return SearchCoordinator.searchByVector(vector).catch(function(err) {
+      stats.errors++;
+      if (Logger) Logger.error('SearchService', 'searchByVector failed', err);
+      throw err;
+    });
+  }
+
+  /**
+   * Возвращает статистику сервиса.
+   * 
+   * @returns {{sends: number, searches: number, errors: number}}
+   */
+  function getStats() {
+    return {
+      sends: stats.sends,
+      searches: stats.searches,
+      errors: stats.errors
+    };
+  }
+
+  /**
+   * Сбрасывает статистику.
+   * 
+   * @returns {void}
+   */
+  function resetStats() {
+    stats.sends = 0;
+    stats.searches = 0;
+    stats.errors = 0;
+  }
+
+  /**
+   * Инициализация модуля.
+   * SearchService не требует автоматической инициализации.
+   * 
+   * @param {AbortSignal} [signal] - Сигнал для автоочистки.
+   * @returns {void}
+   */
+  function init(signal) {
+    if (Logger) {
+      Logger.info('SearchService', 'Initialized');
+    }
+  }
+
+  /**
+   * Уничтожение модуля.
+   * Очищает статистику.
+   * 
+   * @returns {void}
+   */
+  function destroy() {
+    resetStats();
+  }
+
+  return {
+    // Публичный API
+    send: send,
+    search: search,
+    searchByVector: searchByVector,
+    
+    // Статистика
+    getStats: getStats,
+    resetStats: resetStats,
+    
+    // Lifecycle
+    init: init,
+    destroy: destroy
+  };
+}, ['Config', 'Logger', 'Bus', 'SearchCoordinator', 'NotePublisher', 'DB', 'AI', 'Utils']);
+/* <!-- MODULE: SearchService --> */
+       
   // ═══════════════════════════════════════════════════
   // UI LAYER
   // ═══════════════════════════════════════════════════
