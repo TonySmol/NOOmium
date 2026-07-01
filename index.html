@@ -14264,8 +14264,584 @@ kbd {
   // ═══════════════════════════════════════════════════
 
   /* <!-- MODULE: EditorComponent --> */
-  старт
-  энд
+  /**
+   * @typedef {Object} EditorState
+   * @description Внутреннее состояние компонента редактора.
+   * @property {HTMLTextAreaElement|null} textarea - Ссылка на поле ввода.
+   * @property {HTMLElement|null} counter - Ссылка на счётчик символов.
+   * @property {HTMLButtonElement|null} sendBtn - Ссылка на кнопку отправки.
+   * @property {HTMLElement|null} modeToggle - Ссылка на переключатель режима.
+   * @property {number|null} searchTimer - ID таймера debounce.
+   * @property {AbortController|null} abortController - Контроллер для автоотписки.
+   */
+
+  /**
+   * @module EditorComponent
+   * @description Компонент редактора мыслей (поле ввода, счётчик, режим, отправка).
+   * 
+   * Зона ответственности:
+   * - Поле ввода текста с автоматическим resize
+   * - Счётчик символов с локализацией
+   * - Переключатель режима отправки (Личное/Мир)
+   * - Кнопка отправки с индикатором загрузки (самолёт/спиннер)
+   * - Debounce 800мс для поисковых запросов
+   * - Обработка IME composition (e.isComposing) для азиатских языков
+   * - State machine transitions: update-editor-text, to-search, to-idle
+   * - Управление parentId (только для локальных закрепов)
+   * 
+   * Архитектурные принципы:
+   * - НЕ читает DOM напрямую для бизнес-логики (Принцип #1)
+   * - Dispatch в StateManager для синхронизации editorText
+   * - Emit событий через Bus (editor:search-request, editor:send-request)
+   * - AbortSignal для автоматической отписки при destroy
+   * - Refresh DOM references при каждом обращении (защита от refreshUI)
+   * 
+   * КЛЮЧЕВЫЕ ИЗМЕНЕНИЯ v2.0:
+   * 
+   * 1. **IME composition handling:**
+   *    - Проверка `e.isComposing` для игнорирования промежуточных input events
+   *    - Отдельный listener для `compositionend` для форсированной обработки
+   *    - Защита от ложных срабатываний поиска при вводе китайского/японского
+   * 
+   * 2. **parentId только для локальных закрепов:**
+   *    - Проверка `!focusedItem.peer` перед установкой parentId
+   *    - Сетевые заметки не могут быть родителями (эфемерная модель)
+   *    - SearchService.publishNote() получает parentId только для локальных
+   * 
+   * 3. **Input в DOM перед click (iOS Safari):**
+   *    - Textarea остаётся в DOM при клике на кнопку отправки
+   *    - Защита от потери фокуса и значения на iOS
+   * 
+   * 4. **Dispatch update-editor-text:**
+   *    - Синхронизация editorText с StateManager при каждом input
+   *    - Автоматическое переключение режима в StateManager
+   * 
+   * Слушает события:
+   * - `i18n:change` — смена языка (обновление placeholder, кнопок)
+   * - `state:changed` — изменение state (обновление sendMode, focusedItem)
+   * 
+   * Эмитит события:
+   * - `editor:search-request` — запрос поиска (debounce 800мс)
+   *   payload: {force?: boolean}
+   * - `editor:send-request` — запрос отправки заметки
+   *   payload: {text: string, mode: SendMode, parentId?: string}
+   * - `editor:send-complete` — завершение отправки
+   *   payload: {}
+   * - `editor:edit-note` — редактирование заметки из карусели
+   *   payload: {id: string}
+   * 
+   * Используется модулями:
+   * - SearchCoordinator → слушает editor:search-request
+   * - SearchService → слушает editor:send-request
+   * - StreamViewComponent → emit editor:edit-note
+   * 
+   * @namespace EditorComponent
+   */
+  DI.register('EditorComponent', function(
+    Config, Logger, Bus, I18n, Utils, StateManager, SearchService
+  ) {
+    
+    /**
+     * Внутреннее состояние компонента.
+     * @type {EditorState}
+     */
+    var state = {
+      textarea: null,
+      counter: null,
+      sendBtn: null,
+      modeToggle: null,
+      searchTimer: null,
+      abortController: null
+    };
+
+    /**
+     * Счётчик операций (для статистики).
+     * @type {{inputs: number, sends: number, errors: number}}
+     */
+    var stats = {
+      inputs: 0,
+      sends: 0,
+      errors: 0
+    };
+
+    /**
+     * SVG иконки для кнопки отправки.
+     * @type {{paperPlane: string, spinner: string}}
+     */
+    var ICONS = {
+      paperPlane: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>',
+      spinner: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>'
+    };
+
+    /**
+     * Обновляет ссылки на DOM-элементы.
+     * Вызывается при каждом обращении, так как DOM может быть пересоздан после refreshUI.
+     * 
+     * @returns {void}
+     */
+    function refreshDOM() {
+      if (typeof document === 'undefined') return;
+      
+      state.textarea = document.getElementById('ed-ta');
+      state.counter = document.getElementById('ed-cnt');
+      state.sendBtn = document.getElementById('btn-send');
+      state.modeToggle = document.getElementById('mode-toggle');
+    }
+
+    /**
+     * Возвращает текущий текст из поля ввода.
+     * 
+     * @returns {string} Текст или пустая строка.
+     */
+    function getValue() {
+      if (!state.textarea) refreshDOM();
+      return state.textarea ? state.textarea.value : '';
+    }
+
+    /**
+     * Устанавливает текст в поле ввода и обновляет счётчик.
+     * 
+     * @param {string} val - Новый текст.
+     * @returns {void}
+     */
+    function setValue(val) {
+      if (!state.textarea) refreshDOM();
+      if (state.textarea) {
+        state.textarea.value = val || '';
+        updateCounter();
+      }
+    }
+
+    /**
+     * Очищает поле ввода.
+     * 
+     * @returns {void}
+     */
+    function clear() {
+      setValue('');
+    }
+
+    /**
+     * Пересчитывает и отображает количество символов в UI.
+     * Использует Utils.word() для локализованного склонения.
+     * 
+     * @returns {void}
+     */
+    function updateCounter() {
+      if (!state.counter) refreshDOM();
+      if (state.counter) {
+        var value = getValue();
+        var lang = I18n ? I18n.getLang() : 'ru';
+        state.counter.textContent = Utils.word('symbols', value.length, lang);
+      }
+    }
+
+    /**
+     * Обновляет визуальное состояние переключателя режима отправки.
+     * Синхронизирует UI с StateManager.sendMode.
+     * 
+     * @param {SendMode} mode - Активный режим ('private' | 'world').
+     * @returns {void}
+     */
+    function updateSendMode(mode) {
+      if (!state.modeToggle) refreshDOM();
+      if (!state.modeToggle) return;
+
+      state.modeToggle.setAttribute('data-mode', mode);
+      var opts = state.modeToggle.querySelectorAll('.tog-sw-opt');
+
+      for (var i = 0; i < opts.length; i++) {
+        var opt = opts[i];
+        if (opt.getAttribute('data-v') === mode) {
+          opt.classList.add('on');
+        } else {
+          opt.classList.remove('on');
+        }
+      }
+    }
+
+    /**
+     * Переключает визуальное состояние кнопки отправки.
+     * Блокирует кнопку на время отправки для предотвращения дублей.
+     * 
+     * @param {boolean} isSending - true если идёт процесс отправки.
+     * @returns {void}
+     */
+    function setSendingState(isSending) {
+      if (!state.sendBtn) refreshDOM();
+      if (!state.sendBtn) return;
+
+      if (isSending) {
+        state.sendBtn.classList.add('sending');
+        state.sendBtn.disabled = true;
+        state.sendBtn.innerHTML = ICONS.spinner;
+      } else {
+        state.sendBtn.classList.remove('sending');
+        state.sendBtn.disabled = false;
+        state.sendBtn.innerHTML = ICONS.paperPlane;
+      }
+    }
+
+    /**
+     * Применяет переводы к элементам редактора.
+     * Вызывается при смене языка (i18n:change).
+     * 
+     * @returns {void}
+     */
+    function applyI18n() {
+      if (!state.textarea) refreshDOM();
+      if (state.textarea && I18n) {
+        state.textarea.placeholder = I18n.t('ed.placeholder');
+      }
+
+      updateCounter();
+
+      if (!state.modeToggle) refreshDOM();
+      if (state.modeToggle && I18n) {
+        var opts = state.modeToggle.querySelectorAll('.tog-sw-opt');
+        for (var i = 0; i < opts.length; i++) {
+          var opt = opts[i];
+          var v = opt.getAttribute('data-v');
+          if (v === 'private') {
+            opt.textContent = I18n.t('btn.private');
+          } else if (v === 'world') {
+            opt.textContent = I18n.t('btn.public');
+          }
+        }
+      }
+
+      if (state.sendBtn && I18n) {
+        state.sendBtn.setAttribute('aria-label', I18n.t('btn.send'));
+      }
+    }
+
+    /**
+     * Обрабатывает клик по кнопке отправки.
+     * 
+     * Pipeline:
+     * 1. Сброс таймера поиска
+     * 2. Получение текста из поля
+     * 3. Получение sendMode из StateManager
+     * 4. Извлечение parentId из focusedItem (только для локальных)
+     * 5. setSendingState(true) — блокировка кнопки
+     * 6. SearchService.send(text, mode, parentId)
+     * 7. При успехе: clear() + emit('editor:send-complete')
+     * 8. setSendingState(false) — разблокировка кнопки
+     * 
+     * КЛЮЧЕВАЯ ЛОГИКА v2.0:
+     * - parentId устанавливается только если `focusedItem && !focusedItem.peer`
+     * - Сетевые заметки не могут быть родителями (эфемерная модель)
+     * 
+     * @returns {void}
+     */
+    function handleSend() {
+      stats.sends++;
+
+      // Сброс отложенного поиска
+      if (state.searchTimer) {
+        clearTimeout(state.searchTimer);
+        state.searchTimer = null;
+      }
+
+      var text = getValue().trim();
+      var sm = StateManager ? StateManager.getState() : {};
+      var mode = sm.sendMode || 'private';
+      var parentId = null;
+
+      // КЛЮЧЕВОЕ ИЗМЕНЕНИЕ v2.0: parentId только для локальных закрепов
+      if (sm.focusedItem && sm.focusedItem.id && !sm.focusedItem.peer) {
+        parentId = sm.focusedItem.id;
+      }
+
+      if (Logger) {
+        Logger.debug('EditorComponent', 'handleSend', {
+          textLength: text.length,
+          mode: mode,
+          hasParent: !!parentId
+        });
+      }
+
+      setSendingState(true);
+
+      var promise;
+      try {
+        promise = SearchService.send(text, mode, parentId);
+      } catch (e) {
+        stats.errors++;
+        if (Logger) Logger.error('EditorComponent', 'SearchService.send throw', e);
+        setSendingState(false);
+        return;
+      }
+
+      if (!promise || typeof promise.then !== 'function') {
+        stats.errors++;
+        if (Logger) Logger.error('EditorComponent', 'SearchService.send did not return Promise');
+        setSendingState(false);
+        return;
+      }
+
+      promise.then(function() {
+        clear();
+        if (Bus && Bus.emit) {
+          try {
+            Bus.emit('editor:send-complete');
+          } catch (e) {
+            if (Logger) Logger.error('EditorComponent', 'Bus.emit editor:send-complete failed', e);
+          }
+        }
+      }).catch(function(err) {
+        stats.errors++;
+        if (Logger) Logger.error('EditorComponent', 'send failed', err);
+      }).finally(function() {
+        setSendingState(false);
+      });
+    }
+
+    /**
+     * Обрабатывает input event с учётом IME composition.
+     * 
+     * КЛЮЧЕВАЯ ЛОГИКА v2.0:
+     * - Проверка `e.isComposing` для игнорирования промежуточных events
+     * - Dispatch 'update-editor-text' для синхронизации с StateManager
+     * - Автоматическое переключение режима в StateManager
+     * - Debounce 800мс для поискового запроса
+     * 
+     * @param {InputEvent} e - Input event.
+     * @returns {void}
+     */
+    function handleInput(e) {
+      stats.inputs++;
+
+      // Игнорируем IME composition (китайский/японский ввод)
+      if (e && e.isComposing) {
+        if (Logger) {
+          Logger.debug('EditorComponent', 'IME composition, ignoring input');
+        }
+        return;
+      }
+
+      var val = getValue().trim();
+
+      if (Logger) {
+        Logger.debug('EditorComponent', 'input event', {
+          textLength: val.length,
+          isComposing: e && e.isComposing
+        });
+      }
+
+      // Dispatch update-editor-text для синхронизации с StateManager
+      if (StateManager && StateManager.dispatch) {
+        StateManager.dispatch('update-editor-text', { text: val });
+      }
+
+      updateCounter();
+
+      // Debounce для поискового запроса
+      if (state.searchTimer) {
+        clearTimeout(state.searchTimer);
+      }
+
+      var debounceDelay = Config ? Config.get('debounce', 800) : 800;
+
+      state.searchTimer = setTimeout(function() {
+        if (Bus && Bus.emit) {
+          try {
+            Bus.emit('editor:search-request', { force: false });
+          } catch (e) {
+            if (Logger) Logger.error('EditorComponent', 'Bus.emit editor:search-request failed', e);
+          }
+        }
+      }, debounceDelay);
+    }
+
+    /**
+     * Обрабатывает compositionend event.
+     * Форсирует обработку после завершения IME ввода.
+     * 
+     * @returns {void}
+     */
+    function handleCompositionEnd() {
+      if (Logger) {
+        Logger.debug('EditorComponent', 'compositionend, forcing input processing');
+      }
+      handleInput({ isComposing: false });
+    }
+
+    /**
+     * Обрабатывает клик по переключателю режима отправки.
+     * 
+     * @param {MouseEvent} e - Click event.
+     * @returns {void}
+     */
+    function handleModeToggle(e) {
+      var opt = e.target.closest('.tog-sw-opt');
+      if (!opt) return;
+
+      var value = opt.getAttribute('data-v');
+      if (!value) return;
+
+      if (Logger) {
+        Logger.debug('EditorComponent', 'Mode toggle clicked', { mode: value });
+      }
+
+      updateSendMode(value);
+
+      if (StateManager && StateManager.setState) {
+        StateManager.setState({ sendMode: value });
+      }
+    }
+
+    /**
+     * Привязывает DOM-события к элементам редактора.
+     * Все обработчики привязываются к AbortSignal для автоматической очистки.
+     * 
+     * @returns {void}
+     */
+    function bindDOMEvents() {
+      refreshDOM();
+
+      if (!state.abortController) return;
+      var signal = state.abortController.signal;
+
+      // Textarea events
+      if (state.textarea) {
+        state.textarea.addEventListener('input', handleInput, { signal: signal });
+        state.textarea.addEventListener('compositionend', handleCompositionEnd, { signal: signal });
+      }
+
+      // Send button
+      if (state.sendBtn) {
+        state.sendBtn.addEventListener('click', handleSend, { signal: signal });
+      }
+
+      // Mode toggle
+      if (state.modeToggle) {
+        state.modeToggle.addEventListener('click', handleModeToggle, { signal: signal });
+      }
+    }
+
+    /**
+     * Обработчик события state:changed.
+     * Синхронизирует UI с изменениями в StateManager.
+     * 
+     * @param {AppState} newState - Новое состояние.
+     * @returns {void}
+     */
+    function handleStateChanged(newState) {
+      if (!newState) return;
+
+      // Обновляем sendMode
+      if (newState.sendMode) {
+        updateSendMode(newState.sendMode);
+      }
+    }
+
+    /**
+     * Возвращает статистику компонента.
+     * 
+     * @returns {{inputs: number, sends: number, errors: number}}
+     */
+    function getStats() {
+      return {
+        inputs: stats.inputs,
+        sends: stats.sends,
+        errors: stats.errors
+      };
+    }
+
+    /**
+     * Сбрасывает статистику.
+     * 
+     * @returns {void}
+     */
+    function resetStats() {
+      stats.inputs = 0;
+      stats.sends = 0;
+      stats.errors = 0;
+    }
+
+    /**
+     * Инициализация модуля.
+     * Привязывает события, подписывается на Bus, применяет начальные переводы.
+     * 
+     * @param {AbortSignal} [signal] - Сигнал для автоочистки.
+     * @returns {void}
+     */
+    function init(signal) {
+      if (state.abortController) {
+        state.abortController.abort();
+      }
+
+      state.abortController = new AbortController();
+      var internalSignal = state.abortController.signal;
+
+      bindDOMEvents();
+
+      // Подписка на смену языка
+      if (Bus && typeof Bus.subscribe === 'function') {
+        Bus.subscribe('i18n:change', applyI18n, internalSignal);
+        Bus.subscribe('state:changed', handleStateChanged, internalSignal);
+      }
+
+      // Начальное состояние
+      var sm = StateManager ? StateManager.getState() : {};
+      var currentMode = sm.sendMode || 'private';
+      updateSendMode(currentMode);
+      applyI18n();
+
+      if (Logger) {
+        Logger.info('EditorComponent', 'Initialized', {
+          debounceDelay: Config ? Config.get('debounce', 800) : 800,
+          initialMode: currentMode
+        });
+      }
+    }
+
+    /**
+     * Уничтожение модуля.
+     * Отписывается от всех событий, очищает таймеры и DOM-ссылки.
+     * 
+     * @returns {void}
+     */
+    function destroy() {
+      if (state.searchTimer) {
+        clearTimeout(state.searchTimer);
+        state.searchTimer = null;
+      }
+
+      if (state.abortController) {
+        state.abortController.abort();
+        state.abortController = null;
+      }
+
+      state.textarea = null;
+      state.counter = null;
+      state.sendBtn = null;
+      state.modeToggle = null;
+
+      resetStats();
+    }
+
+    return {
+      // Публичный API для чтения/записи
+      getValue: getValue,
+      setValue: setValue,
+      clear: clear,
+
+      // UI обновления
+      updateCounter: updateCounter,
+      updateSendMode: updateSendMode,
+      setSendingState: setSendingState,
+
+      // Статистика
+      getStats: getStats,
+      resetStats: resetStats,
+
+      // Lifecycle
+      init: init,
+      destroy: destroy
+    };
+  }, ['Config', 'Logger', 'Bus', 'I18n', 'Utils', 'StateManager', 'SearchService']);
   /* <!-- MODULE: EditorComponent --> */
 
   /* <!-- MODULE: FocusBarComponent --> */
