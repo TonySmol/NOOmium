@@ -19647,13 +19647,749 @@ kbd {
   /* <!-- MODULE: Toast --> */
 
   /* <!-- MODULE: Progress --> */
-  старт
-  энд
+  /**
+   * @typedef {Object} AIProgressPayload
+   * @description Payload события ai:progress.
+   * @property {number} pct - Процент загрузки (0-100).
+   */
+
+  /**
+   * @typedef {Object} AIStatusPayload
+   * @description Payload события ai:status.
+   * @property {AIMode} mode - Текущий режим AI ('loading'|'model'|'demo').
+   * @property {number} [percent] - Процент загрузки (только для mode='loading').
+   */
+
+  /**
+   * @module Progress
+   * @description Компонент прогресс-бара загрузки AI модели.
+   * 
+   * Зона ответственности:
+   * - Полноэкранный оверлей с прогресс-баром загрузки модели
+   * - Отображение процента загрузки (0-100%)
+   * - Автоматическое скрытие при завершении загрузки
+   * - Локализованные тексты через I18n
+   * 
+   * Архитектурные принципы:
+   * - НЕ знает о бизнес-логике (только отображение прогресса)
+   * - Lazy creation DOM (создаётся при первом show)
+   * - Проверка parentNode при каждом обращении (защита от refreshUI)
+   * - Whitelist валидация percent (clamp 0-100)
+   * - textContent для всех текстовых вставок (XSS-safe)
+   * - AbortSignal для автоматической отписки при destroy
+   * - Race condition protection: проверка signal.aborted перед DOM-операциями
+   * 
+   * Визуальное оформление:
+   * - Полноэкранный fixed overlay с backdrop-filter blur
+   * - Центрированная карточка с иконкой, текстом, прогресс-баром
+   * - Плавная анимация заполнения прогресс-бара (transition width)
+   * - Z-index 9998 (выше UI, ниже Modal)
+   * 
+   * Слушает события:
+   * - `ai:progress` — прогресс загрузки модели
+   *   payload: {pct: number}
+   * - `ai:status` — изменение статуса AI
+   *   payload: {mode: AIMode, percent?: number}
+   * 
+   * Логика отображения:
+   * - mode === 'loading' → показать оверлей, обновить прогресс
+   * - mode === 'model' или 'demo' → скрыть оверлей
+   * 
+   * Используется модулями:
+   * - App.Boot → Progress.show() при старте загрузки AI
+   * - AI → Bus.emit('ai:progress', {pct}) во время загрузки
+   * - AI → Bus.emit('ai:status', {mode: 'model'}) после загрузки
+   * 
+   * @namespace Progress
+   */
+  DI.register('Progress', function(Config, Logger, Bus, I18n) {
+    
+    /**
+     * Overlay прогресс-бара (полноэкранный контейнер).
+     * Создаётся лениво при первом show(), удаляется при hide().
+     * @type {HTMLDivElement | null}
+     */
+    var overlay = null;
+
+    /**
+     * Элемент заполнения прогресс-бара (.aip-fill).
+     * @type {HTMLDivElement | null}
+     */
+    var fillEl = null;
+
+    /**
+     * Элемент с текстом процентов (.aip-pct).
+     * @type {HTMLDivElement | null}
+     */
+    var pctEl = null;
+
+    /**
+     * Контроллер для автоматической отписки при destroy.
+     * @type {AbortController | null}
+     */
+    var abortController = null;
+
+    /**
+     * Счётчик операций (для статистики).
+     * @type {{shown: number, hidden: number, updates: number}}
+     */
+    var stats = {
+      shown: 0,
+      hidden: 0,
+      updates: 0
+    };
+
+    /**
+     * Создаёт и показывает полноэкранный оверлей с прогресс-баром.
+     * 
+     * Алгоритм:
+     * 1. Проверка существования overlay и parentNode (защита от refreshUI)
+     * 2. Если уже существует и в DOM → выход
+     * 3. Создание DOM-структуры через createElement
+     * 4. Добавление в document.body
+     * 5. Сохранение ссылок на fillEl и pctEl
+     * 
+     * Структура DOM:
+     * <div class="aip">
+     *   <div class="aip-c">
+     *     <div class="aip-ic">◆</div>
+     *     <div class="aip-t">{title}</div>
+     *     <div class="aip-d">{description}</div>
+     *     <div class="aip-bar">
+     *       <div class="aip-fill"></div>
+     *     </div>
+     *     <div class="aip-pct">0%</div>
+     *   </div>
+     * </div>
+     * 
+     * @returns {void}
+     */
+    function show() {
+      stats.shown++;
+      
+      // Защита от повторного создания и проверка parentNode
+      if (overlay && overlay.parentNode) return;
+      
+      if (typeof document === 'undefined') return;
+      
+      overlay = document.createElement('div');
+      overlay.className = 'aip';
+      
+      var card = document.createElement('div');
+      card.className = 'aip-c';
+      
+      var icon = document.createElement('div');
+      icon.className = 'aip-ic';
+      icon.textContent = '◆';
+      card.appendChild(icon);
+      
+      var title = document.createElement('div');
+      title.className = 'aip-t';
+      title.textContent = I18n ? I18n.t('progress.title') : 'Загружаем модель ИИ';
+      card.appendChild(title);
+      
+      var desc = document.createElement('div');
+      desc.className = 'aip-d';
+      desc.textContent = I18n ? I18n.t('progress.description') : 'Чтобы искать мысли по смыслу, нужна небольшая модель. Это произойдёт один раз.';
+      card.appendChild(desc);
+      
+      var bar = document.createElement('div');
+      bar.className = 'aip-bar';
+      
+      fillEl = document.createElement('div');
+      fillEl.className = 'aip-fill';
+      fillEl.style.width = '0%';
+      bar.appendChild(fillEl);
+      
+      card.appendChild(bar);
+      
+      pctEl = document.createElement('div');
+      pctEl.className = 'aip-pct';
+      pctEl.textContent = '0%';
+      card.appendChild(pctEl);
+      
+      overlay.appendChild(card);
+      document.body.appendChild(overlay);
+      
+      if (Logger) {
+        Logger.debug('Progress', 'Overlay shown');
+      }
+    }
+
+    /**
+     * Обновляет визуальное состояние прогресс-бара.
+     * 
+     * Алгоритм:
+     * 1. Проверка существования fillEl и pctEl
+     * 2. Clamp значения в диапазон [0, 100]
+     * 3. Округление до целого числа
+     * 4. Установка style.width для fillEl
+     * 5. Установка textContent для pctEl
+     * 
+     * @param {number} percent - Процент выполнения (0-100).
+     * @returns {void}
+     */
+    function update(percent) {
+      stats.updates++;
+      
+      // Защита от race condition
+      if (abortController && abortController.signal.aborted) return;
+      
+      if (!fillEl || !pctEl) return;
+      
+      // Clamp и округление
+      var value = Math.max(0, Math.min(100, Math.round(percent)));
+      
+      fillEl.style.width = value + '%';
+      pctEl.textContent = value + '%';
+      
+      if (Logger) {
+        Logger.debug('Progress', 'Updated', { percent: value });
+      }
+    }
+
+    /**
+     * Скрывает и удаляет оверлей прогресс-бара из DOM.
+     * 
+     * Сбрасывает внутренние ссылки на элементы для предотвращения утечек памяти.
+     * 
+     * @returns {void}
+     */
+    function hide() {
+      stats.hidden++;
+      
+      if (overlay && overlay.parentNode) {
+        try {
+          overlay.parentNode.removeChild(overlay);
+        } catch (e) {
+          // Игнорируем ошибки удаления
+        }
+      }
+      
+      overlay = null;
+      fillEl = null;
+      pctEl = null;
+      
+      if (Logger) {
+        Logger.debug('Progress', 'Overlay hidden');
+      }
+    }
+
+    /**
+     * Проверяет, виден ли оверлей.
+     * 
+     * @returns {boolean} true если оверлей существует и в DOM.
+     */
+    function isVisible() {
+      return overlay && overlay.parentNode !== null;
+    }
+
+    /**
+     * Обработчик события ai:progress.
+     * Делегирует в update() с валидацией payload.
+     * 
+     * @param {AIProgressPayload} payload - Payload события.
+     * @returns {void}
+     */
+    function handleAIProgress(payload) {
+      if (!payload || typeof payload.pct !== 'number') return;
+      
+      // Автоматически показываем оверлей если скрыт
+      if (!isVisible()) {
+        show();
+      }
+      
+      update(payload.pct);
+    }
+
+    /**
+     * Обработчик события ai:status.
+     * Показывает/скрывает оверлей в зависимости от режима AI.
+     * 
+     * @param {AIStatusPayload} payload - Payload события.
+     * @returns {void}
+     */
+    function handleAIStatus(payload) {
+      if (!payload || !payload.mode) return;
+      
+      if (payload.mode === 'loading') {
+        // Режим загрузки — показываем оверлей
+        if (!isVisible()) {
+          show();
+        }
+        // Обновляем прогресс если передан
+        if (typeof payload.percent === 'number') {
+          update(payload.percent);
+        }
+      } else {
+        // Режим model или demo — скрываем оверлей
+        hide();
+      }
+    }
+
+    /**
+     * Возвращает статистику компонента.
+     * 
+     * @returns {{shown: number, hidden: number, updates: number}}
+     */
+    function getStats() {
+      return {
+        shown: stats.shown,
+        hidden: stats.hidden,
+        updates: stats.updates
+      };
+    }
+
+    /**
+     * Сбрасывает статистику.
+     * 
+     * @returns {void}
+     */
+    function resetStats() {
+      stats.shown = 0;
+      stats.hidden = 0;
+      stats.updates = 0;
+    }
+
+    /**
+     * Инициализация модуля.
+     * Подписывается на события ai:progress и ai:status.
+     * 
+     * @param {AbortSignal} [signal] - Сигнал для автоочистки.
+     * @returns {void}
+     */
+    function init(signal) {
+      if (abortController) {
+        abortController.abort();
+      }
+
+      abortController = new AbortController();
+      var internalSignal = abortController.signal;
+
+      // Подписка на события AI
+      if (Bus && typeof Bus.subscribe === 'function') {
+        Bus.subscribe('ai:progress', handleAIProgress, internalSignal);
+        Bus.subscribe('ai:status', handleAIStatus, internalSignal);
+      }
+
+      if (Logger) {
+        Logger.info('Progress', 'Initialized');
+      }
+    }
+
+    /**
+     * Уничтожение модуля.
+     * Скрывает оверлей, отписывается от событий.
+     * 
+     * @returns {void}
+     */
+    function destroy() {
+      // Скрытие оверлея если виден
+      if (isVisible()) {
+        hide();
+      }
+      
+      // Отписка от событий
+      if (abortController) {
+        abortController.abort();
+        abortController = null;
+      }
+      
+      resetStats();
+    }
+
+    return {
+      // Публичный API
+      show: show,
+      hide: hide,
+      update: update,
+      isVisible: isVisible,
+      
+      // Статистика
+      getStats: getStats,
+      resetStats: resetStats,
+      
+      // Lifecycle
+      init: init,
+      destroy: destroy
+    };
+  }, ['Config', 'Logger', 'Bus', 'I18n']);
   /* <!-- MODULE: Progress --> */
 
   /* <!-- MODULE: UI.Layout --> */
-  старт
-  энд
+  /**
+   * @module UI.Layout
+   * @description Генерация HTML-разметки всего приложения.
+   * 
+   * Зона ответственности:
+   * - Построение полной DOM-структуры приложения
+   * - Локализация всех текстов через I18n
+   * - Экранирование атрибутов через Utils.esc()
+   * - Создание семантической разметки с ARIA-атрибутами
+   * 
+   * Архитектурные принципы:
+   * - НЕ знает о бизнес-логике (только генерация разметки)
+   * - Возвращает HTML-строки (не DOM-элементы) для эффективности
+   * - Все тексты через I18n.t() с fallback на русские/английские строки
+   * - Placeholder экранируются через Utils.esc() для защиты от XSS
+   * - Нет innerHTML с user-data (только статическая разметка)
+   * - ARIA-атрибуты для accessibility
+   * - CSS-классы соответствуют стилям из <style> блока
+   * 
+   * Структура приложения:
+   * - Header (логотип, индикаторы сети/AI, кнопка меню)
+   * - OfflineBar (индикатор офлайн-очереди)
+   * - Stream view (сегменты, focus bar, карусель, редактор)
+   * - Base view (статистика, поиск, сортировка, виртуальный список)
+   * - Bottom tabs (переключение Поток/База)
+   * 
+   * Используется модулями:
+   * - App.State → refreshUI() вызывает buildMarkup()
+   * - App.Boot → mountApp() вставляет разметку в #app-root
+   * 
+   * @namespace UI.Layout
+   */
+  DI.register('UI.Layout', function(Config, I18n, Utils) {
+    
+    /**
+     * Строит HTML-разметку шапки приложения (хедер).
+     * 
+     * Структура:
+     * <div class="hdr">
+     *   <div class="logo">...</div>
+     *   <div class="hdr-status">
+     *     <span class="hdr-st-item">[индикатор сети]</span>
+     *     <span class="hdr-st-sep">·</span>
+     *     <span class="hdr-st-item">[индикатор AI]</span>
+     *   </div>
+     *   <button class="burger">[меню]</button>
+     * </div>
+     * <div id="offline-bar">...</div>
+     * 
+     * @returns {string} HTML-строка хедера и offline-бара.
+     */
+    function buildHeaderMarkup() {
+      var t = function(key, fallback) {
+        return I18n ? I18n.t(key, {}, fallback) : fallback;
+      };
+
+      return '<div class="hdr">' +
+        '<div class="logo">' +
+          '<span class="logo-mark">N</span>' +
+          '<span>NOO<span class="logo-dot">.</span>mium</span>' +
+        '</div>' +
+        '<div class="hdr-status">' +
+          '<span class="hdr-st-item">' +
+            '<span class="hdr-st-dot load" id="st-net-dot"></span>' +
+            '<span id="st-net-txt">' + t('st.net', 'сеть') + '</span>' +
+          '</span>' +
+          '<span class="hdr-st-sep">·</span>' +
+          '<span class="hdr-st-item">' +
+            '<span class="hdr-st-dot load" id="st-ai-dot"></span>' +
+            '<span id="st-ai-txt">' + t('st.ai.loading', 'модель') + '</span>' +
+          '</span>' +
+        '</div>' +
+        '<button class="burger" id="btn-menu" aria-label="' + Utils.esc(t('menu.settings', 'Меню')) + '" aria-expanded="false">' +
+          '<span class="burger-line"></span>' +
+          '<span class="burger-line"></span>' +
+          '<span class="burger-line"></span>' +
+        '</button>' +
+      '</div>' +
+      '<div id="offline-bar" class="offline-bar-init">' +
+        '<span id="offline-text">' + t('offline.bar', 'Офлайн-очередь') + '</span>' +
+        '<span id="offline-queue" class="offline-queue-init">(' + t('offline.queue', 'Ожидают: {count}').replace('{count}', '0') + ')</span>' +
+      '</div>';
+    }
+
+    /**
+     * Строит HTML-разметку сегментов карусели (local / world / seren).
+     * 
+     * Структура:
+     * <div class="seg">
+     *   <button class="seg-b on" data-k="local">Моё <span class="cnt">0</span></button>
+     *   <button class="seg-b" data-k="world">Мир <span class="cnt">0</span></button>
+     *   <button class="seg-b" data-k="seren">Озарения <span class="cnt">0</span></button>
+     * </div>
+     * 
+     * Блок скрывается через CSS при активации Focus Mode.
+     * Видимость управляется через state.showSegments.
+     * 
+     * @returns {string} HTML-строка сегментов.
+     */
+    function buildSegmentsMarkup() {
+      var t = function(key, fallback) {
+        return I18n ? I18n.t(key, {}, fallback) : fallback;
+      };
+
+      return '<div class="seg">' +
+        '<button class="seg-b on" data-k="local">' +
+          '<span class="lbl">' + t('seg.local', 'Моё') + '</span>' +
+          '<span class="cnt" id="c-local">0</span>' +
+        '</button>' +
+        '<button class="seg-b" data-k="world">' +
+          '<span class="lbl">' + t('seg.world', 'Мир') + '</span>' +
+          '<span class="cnt" id="c-world">0</span>' +
+        '</button>' +
+        '<button class="seg-b" data-k="seren">' +
+          '<span class="lbl">' + t('seg.seren', 'Озарения') + '</span>' +
+          '<span class="cnt" id="c-seren">0</span>' +
+        '</button>' +
+      '</div>';
+    }
+
+    /**
+     * Строит HTML-разметку панели фокуса (FocusBar).
+     * 
+     * Структура:
+     * <div id="focus-bar" class="focus-bar-init"></div>
+     * 
+     * Изначально скрыта через CSS-класс focus-bar-init.
+     * Заполняется динамически компонентом FocusBarComponent.
+     * 
+     * @returns {string} HTML-строка контейнера focus bar.
+     */
+    function buildFocusBarMarkup() {
+      return '<div id="focus-bar" class="focus-bar-init"></div>';
+    }
+
+    /**
+     * Строит HTML-разметку обёртки карусели с пагинацией.
+     * 
+     * Структура:
+     * <div class="carousel-wrap" id="carousel-wrap">
+     *   <div class="carousel" id="carousel"></div>
+     *   <div class="pagination-controls">
+     *     <button id="pagination-prev">‹</button>
+     *     <div class="carousel-dots"></div>
+     *     <span class="carousel-counter">0 / 0</span>
+     *     <button id="pagination-next">›</button>
+     *   </div>
+     * </div>
+     * 
+     * @returns {string} HTML-строка карусели и пагинации.
+     */
+    function buildCarouselWrapMarkup() {
+      var t = function(key, fallback) {
+        return I18n ? I18n.t(key, {}, fallback) : fallback;
+      };
+
+      return '<div class="carousel-wrap" id="carousel-wrap">' +
+        '<div class="carousel" id="carousel" tabindex="0"></div>' +
+        '<div class="pagination-controls" id="pagination-controls">' +
+          '<button class="pagination-btn" id="pagination-prev" disabled aria-label="' + Utils.esc(t('btn.prev', 'Предыдущая')) + '">‹</button>' +
+          '<div class="carousel-dots" id="carousel-dots"></div>' +
+          '<span class="carousel-counter" id="carousel-counter">0 / 0</span>' +
+          '<button class="pagination-btn" id="pagination-next" aria-label="' + Utils.esc(t('btn.next', 'Следующая')) + '">›</button>' +
+        '</div>' +
+      '</div>';
+    }
+
+    /**
+     * Строит HTML-разметку редактора (поле ввода, счётчик, переключатель, кнопка).
+     * 
+     * Структура:
+     * <div class="ed">
+     *   <textarea id="ed-ta" placeholder="..."></textarea>
+     *   <div class="ed-foot">
+     *     <span id="ed-cnt">0 симв.</span>
+     *     <div class="ed-acts">
+     *       <div class="tog-sw" id="mode-toggle">
+     *         <div class="tog-sw-thumb"></div>
+     *         <div class="tog-sw-opt on" data-v="private">Личное</div>
+     *         <div class="tog-sw-opt" data-v="world">Мир</div>
+     *       </div>
+     *       <button class="btn-send" id="btn-send">[SVG]</button>
+     *     </div>
+     *   </div>
+     * </div>
+     * 
+     * Placeholder экранируется через Utils.esc() для защиты от XSS.
+     * 
+     * @returns {string} HTML-строка редактора.
+     */
+    function buildEditorMarkup() {
+      var t = function(key, fallback) {
+        return I18n ? I18n.t(key, {}, fallback) : fallback;
+      };
+
+      var placeholder = Utils.esc(t('ed.placeholder', 'О чём думаешь?'));
+      var charsLabel = t('ed.chars', 'симв.');
+      var privateLabel = t('btn.private', 'Личное');
+      var publicLabel = t('btn.public', 'Мир');
+      var sendLabel = Utils.esc(t('btn.send', 'Послать'));
+
+      return '<div class="ed">' +
+        '<textarea id="ed-ta" class="ed-ta" placeholder="' + placeholder + '"></textarea>' +
+        '<div class="ed-foot">' +
+          '<span id="ed-cnt" class="ed-cnt">0 ' + charsLabel + '</span>' +
+          '<div class="ed-acts">' +
+            '<div class="tog-sw" id="mode-toggle" data-mode="private">' +
+              '<div class="tog-sw-thumb"></div>' +
+              '<div class="tog-sw-opt on" data-v="private">' + privateLabel + '</div>' +
+              '<div class="tog-sw-opt" data-v="world">' + publicLabel + '</div>' +
+            '</div>' +
+            '<button class="btn-send" id="btn-send" aria-label="' + sendLabel + '">' +
+              '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+                '<line x1="22" y1="2" x2="11" y2="13"/>' +
+                '<polygon points="22 2 15 22 11 13 2 9 22 2"/>' +
+              '</svg>' +
+            '</button>' +
+          '</div>' +
+        '</div>' +
+      '</div>';
+    }
+
+    /**
+     * Строит HTML-разметку вкладки «База» (статистика, поиск, сортировка, список).
+     * 
+     * Структура:
+     * <div class="ws base ws-base-init" id="ws-base">
+     *   <div class="base-h">
+     *     <div class="base-stats" id="base-stats"></div>
+     *     <div class="base-ctrls">
+     *       <input type="text" id="base-q" placeholder="...">
+     *       <select id="base-sort">
+     *         <option value="new">новые</option>
+     *         <option value="old">старые</option>
+     *         <option value="az">а-я</option>
+     *       </select>
+     *     </div>
+     *   </div>
+     *   <div class="base-list" id="base-list"></div>
+     * </div>
+     * 
+     * Placeholder поиска экранируется через Utils.esc().
+     * 
+     * @returns {string} HTML-строка вкладки "База".
+     */
+    function buildBaseMarkup() {
+      var t = function(key, fallback) {
+        return I18n ? I18n.t(key, {}, fallback) : fallback;
+      };
+
+      var searchPlaceholder = Utils.esc(t('base.search', 'поиск...'));
+      var sortNewLabel = t('base.sort.new', 'новые');
+      var sortOldLabel = t('base.sort.old', 'старые');
+      var sortAZLabel = t('base.sort.az', 'а-я');
+
+      return '<div class="ws base ws-base-init" id="ws-base">' +
+        '<div class="base-h">' +
+          '<div class="base-stats" id="base-stats"></div>' +
+          '<div class="base-ctrls">' +
+            '<input type="text" class="base-search" id="base-q" placeholder="' + searchPlaceholder + '" />' +
+            '<select class="base-sort" id="base-sort">' +
+              '<option value="new">' + sortNewLabel + '</option>' +
+              '<option value="old">' + sortOldLabel + '</option>' +
+              '<option value="az">' + sortAZLabel + '</option>' +
+            '</select>' +
+          '</div>' +
+        '</div>' +
+        '<div class="base-list" id="base-list"></div>' +
+      '</div>';
+    }
+
+    /**
+     * Строит HTML-разметку нижней навигационной панели (табы Поток / База).
+     * 
+     * Структура:
+     * <div class="btab">
+     *   <button class="btab-b on" data-v="stream">◇ Поток</button>
+     *   <button class="btab-b" data-v="base">▤ База</button>
+     * </div>
+     * 
+     * @returns {string} HTML-строка bottom tabs.
+     */
+    function buildBottomTabMarkup() {
+      var t = function(key, fallback) {
+        return I18n ? I18n.t(key, {}, fallback) : fallback;
+      };
+
+      return '<div class="btab">' +
+        '<button class="btab-b on" data-v="stream">' +
+          '<span class="btab-ic">◇</span>' +
+          '<span>' + t('tab.stream', 'Поток') + '</span>' +
+        '</button>' +
+        '<button class="btab-b" data-v="base">' +
+          '<span class="btab-ic">▤</span>' +
+          '<span>' + t('tab.base', 'База') + '</span>' +
+        '</button>' +
+      '</div>';
+    }
+
+    /**
+     * Собирает полную HTML-разметку приложения из отдельных блоков.
+     * 
+     * Порядок вкладки stream:
+     * 1. Header (логотип, индикаторы, меню)
+     * 2. OfflineBar
+     * 3. Stream view container (ws-stream):
+     *    - Segments (плашка сегментов)
+     *    - FocusBar (панель закрепа)
+     *    - CarouselWrap (карусель с пагинацией)
+     *    - Editor (поле ввода)
+     * 4. Base view (вкладка "База")
+     * 5. Bottom tabs (переключение вкладок)
+     * 
+     * FocusBar идёт после Segments, чтобы при фокусе Segments скрывался,
+     * а FocusBar занимал его место (CSS flexbox).
+     * 
+     * @returns {string} Полная HTML-строка для вставки в #app-root.
+     * 
+     * @example
+     * var html = UI.Layout.buildMarkup();
+     * document.getElementById('app-root').innerHTML = html;
+     */
+    function buildMarkup() {
+      return buildHeaderMarkup() +
+        '<div class="ws" id="ws-stream">' +
+          buildSegmentsMarkup() +
+          buildFocusBarMarkup() +
+          buildCarouselWrapMarkup() +
+          buildEditorMarkup() +
+        '</div>' +
+        buildBaseMarkup() +
+        buildBottomTabMarkup();
+    }
+
+    /**
+     * Инициализация модуля.
+     * UI.Layout не требует автоматической инициализации.
+     * 
+     * @param {AbortSignal} [signal] - Сигнал для автоочистки (не используется).
+     * @returns {void}
+     */
+    function init(signal) {
+      // Нет инициализации
+    }
+
+    /**
+     * Уничтожение модуля.
+     * UI.Layout не имеет ресурсов для очистки.
+     * 
+     * @returns {void}
+     */
+    function destroy() {
+      // Нет ресурсов для очистки
+    }
+
+    return {
+      // Основной API
+      buildMarkup: buildMarkup,
+      
+      // Вспомогательные функции (для отладки и тестирования)
+      buildHeaderMarkup: buildHeaderMarkup,
+      buildSegmentsMarkup: buildSegmentsMarkup,
+      buildFocusBarMarkup: buildFocusBarMarkup,
+      buildCarouselWrapMarkup: buildCarouselWrapMarkup,
+      buildEditorMarkup: buildEditorMarkup,
+      buildBaseMarkup: buildBaseMarkup,
+      buildBottomTabMarkup: buildBottomTabMarkup,
+      
+      // Lifecycle
+      init: init,
+      destroy: destroy
+    };
+  }, ['Config', 'I18n', 'Utils']);
   /* <!-- MODULE: UI.Layout --> */
 
   /* <!-- MODULE: UI.Menu --> */
