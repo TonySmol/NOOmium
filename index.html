@@ -9428,13 +9428,1044 @@ kbd {
   /* <!-- MODULE: LiveStreamService --> */
 
   /* <!-- MODULE: NoteCache --> */
-  старт
-  энд
+  /**
+   * @typedef {Object} Note
+   * @description Структура заметки (дублируется из DB для ясности).
+   * @property {string} id - Уникальный идентификатор.
+   * @property {string} text - Текст мысли.
+   * @property {Vector} [vector] - Вектор эмбеддинга.
+   * @property {boolean} shared - Флаг публикации в сеть.
+   * @property {number} createdAt - Timestamp создания.
+   * @property {number} [updatedAt] - Timestamp обновления.
+   * @property {string} [parentId] - ID родительской заметки.
+   * @property {string[]} [children] - Массив ID дочерних заметок.
+   */
+
+  /**
+   * @module NoteCache
+   * @description Единый кэш локальных заметок для всех сервисов.
+   * 
+   * Зона ответственности:
+   * - Кэширование результатов DB.all() и фильтрации shared
+   * - Автоматическая инвалидация через событие db:change
+   * - TTL защита (5 минут) на случай пропущенных событий
+   * - Promise deduplication для параллельных запросов
+   * - Статистика cache hits/misses для мониторинга
+   * 
+   * Архитектурные принципы:
+   * - Единый источник истины для всех стратегий поиска
+   * - НЕ знает о поиске, фокусе, UI, сети
+   * - Делегирует чтение в DB
+   * - Event-driven: слушает db:change от DB модуля
+   * - AbortSignal для автоматической отписки
+   * 
+   * Преимущества единого кэша:
+   * - TextSearchStrategy, FocusSearchStrategy, QueryHandler используют одни данные
+   * - Нет рассинхронизации между разными кэшами
+   * - Одно чтение IDB на все запросы (вместо N чтений)
+   * - Меньше нагрузка на IndexedDB
+   * 
+   * Слушает события:
+   * - `db:change` — изменение в базе данных (put/del/bulkPut/addChild/removeChild/reset)
+   *   payload: {} (без данных, просто сигнал инвалидации)
+   * 
+   * Используется модулями:
+   * - TextSearchStrategy → getAll() для локального поиска
+   * - FocusSearchStrategy → getAll() для поиска по вектору фокуса
+   * - QueryHandler → getShared() для ответов на входящие запросы
+   * - BaseViewComponent → getAll() для отображения вкладки "База"
+   * 
+   * @namespace NoteCache
+   */
+  DI.register('NoteCache', function(Config, Logger, Bus, DB) {
+    
+    /**
+     * Контроллер для управления подписками.
+     * @type {AbortController | null}
+     */
+    var abortController = null;
+
+    /**
+     * Кэш всех локальных заметок.
+     * null — если кэш не инициализирован или инвалидирован.
+     * @type {Note[] | null}
+     */
+    var allNotesCache = null;
+
+    /**
+     * Timestamp последнего обновления allNotesCache.
+     * @type {number}
+     */
+    var allNotesCacheTime = 0;
+
+    /**
+     * Promise текущего запроса всех заметок (для deduplication).
+     * Если несколько модулей одновременно запрашивают getAll() —
+     * все получают один и тот же Promise вместо N параллельных DB.all().
+     * @type {Promise<Note[]> | null}
+     */
+    var allNotesPromise = null;
+
+    /**
+     * Кэш shared-заметок (фильтрованная версия allNotesCache).
+     * null — если кэш не инициализирован или инвалидирован.
+     * @type {Note[] | null}
+     */
+    var sharedNotesCache = null;
+
+    /**
+     * Timestamp последнего обновления sharedNotesCache.
+     * @type {number}
+     */
+    var sharedNotesCacheTime = 0;
+
+    /**
+     * Promise текущего запроса shared-заметок (для deduplication).
+     * @type {Promise<Note[]> | null}
+     */
+    var sharedNotesPromise = null;
+
+    /**
+     * Время жизни кэша в миллисекундах.
+     * По умолчанию 5 минут (защита от пропущенных db:change событий).
+     * @type {number}
+     */
+    var CACHE_TTL = 5 * 60 * 1000;
+
+    /**
+     * Статистика использования кэша.
+     * @type {{hits: number, misses: number, invalidations: number}}
+     */
+    var stats = {
+      hits: 0,
+      misses: 0,
+      invalidations: 0
+    };
+
+    /**
+     * Проверяет, валиден ли кэш (не истёк TTL).
+     * 
+     * @param {number} cacheTime - Timestamp последнего обновления кэша.
+     * @returns {boolean} true если кэш валиден.
+     */
+    function isCacheValid(cacheTime) {
+      if (cacheTime === 0) return false;
+      var now = Date.now();
+      return (now - cacheTime) < CACHE_TTL;
+    }
+
+    /**
+     * Инвалидирует все кэши.
+     * Вызывается при получении db:change события.
+     * 
+     * @returns {void}
+     */
+    function invalidate() {
+      allNotesCache = null;
+      allNotesCacheTime = 0;
+      allNotesPromise = null;
+      
+      sharedNotesCache = null;
+      sharedNotesCacheTime = 0;
+      sharedNotesPromise = null;
+      
+      stats.invalidations++;
+
+      if (Logger) {
+        Logger.debug('NoteCache', 'Cache invalidated', {
+          totalInvalidations: stats.invalidations
+        });
+      }
+    }
+
+    /**
+     * Возвращает все локальные заметки из кэша или DB.
+     * 
+     * Алгоритм:
+     * 1. Проверка валидности кэша (не null и TTL не истёк)
+     * 2. Если кэш валиден → возвращаем копию (защита от мутации)
+     * 3. Если кэш невалиден:
+     *    a. Проверяем allNotesPromise (deduplication)
+     *    b. Если запрос уже идёт → возвращаем тот же Promise
+     *    c. Иначе → создаём новый Promise через DB.all()
+     *    d. При успехе → сохраняем в кэш, обновляем timestamp
+     *    e. При ошибке → логируем, возвращаем пустой массив
+     * 
+     * @returns {Promise<Note[]>} Promise с массивом всех заметок.
+     * 
+     * @example
+     * NoteCache.getAll().then(function(notes) {
+     *   console.log('Total notes:', notes.length);
+     * });
+     */
+    function getAll() {
+      // Проверка кэша
+      if (allNotesCache && isCacheValid(allNotesCacheTime)) {
+        stats.hits++;
+        if (Logger) {
+          Logger.debug('NoteCache', 'getAll cache hit', {
+            count: allNotesCache.length,
+            age: Date.now() - allNotesCacheTime
+          });
+        }
+        return Promise.resolve(allNotesCache.slice()); // Копия
+      }
+
+      stats.misses++;
+
+      // Promise deduplication
+      if (allNotesPromise) {
+        if (Logger) {
+          Logger.debug('NoteCache', 'getAll reusing pending promise');
+        }
+        return allNotesPromise;
+      }
+
+      if (Logger) {
+        Logger.debug('NoteCache', 'getAll cache miss, fetching from DB');
+      }
+
+      // Создаём новый запрос
+      allNotesPromise = DB.all().then(function(notes) {
+        if (!Array.isArray(notes)) {
+          if (Logger) Logger.warn('NoteCache', 'DB.all returned non-array', notes);
+          notes = [];
+        }
+
+        allNotesCache = notes;
+        allNotesCacheTime = Date.now();
+        allNotesPromise = null;
+
+        if (Logger) {
+          Logger.debug('NoteCache', 'getAll cached', {
+            count: notes.length
+          });
+        }
+
+        return notes.slice(); // Копия
+      }).catch(function(err) {
+        allNotesPromise = null;
+        if (Logger) Logger.error('NoteCache', 'getAll failed', err);
+        return [];
+      });
+
+      return allNotesPromise;
+    }
+
+    /**
+     * Возвращает только shared-заметки из кэша или DB.
+     * 
+     * Алгоритм аналогичен getAll(), но с фильтрацией shared === true.
+     * 
+     * @returns {Promise<Note[]>} Promise с массивом shared-заметок.
+     * 
+     * @example
+     * NoteCache.getShared().then(function(sharedNotes) {
+     *   console.log('Shared notes:', sharedNotes.length);
+     * });
+     */
+    function getShared() {
+      // Проверка кэша
+      if (sharedNotesCache && isCacheValid(sharedNotesCacheTime)) {
+        stats.hits++;
+        if (Logger) {
+          Logger.debug('NoteCache', 'getShared cache hit', {
+            count: sharedNotesCache.length,
+            age: Date.now() - sharedNotesCacheTime
+          });
+        }
+        return Promise.resolve(sharedNotesCache.slice()); // Копия
+      }
+
+      stats.misses++;
+
+      // Promise deduplication
+      if (sharedNotesPromise) {
+        if (Logger) {
+          Logger.debug('NoteCache', 'getShared reusing pending promise');
+        }
+        return sharedNotesPromise;
+      }
+
+      if (Logger) {
+        Logger.debug('NoteCache', 'getShared cache miss, fetching from DB');
+      }
+
+      // Создаём новый запрос
+      sharedNotesPromise = DB.all().then(function(notes) {
+        if (!Array.isArray(notes)) {
+          if (Logger) Logger.warn('NoteCache', 'DB.all returned non-array', notes);
+          notes = [];
+        }
+
+        // Фильтрация shared
+        var shared = [];
+        for (var i = 0; i < notes.length; i++) {
+          if (notes[i] && notes[i].shared === true) {
+            shared.push(notes[i]);
+          }
+        }
+
+        sharedNotesCache = shared;
+        sharedNotesCacheTime = Date.now();
+        sharedNotesPromise = null;
+
+        if (Logger) {
+          Logger.debug('NoteCache', 'getShared cached', {
+            count: shared.length,
+            total: notes.length
+          });
+        }
+
+        return shared.slice(); // Копия
+      }).catch(function(err) {
+        sharedNotesPromise = null;
+        if (Logger) Logger.error('NoteCache', 'getShared failed', err);
+        return [];
+      });
+
+      return sharedNotesPromise;
+    }
+
+    /**
+     * Возвращает заметку по ID из кэша (синхронно).
+     * Если кэш не инициализирован — возвращает null.
+     * 
+     * ВАЖНО: Этот метод НЕ загружает данные из DB.
+     * Используйте DB.get(id) для гарантированного получения.
+     * 
+     * @param {string} id - ID заметки.
+     * @returns {Note | null} Заметка или null.
+     */
+    function getById(id) {
+      if (!id || typeof id !== 'string') return null;
+      if (!allNotesCache) return null;
+
+      for (var i = 0; i < allNotesCache.length; i++) {
+        if (allNotesCache[i] && allNotesCache[i].id === id) {
+          return allNotesCache[i];
+        }
+      }
+      return null;
+    }
+
+    /**
+     * Возвращает количество заметок в кэше (синхронно).
+     * Если кэш не инициализирован — возвращает 0.
+     * 
+     * @returns {number}
+     */
+    function getCount() {
+      return allNotesCache ? allNotesCache.length : 0;
+    }
+
+    /**
+     * Возвращает количество shared-заметок в кэше (синхронно).
+     * Если кэш не инициализирован — возвращает 0.
+     * 
+     * @returns {number}
+     */
+    function getSharedCount() {
+      return sharedNotesCache ? sharedNotesCache.length : 0;
+    }
+
+    /**
+     * Проверяет, инициализирован ли кэш.
+     * 
+     * @returns {boolean} true если кэш содержит данные.
+     */
+    function isInitialized() {
+      return allNotesCache !== null;
+    }
+
+    /**
+     * Возвращает возраст кэша в миллисекундах.
+     * 0 — если кэш не инициализирован.
+     * 
+     * @returns {number}
+     */
+    function getAge() {
+      if (allNotesCacheTime === 0) return 0;
+      return Date.now() - allNotesCacheTime;
+    }
+
+    /**
+     * Принудительно обновляет кэш (игнорируя TTL).
+     * Полезно после массовых операций (импорт, reset).
+     * 
+     * @returns {Promise<void>} Promise, разрешающийся после обновления.
+     */
+    function refresh() {
+      invalidate();
+      return Promise.all([getAll(), getShared()]).then(function() {
+        if (Logger) {
+          Logger.info('NoteCache', 'Cache refreshed');
+        }
+      });
+    }
+
+    /**
+     * Возвращает статистику использования кэша.
+     * 
+     * @returns {{hits: number, misses: number, invalidations: number, hitRate: number}}
+     */
+    function getStats() {
+      var total = stats.hits + stats.misses;
+      var hitRate = total > 0 ? (stats.hits / total) : 0;
+
+      return {
+        hits: stats.hits,
+        misses: stats.misses,
+        invalidations: stats.invalidations,
+        hitRate: Math.round(hitRate * 100) / 100
+      };
+    }
+
+    /**
+     * Сбрасывает статистику.
+     * 
+     * @returns {void}
+     */
+    function resetStats() {
+      stats.hits = 0;
+      stats.misses = 0;
+      stats.invalidations = 0;
+    }
+
+    /**
+     * Обработчик события db:change от DB модуля.
+     * Вызывает invalidate() для очистки кэшей.
+     * 
+     * @returns {void}
+     */
+    function handleDbChange() {
+      invalidate();
+    }
+
+    /**
+     * Инициализация модуля.
+     * Подписывается на db:change с AbortSignal.
+     * Предварительно загружает кэш для быстрого старта.
+     * 
+     * @param {AbortSignal} [signal] - Сигнал для автоочистки.
+     * @returns {void}
+     */
+    function init(signal) {
+      if (abortController) {
+        abortController.abort();
+      }
+
+      abortController = new AbortController();
+      var internalSignal = abortController.signal;
+
+      // Подписка на db:change
+      if (Bus && typeof Bus.subscribe === 'function') {
+        Bus.subscribe('db:change', handleDbChange, internalSignal);
+      }
+
+      // Предварительная загрузка кэша (неблокирующая)
+      getAll().catch(function(err) {
+        if (Logger) Logger.warn('NoteCache', 'Initial load failed', err);
+      });
+
+      if (Logger) {
+        Logger.info('NoteCache', 'Initialized', {
+          ttl: CACHE_TTL
+        });
+      }
+    }
+
+    /**
+     * Уничтожение модуля.
+     * Отписывается от событий, очищает кэши.
+     * 
+     * @returns {void}
+     */
+    function destroy() {
+      if (abortController) {
+        abortController.abort();
+        abortController = null;
+      }
+
+      invalidate();
+      resetStats();
+    }
+
+    return {
+      getAll: getAll,
+      getShared: getShared,
+      getById: getById,
+      getCount: getCount,
+      getSharedCount: getSharedCount,
+      isInitialized: isInitialized,
+      getAge: getAge,
+      invalidate: invalidate,
+      refresh: refresh,
+      getStats: getStats,
+      resetStats: resetStats,
+      init: init,
+      destroy: destroy
+    };
+  }, ['Config', 'Logger', 'Bus', 'DB']);
   /* <!-- MODULE: NoteCache --> */
 
   /* <!-- MODULE: TextSearchStrategy --> */
-  старт
-  энд
+  /**
+   * @typedef {Object} TextSearchResult
+   * @description Результат выполнения текстового поиска.
+   * @property {Object} lists - Результаты по сегментам.
+   * @property {SearchResult[]} lists.local - Локальные совпадения (score >= threshold).
+   * @property {SearchResult[]} lists.world - Сетевые совпадения (score >= threshold).
+   * @property {SearchResult[]} lists.seren - Озарения (serenMin <= score < threshold).
+   * @property {SearchResult[]} lists.focus - Всегда пустой в текстовом поиске.
+   */
+
+  /**
+   * @module TextSearchStrategy
+   * @description Стратегия семантического поиска по тексту (режим SEARCH).
+   * 
+   * Зона ответственности:
+   * - Вычисление вектора запроса через AI.embed
+   * - Отправка запроса в сеть через NetTransport (с дедупликацией)
+   * - Поиск похожих заметок в локальной базе через NoteCache
+   * - Фильтрация по порогам (local/world/seren)
+   * - Возврат структурированных списков для StateManager
+   * 
+   * Архитектурные принципы:
+   * - Stateless execute: принимает текст + signal, возвращает lists
+   * - AbortController для отмены предыдущего поиска
+   * - Делегирует кэширование в NoteCache (единый источник)
+   * - Делегирует сетевые запросы в NetTransport
+   * - Делегирует вычисление cosine в AI.cosineBatch
+   * - НЕ знает о UI, StateManager, фокусе
+   * 
+   * Алгоритм поиска:
+   * 1. Trim и валидация текста
+   * 2. AI.embed(text) → vector (с LRU-кэшем)
+   * 3. Дедупликация: если vector похож на предыдущий (cosine >= 0.98) → не отправляем в сеть
+   * 4. NetTransport.send(vector) → поисковый запрос Kind 21000
+   * 5. NoteCache.getAll() → локальные заметки
+   * 6. AI.cosineBatch(vector, localNotes, signal) → scores
+   * 7. Фильтрация local: score >= threshold
+   * 8. NetTransport.activeAnswers() → сетевые ответы
+   * 9. Фильтрация world: score >= threshold
+   * 10. Объединение local + world → seren: serenMin <= score < threshold
+   * 11. Сортировка по score desc, обрезка до MAX_RESULTS_PER_LIST (100)
+   * 12. Return {lists: {local, world, seren, focus: []}}
+   * 
+   * Используется модулями:
+   * - SearchCoordinator → вызывается при editor:search-request
+   * 
+   * @namespace TextSearchStrategy
+   */
+  DI.register('TextSearchStrategy', function(
+    Config, Logger, AI, NetTransport, NoteCache, StateManager
+  ) {
+    
+    /**
+     * Максимальное количество результатов в каждом списке.
+     * Защита от тормозов UI при большой базе (10000+ заметок).
+     * @type {number}
+     */
+    var MAX_RESULTS_PER_LIST = 100;
+
+    /**
+     * Контроллер для отмены предыдущего поиска.
+     * При новом вызове execute() предыдущий поиск отменяется через abort().
+     * @type {AbortController | null}
+     */
+    var searchController = null;
+
+    /**
+     * Вектор последнего выполненного поискового запроса.
+     * Используется для дедупликации сетевых запросов.
+     * @type {Vector | null}
+     */
+    var lastVec = null;
+
+    /**
+     * Timestamp последнего поискового запроса.
+     * @type {number}
+     */
+    var lastQueryTime = 0;
+
+    /**
+     * Счётчик выполненных поисков (для статистики).
+     * @type {{total: number, aborted: number, errors: number}}
+     */
+    var stats = {
+      total: 0,
+      aborted: 0,
+      errors: 0
+    };
+
+    /**
+     * Валидирует входной текст.
+     * 
+     * @param {string} text - Текст для проверки.
+     * @returns {string} Trimmed текст или пустая строка.
+     */
+    function validateText(text) {
+      if (typeof text !== 'string') return '';
+      return text.trim();
+    }
+
+    /**
+     * Проверяет, нужно ли отправлять новый запрос в сеть.
+     * Дедупликация: если новый vector похож на предыдущий (cosine >= threshold) → не отправляем.
+     * 
+     * @param {Vector} newVec - Новый вектор запроса.
+     * @param {boolean} force - Принудительная отправка (игнорировать дедупликацию).
+     * @returns {boolean} true если нужно отправить в сеть.
+     */
+    function shouldSendToNetwork(newVec, force) {
+      if (force) return true;
+      if (!lastVec) return true;
+
+      var similarityThreshold = Config 
+        ? Config.get('vectorSimilarityThreshold', 0.98) 
+        : 0.98;
+
+      var similarity = AI.cosineSimilarity(newVec, lastVec);
+      return similarity < similarityThreshold;
+    }
+
+    /**
+     * Формирует SearchResult из заметки и score.
+     * 
+     * @param {Note} note - Заметка из NoteCache.
+     * @param {number} score - Косинусное сходство.
+     * @returns {SearchResult}
+     */
+    function buildSearchResult(note, score) {
+      return {
+        id: note.id,
+        text: note.text,
+        vector: note.vector,
+        score: score,
+        shared: note.shared,
+        createdAt: note.createdAt,
+        parentId: note.parentId,
+        children: note.children
+      };
+    }
+
+    /**
+     * Формирует SearchResult из сетевого ответа.
+     * 
+     * @param {NetworkAnswer} answer - Ответ из NetTransport.
+     * @returns {SearchResult}
+     */
+    function buildWorldResult(answer) {
+      return {
+        id: answer.id,
+        text: answer.text,
+        vector: answer.vector,
+        score: answer.score,
+        shared: true,
+        peer: answer.peer,
+        createdAt: answer.createdAt,
+        parentId: null,
+        children: []
+      };
+    }
+
+    /**
+     * Фильтрует и сортирует результаты по score.
+     * 
+     * @param {SearchResult[]} results - Массив результатов.
+     * @param {number} minScore - Минимальный score для включения.
+     * @param {number} [maxScore=1.0] - Максимальный score (для seren).
+     * @returns {SearchResult[]} Отфильтрованный и отсортированный массив.
+     */
+    function filterAndSort(results, minScore, maxScore) {
+      maxScore = maxScore !== undefined ? maxScore : 1.0;
+
+      var filtered = [];
+      for (var i = 0; i < results.length; i++) {
+        var r = results[i];
+        if (r && typeof r.score === 'number' && r.score >= minScore && r.score < maxScore) {
+          filtered.push(r);
+        }
+      }
+
+      filtered.sort(function(a, b) {
+        return b.score - a.score;
+      });
+
+      return filtered.slice(0, MAX_RESULTS_PER_LIST);
+    }
+
+    /**
+     * Выполняет семантический поиск по тексту.
+     * 
+     * @param {string} text - Поисковый запрос.
+     * @param {boolean} [force=false] - Принудительная отправка в сеть.
+     * @param {AbortSignal} [externalSignal] - Внешний сигнал для отмены.
+     * @returns {Promise<TextSearchResult>} Promise с результатами поиска.
+     * 
+     * @example
+     * TextSearchStrategy.execute('медитация', false)
+     *   .then(function(result) {
+     *     console.log('Local:', result.lists.local.length);
+     *     console.log('World:', result.lists.world.length);
+     *     console.log('Seren:', result.lists.seren.length);
+     *   });
+     */
+    function execute(text, force, externalSignal) {
+      stats.total++;
+
+      var trimmed = validateText(text);
+
+      // Пустой текст → пустые результаты
+      if (!trimmed) {
+        return Promise.resolve({
+          lists: { local: [], world: [], seren: [], focus: [] }
+        });
+      }
+
+      // Проверка готовности AI
+      if (!AI || !AI.ready()) {
+        if (Logger) Logger.warn('TextSearchStrategy', 'AI not ready');
+        return Promise.resolve({
+          lists: { local: [], world: [], seren: [], focus: [] }
+        });
+      }
+
+      // Отмена предыдущего поиска
+      if (searchController) {
+        searchController.abort();
+        stats.aborted++;
+        searchController = null;
+      }
+
+      // Создание нового контроллера
+      searchController = new AbortController();
+      var internalSignal = searchController.signal;
+      var currentController = searchController;
+
+      // Объединение внешнего и внутреннего сигналов
+      var combinedSignal = internalSignal;
+      if (externalSignal) {
+        if (externalSignal.aborted) {
+          searchController.abort();
+          stats.aborted++;
+          return Promise.resolve({
+            lists: { local: [], world: [], seren: [], focus: [] }
+          });
+        }
+
+        externalSignal.addEventListener('abort', function() {
+          if (searchController === currentController) {
+            searchController.abort();
+          }
+        }, { once: true });
+      }
+
+      if (Logger) {
+        Logger.debug('TextSearchStrategy', 'Executing search', {
+          text: trimmed.slice(0, 50),
+          force: force
+        });
+      }
+
+      // Шаг 1: Вычисление вектора запроса
+      var embedPromise;
+      try {
+        embedPromise = AI.embed(trimmed);
+      } catch (e) {
+        stats.errors++;
+        if (Logger) Logger.error('TextSearchStrategy', 'AI.embed throw', e);
+        searchController = null;
+        return Promise.resolve({
+          lists: { local: [], world: [], seren: [], focus: [] }
+        });
+      }
+
+      if (!embedPromise || typeof embedPromise.then !== 'function') {
+        stats.errors++;
+        if (Logger) Logger.error('TextSearchStrategy', 'AI.embed did not return Promise');
+        searchController = null;
+        return Promise.resolve({
+          lists: { local: [], world: [], seren: [], focus: [] }
+        });
+      }
+
+      return embedPromise.then(function(vec) {
+        // Проверка отмены
+        if (combinedSignal.aborted) {
+          stats.aborted++;
+          return null;
+        }
+
+        if (!vec || !Array.isArray(vec)) {
+          if (Logger) Logger.warn('TextSearchStrategy', 'AI.embed returned invalid vector');
+          return null;
+        }
+
+        // Шаг 2: Дедупликация и отправка в сеть
+        var shouldSend = shouldSendToNetwork(vec, force);
+        
+        if (shouldSend) {
+          lastVec = vec;
+          lastQueryTime = Date.now();
+
+          if (NetTransport && NetTransport.send) {
+            try {
+              var state = StateManager ? StateManager.getState() : {};
+              if (state.netAuthorized) {
+                NetTransport.send(vec);
+              }
+            } catch (e) {
+              if (Logger) Logger.warn('TextSearchStrategy', 'NetTransport.send failed', e);
+            }
+          }
+        }
+
+        // Шаг 3: Получение локальных заметок
+        var notesPromise;
+        if (NoteCache && NoteCache.getAll) {
+          notesPromise = NoteCache.getAll();
+        } else {
+          notesPromise = Promise.resolve([]);
+        }
+
+        return notesPromise.then(function(notes) {
+          if (combinedSignal.aborted) {
+            stats.aborted++;
+            return null;
+          }
+
+          if (!Array.isArray(notes)) {
+            if (Logger) Logger.warn('TextSearchStrategy', 'NoteCache.getAll returned non-array');
+            notes = [];
+          }
+
+          // Шаг 4: Подготовка кандидатов для локального поиска
+          var localCandidates = [];
+          var localDataMap = new Map();
+
+          for (var i = 0; i < notes.length; i++) {
+            var note = notes[i];
+            if (note && note.vector && Array.isArray(note.vector)) {
+              localCandidates.push({
+                id: note.id,
+                vector: note.vector
+              });
+              localDataMap.set(note.id, note);
+            }
+          }
+
+          // Шаг 5: Вычисление cosine similarity для локальных заметок
+          var localScoresPromise;
+          if (localCandidates.length > 0) {
+            try {
+              localScoresPromise = AI.cosineBatch(vec, localCandidates, combinedSignal);
+            } catch (e) {
+              if (Logger) Logger.warn('TextSearchStrategy', 'AI.cosineBatch throw', e);
+              localScoresPromise = Promise.resolve([]);
+            }
+          } else {
+            localScoresPromise = Promise.resolve([]);
+          }
+
+          if (!localScoresPromise || typeof localScoresPromise.then !== 'function') {
+            localScoresPromise = Promise.resolve([]);
+          }
+
+          return localScoresPromise.then(function(localScores) {
+            if (combinedSignal.aborted) {
+              stats.aborted++;
+              return null;
+            }
+
+            if (!Array.isArray(localScores)) {
+              localScores = [];
+            }
+
+            // Шаг 6: Формирование локальных результатов
+            var localScored = [];
+            for (var k = 0; k < localScores.length; k++) {
+              var s = localScores[k];
+              if (s && s.id) {
+                var note = localDataMap.get(s.id);
+                if (note && typeof s.score === 'number') {
+                  localScored.push(buildSearchResult(note, s.score));
+                }
+              }
+            }
+
+            // Шаг 7: Получение сетевых ответов
+            var worldAnswers = [];
+            if (NetTransport && NetTransport.activeAnswers) {
+              try {
+                var state = StateManager ? StateManager.getState() : {};
+                if (state.netAuthorized) {
+                  worldAnswers = NetTransport.activeAnswers();
+                }
+              } catch (e) {
+                if (Logger) Logger.warn('TextSearchStrategy', 'NetTransport.activeAnswers failed', e);
+              }
+            }
+
+            // Шаг 8: Формирование сетевых результатов
+            var worldScored = [];
+            if (Array.isArray(worldAnswers)) {
+              for (var j = 0; j < worldAnswers.length; j++) {
+                var answer = worldAnswers[j];
+                if (answer && typeof answer.score === 'number') {
+                  worldScored.push(buildWorldResult(answer));
+                }
+              }
+            }
+
+            // Шаг 9: Фильтрация по порогам
+            var threshold = Config ? Config.get('threshold', 0.7) : 0.7;
+            var serendipityDelta = Config ? Config.get('serendipity', 0.3) : 0.3;
+            var serenMin = threshold - serendipityDelta;
+
+            var localFiltered = filterAndSort(localScored, threshold);
+            var worldFiltered = filterAndSort(worldScored, threshold);
+
+            // Шаг 10: Формирование seren (озарения)
+            var combined = localScored.concat(worldScored);
+            var serenFiltered = filterAndSort(combined, serenMin, threshold);
+
+            if (Logger) {
+              Logger.info('TextSearchStrategy', 'Search completed', {
+                text: trimmed.slice(0, 30),
+                localCount: localFiltered.length,
+                worldCount: worldFiltered.length,
+                serenCount: serenFiltered.length
+              });
+            }
+
+            return {
+              lists: {
+                local: localFiltered,
+                world: worldFiltered,
+                seren: serenFiltered,
+                focus: []
+              }
+            };
+          });
+        });
+      }).catch(function(err) {
+        if (combinedSignal.aborted) {
+          stats.aborted++;
+          return null;
+        }
+
+        stats.errors++;
+        if (Logger) Logger.error('TextSearchStrategy', 'Search error', err);
+        return {
+          lists: { local: [], world: [], seren: [], focus: [] }
+        };
+      }).finally(function() {
+        // Очистка контроллера только если это текущий
+        if (searchController === currentController) {
+          searchController = null;
+        }
+      });
+    }
+
+    /**
+     * Возвращает вектор последнего поискового запроса.
+     * 
+     * @returns {Vector | null}
+     */
+    function getLastVector() {
+      return lastVec ? lastVec.slice() : null;
+    }
+
+    /**
+     * Возвращает timestamp последнего поискового запроса.
+     * 
+     * @returns {number}
+     */
+    function getLastQueryTime() {
+      return lastQueryTime;
+    }
+
+    /**
+     * Очищает состояние стратегии.
+     * Вызывается при destroy().
+     * 
+     * @returns {void}
+     */
+    function cleanup() {
+      if (searchController) {
+        searchController.abort();
+        searchController = null;
+      }
+      lastVec = null;
+      lastQueryTime = 0;
+    }
+
+    /**
+     * Возвращает статистику стратегии.
+     * 
+     * @returns {{total: number, aborted: number, errors: number}}
+     */
+    function getStats() {
+      return {
+        total: stats.total,
+        aborted: stats.aborted,
+        errors: stats.errors
+      };
+    }
+
+    /**
+     * Сбрасывает статистику.
+     * 
+     * @returns {void}
+     */
+    function resetStats() {
+      stats.total = 0;
+      stats.aborted = 0;
+      stats.errors = 0;
+    }
+
+    /**
+     * Инициализация модуля.
+     * TextSearchStrategy не требует автоматической инициализации.
+     * 
+     * @param {AbortSignal} [signal] - Сигнал для автоочистки.
+     * @returns {void}
+     */
+    function init(signal) {
+      if (Logger) {
+        Logger.info('TextSearchStrategy', 'Initialized', {
+          maxResultsPerList: MAX_RESULTS_PER_LIST,
+          vectorSimilarityThreshold: Config 
+            ? Config.get('vectorSimilarityThreshold', 0.98) 
+            : 0.98
+        });
+      }
+    }
+
+    /**
+     * Уничтожение модуля.
+     * Отменяет активный поиск, очищает состояние.
+     * 
+     * @returns {void}
+     */
+    function destroy() {
+      cleanup();
+      resetStats();
+    }
+
+    return {
+      execute: execute,
+      getLastVector: getLastVector,
+      getLastQueryTime: getLastQueryTime,
+      cleanup: cleanup,
+      getStats: getStats,
+      resetStats: resetStats,
+      init: init,
+      destroy: destroy
+    };
+  }, ['Config', 'Logger', 'AI', 'NetTransport', 'NoteCache', 'StateManager']);
   /* <!-- MODULE: TextSearchStrategy --> */
 
   /* <!-- MODULE: FocusSearchStrategy --> */
