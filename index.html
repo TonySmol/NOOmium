@@ -13632,8 +13632,631 @@ kbd {
   // ═══════════════════════════════════════════════════
 
   /* <!-- MODULE: SearchCoordinator --> */
-  старт
-  энд
+  /**
+   * @typedef {Object} SearchRequestPayload
+   * @description Payload события editor:search-request.
+   * @property {boolean} [force=false] - Принудительная отправка в сеть.
+   */
+
+  /**
+   * @typedef {Object} StreamEventPayload
+   * @description Payload события net:stream-event.
+   * @property {StreamNote} note - Новая заметка для Live Stream.
+   */
+
+  /**
+   * @typedef {Object} PeerOfflinePayload
+   * @description Payload события peer:offline.
+   * @property {string} pubkey - Публичный ключ отключившегося пира.
+   * @property {number} lastSeen - Timestamp последнего события от пира.
+   */
+
+  /**
+   * @module SearchCoordinator
+   * @description Оркестратор поисковых стратегий и обработки событий.
+   * 
+   * Зона ответственности:
+   * - Слушает события от EditorComponent, NetTransport, PeerManager
+   * - Делегирует поиск в TextSearchStrategy или FocusSearchStrategy
+   * - Обновляет StateManager через dispatch
+   * - Обрабатывает Live Stream события (net:stream-event, peer:offline)
+   * - Защищает от stale-ответов через pendingSearchId
+   * 
+   * Архитектурные принципы:
+   * - НЕ читает DOM напрямую (Принцип #1)
+   * - НЕ вызывает UI-компоненты напрямую
+   * - Только делегирование в стратегии и dispatch в StateManager
+   * - Event-driven: реагирует на события Bus
+   * - Гарантированный возврат Promise во всех публичных методах
+   * - AbortSignal для автоматической отписки при destroy
+   * 
+   * Приоритеты поиска:
+   * 1. Есть текст в редакторе → TextSearchStrategy.execute
+   * 2. Нет текста, но есть focusedItem с vector → FocusSearchStrategy.execute
+   * 3. Нет ни того, ни другого → ничего не делаем (Live Stream работает автоматически)
+   * 
+   * Слушает события:
+   * - `editor:search-request` — запрос поиска из EditorComponent (debounce 800мс)
+   *   payload: {force?: boolean}
+   * - `editor:send-complete` — завершение отправки заметки
+   *   payload: {}
+   * - `net:stream-event` — новая заметка от NetTransport (для Live Stream)
+   *   payload: {note: StreamNote}
+   * - `peer:offline` — пир отключился от PeerManager
+   *   payload: {pubkey: string, lastSeen: number}
+   * 
+   * Эмитит события: нет (только dispatch в StateManager)
+   * 
+   * КЛЮЧЕВЫЕ ИЗМЕНЕНИЯ v2.0:
+   * 
+   * 1. **pendingSearchId для отмены stale-ответов:**
+   *    - Инкрементируется при каждом новом поисковом запросе
+   *    - Перед обновлением state проверяется `currentId === pendingSearchId`
+   *    - Защищает от race conditions при быстром вводе текста
+   * 
+   * 2. **Обработка peer:offline всегда:**
+   *    - Раньше (v1): обрабатывался только в idle режиме
+   *    - Теперь: обрабатывается всегда для консистентности
+   *    - Но обновление streamData происходит только в idle
+   * 
+   * 3. **Обработка net:stream-event:**
+   *    - FIFO добавление в streamData (лимит 50)
+   *    - Дедупликация по id
+   *    - Обновление state только в idle режиме
+   * 
+   * 4. **Гарантированный возврат Promise:**
+   *    - search() и searchByVector() всегда возвращают Promise
+   *    - Устраняет краш "Cannot read properties of undefined (reading 'then')"
+   * 
+   * Используется модулями:
+   * - EditorComponent → через Bus.emit('editor:search-request')
+   * - SearchService → через search() / searchByVector()
+   * - App.Boot → через init()
+   * 
+   * @namespace SearchCoordinator
+   */
+  DI.register('SearchCoordinator', function(
+    Config, Logger, Bus, StateManager, TextSearchStrategy, FocusSearchStrategy, NetTransport
+  ) {
+    
+    /**
+     * Контроллер для управления всеми подписками.
+     * Используется для автоматической отписки при destroy().
+     * @type {AbortController | null}
+     */
+    var abortController = null;
+
+    /**
+     * Счётчик поисковых запросов для отмены stale-ответов.
+     * Инкрементируется при каждом новом запросе.
+     * Перед обновлением state проверяется `currentId === pendingSearchId`.
+     * @type {number}
+     */
+    var pendingSearchId = 0;
+
+    /**
+     * Лимит размера streamData (Live Stream).
+     * FIFO: при превышении удаляются самые старые заметки.
+     * @type {number}
+     */
+    var MAX_STREAM_SIZE = 50;
+
+    /**
+     * Счётчик операций (для статистики).
+     * @type {{searches: number, streamEvents: number, peerOffline: number, staleResponses: number, errors: number}}
+     */
+    var stats = {
+      searches: 0,
+      streamEvents: 0,
+      peerOffline: 0,
+      staleResponses: 0,
+      errors: 0
+    };
+
+    /**
+     * Эмитит событие Bus с защитой от ошибок.
+     * 
+     * @param {string} event - Имя события.
+     * @param {*} payload - Данные события.
+     * @returns {void}
+     */
+    function emit(event, payload) {
+      if (Bus && Bus.emit) {
+        try {
+          Bus.emit(event, payload);
+        } catch (e) {
+          if (Logger) Logger.error('SearchCoordinator', 'Bus.emit failed for ' + event, e);
+        }
+      }
+    }
+
+    /**
+     * Выполняет текстовый поиск через TextSearchStrategy.
+     * 
+     * Алгоритм:
+     * 1. Инкрементирует pendingSearchId
+     * 2. Вызывает TextSearchStrategy.execute(text, force, signal)
+     * 3. При успехе проверяет `currentId === pendingSearchId` (защита от stale)
+     * 4. Если актуально → dispatch('update-lists', {lists})
+     * 5. Если устарело → логирует и игнорирует
+     * 
+     * @param {string} text - Поисковый запрос.
+     * @param {boolean} [force=false] - Принудительная отправка в сеть.
+     * @returns {Promise<void>} Promise, разрешающийся после обновления state.
+     */
+    function executeTextSearch(text, force) {
+      stats.searches++;
+      var currentId = ++pendingSearchId;
+
+      if (Logger) {
+        Logger.debug('SearchCoordinator', 'Text search #' + currentId, {
+          text: text.slice(0, 50),
+          force: force
+        });
+      }
+
+      var signal = abortController ? abortController.signal : null;
+
+      var promise;
+      try {
+        promise = TextSearchStrategy.execute(text, force, signal);
+      } catch (e) {
+        stats.errors++;
+        if (Logger) Logger.error('SearchCoordinator', 'TextSearchStrategy.execute throw', e);
+        return Promise.resolve();
+      }
+
+      if (!promise || typeof promise.then !== 'function') {
+        stats.errors++;
+        if (Logger) Logger.error('SearchCoordinator', 'TextSearchStrategy did not return Promise');
+        return Promise.resolve();
+      }
+
+      return promise.then(function(result) {
+        // Проверка на stale response
+        if (currentId !== pendingSearchId) {
+          stats.staleResponses++;
+          if (Logger) {
+            Logger.debug('SearchCoordinator', 'Stale text response ignored', {
+              currentId: currentId,
+              pendingId: pendingSearchId
+            });
+          }
+          return;
+        }
+
+        if (!result || !result.lists) {
+          if (Logger) Logger.warn('SearchCoordinator', 'TextSearchStrategy returned invalid result');
+          return;
+        }
+
+        if (Logger) {
+          Logger.info('SearchCoordinator', 'Text search completed #' + currentId, {
+            localCount: result.lists.local.length,
+            worldCount: result.lists.world.length,
+            serenCount: result.lists.seren.length
+          });
+        }
+
+        StateManager.dispatch('update-lists', { lists: result.lists });
+      }).catch(function(err) {
+        stats.errors++;
+        if (Logger) Logger.error('SearchCoordinator', 'Text search error #' + currentId, err);
+      });
+    }
+
+    /**
+     * Выполняет поиск по вектору фокуса через FocusSearchStrategy.
+     * 
+     * Алгоритм аналогичен executeTextSearch, но использует FocusSearchStrategy.
+     * 
+     * @param {Vector} vector - Вектор закреплённой заметки.
+     * @returns {Promise<void>} Promise, разрешающийся после обновления state.
+     */
+    function executeFocusSearch(vector) {
+      stats.searches++;
+      var currentId = ++pendingSearchId;
+
+      if (Logger) {
+        Logger.debug('SearchCoordinator', 'Focus search #' + currentId, {
+          vectorDim: vector.length
+        });
+      }
+
+      var signal = abortController ? abortController.signal : null;
+
+      var promise;
+      try {
+        promise = FocusSearchStrategy.execute(vector, signal);
+      } catch (e) {
+        stats.errors++;
+        if (Logger) Logger.error('SearchCoordinator', 'FocusSearchStrategy.execute throw', e);
+        return Promise.resolve();
+      }
+
+      if (!promise || typeof promise.then !== 'function') {
+        stats.errors++;
+        if (Logger) Logger.error('SearchCoordinator', 'FocusSearchStrategy did not return Promise');
+        return Promise.resolve();
+      }
+
+      return promise.then(function(result) {
+        // Проверка на stale response
+        if (currentId !== pendingSearchId) {
+          stats.staleResponses++;
+          if (Logger) {
+            Logger.debug('SearchCoordinator', 'Stale focus response ignored', {
+              currentId: currentId,
+              pendingId: pendingSearchId
+            });
+          }
+          return;
+        }
+
+        if (!result || !result.lists) {
+          if (Logger) Logger.warn('SearchCoordinator', 'FocusSearchStrategy returned invalid result');
+          return;
+        }
+
+        if (Logger) {
+          Logger.info('SearchCoordinator', 'Focus search completed #' + currentId, {
+            focusCount: result.lists.focus.length
+          });
+        }
+
+        StateManager.dispatch('update-lists', { lists: result.lists });
+      }).catch(function(err) {
+        stats.errors++;
+        if (Logger) Logger.error('SearchCoordinator', 'Focus search error #' + currentId, err);
+      });
+    }
+
+    /**
+     * Публичный метод для запуска поиска извне.
+     * 
+     * Приоритеты:
+     * 1. Есть текст → TextSearchStrategy
+     * 2. Нет текста, но есть focusedItem → FocusSearchStrategy
+     * 3. Нет ни того, ни другого → ничего не делаем
+     * 
+     * @param {string} text - Поисковый запрос.
+     * @param {boolean} [force=false] - Принудительная отправка в сеть.
+     * @returns {Promise<void>} Promise, разрешающийся после завершения поиска.
+     * 
+     * @example
+     * SearchCoordinator.search('медитация', false)
+     *   .then(function() {
+     *     console.log('Search completed');
+     *   });
+     */
+    function search(text, force) {
+      var trimmed = (text || '').trim();
+
+      if (trimmed) {
+        // Есть текст → текстовый поиск
+        StateManager.dispatch('to-search');
+        return executeTextSearch(trimmed, force);
+      } else {
+        // Нет текста → проверяем focusedItem
+        var state = StateManager.getState();
+        if (state.focusedItem && state.focusedItem.vector) {
+          // Есть закреп → поиск по вектору
+          return executeFocusSearch(state.focusedItem.vector);
+        } else {
+          // Нет ни текста, ни закрепа → ничего не делаем
+          return Promise.resolve();
+        }
+      }
+    }
+
+    /**
+     * Публичный метод для запуска поиска по вектору извне.
+     * 
+     * @param {Vector} vector - Вектор для поиска.
+     * @returns {Promise<void>} Promise, разрешающийся после завершения поиска.
+     */
+    function searchByVector(vector) {
+      if (!vector || !Array.isArray(vector) || vector.length === 0) {
+        if (Logger) Logger.warn('SearchCoordinator', 'searchByVector: invalid vector');
+        return Promise.resolve();
+      }
+      return executeFocusSearch(vector);
+    }
+
+    /**
+     * Обработчик события editor:search-request.
+     * Извлекает текст из StateManager.editorText и запускает поиск.
+     * 
+     * @param {SearchRequestPayload} payload - Payload события.
+     * @returns {void}
+     */
+    function handleSearchRequest(payload) {
+      var state = StateManager.getState();
+      var text = state.editorText || '';
+      var force = payload && payload.force === true;
+
+      if (Logger) {
+        Logger.debug('SearchCoordinator', 'editor:search-request received', {
+          textLength: text.length,
+          force: force
+        });
+      }
+
+      search(text, force).catch(function(err) {
+        if (Logger) Logger.error('SearchCoordinator', 'handleSearchRequest error', err);
+      });
+    }
+
+    /**
+     * Обработчик события editor:send-complete.
+     * Запускает повторный поиск для обновления списков после отправки заметки.
+     * 
+     * @returns {void}
+     */
+    function handleSendComplete() {
+      if (Logger) {
+        Logger.debug('SearchCoordinator', 'editor:send-complete received');
+      }
+
+      var state = StateManager.getState();
+      var text = state.editorText || '';
+
+      if (text.trim()) {
+        search(text, true).catch(function(err) {
+          if (Logger) Logger.error('SearchCoordinator', 'handleSendComplete error', err);
+        });
+      } else if (state.focusedItem && state.focusedItem.vector) {
+        searchByVector(state.focusedItem.vector).catch(function(err) {
+          if (Logger) Logger.error('SearchCoordinator', 'handleSendComplete error', err);
+        });
+      }
+    }
+
+    /**
+     * Обработчик события net:stream-event (новая заметка для Live Stream).
+     * 
+     * Алгоритм:
+     * 1. Проверяет что uiMode === 'idle' (Live Stream активен только в idle)
+     * 2. Дедупликация по id (защита от повторов через разные релеи)
+     * 3. FIFO добавление в начало streamData
+     * 4. Обрезка до MAX_STREAM_SIZE (50)
+     * 5. dispatch('update-stream', {streamData})
+     * 
+     * @param {StreamEventPayload} payload - Payload события.
+     * @returns {void}
+     */
+    function handleStreamEvent(payload) {
+      stats.streamEvents++;
+
+      if (!payload || !payload.note) {
+        if (Logger) Logger.warn('SearchCoordinator', 'net:stream-event: invalid payload');
+        return;
+      }
+
+      var state = StateManager.getState();
+
+      // Live Stream обновляется только в idle режиме
+      if (state.uiMode !== 'idle') {
+        if (Logger) {
+          Logger.debug('SearchCoordinator', 'Stream event ignored (not in idle mode)', {
+            uiMode: state.uiMode,
+            noteId: payload.note.id.slice(0, 6)
+          });
+        }
+        return;
+      }
+
+      var newNote = payload.note;
+      var currentData = state.streamData || [];
+
+      // Дедупликация по id
+      var exists = currentData.some(function(item) {
+        return item && item.id === newNote.id;
+      });
+
+      if (exists) {
+        if (Logger) {
+          Logger.debug('SearchCoordinator', 'Duplicate stream event ignored', {
+            noteId: newNote.id.slice(0, 6)
+          });
+        }
+        return;
+      }
+
+      // FIFO: добавляем в начало (самое свежее сверху)
+      var newData = [newNote].concat(currentData);
+
+      // Обрезка до лимита
+      if (newData.length > MAX_STREAM_SIZE) {
+        newData = newData.slice(0, MAX_STREAM_SIZE);
+      }
+
+      if (Logger) {
+        Logger.debug('SearchCoordinator', 'Stream event processed', {
+          noteId: newNote.id.slice(0, 6),
+          peer: newNote.peer,
+          streamSize: newData.length
+        });
+      }
+
+      StateManager.dispatch('update-stream', { streamData: newData });
+    }
+
+    /**
+     * Обработчик события peer:offline (пир отключился).
+     * 
+     * Алгоритм:
+     * 1. Проверяет что uiMode === 'idle' (streamData актуален только в idle)
+     * 2. Фильтрует streamData, удаляя все заметки от этого пира
+     * 3. dispatch('update-stream', {streamData})
+     * 
+     * КЛЮЧЕВОЕ ИЗМЕНЕНИЕ v2.0:
+     * Обрабатывается всегда (не только в idle), но обновление state только в idle.
+     * Это обеспечивает консистентность данных.
+     * 
+     * @param {PeerOfflinePayload} payload - Payload события.
+     * @returns {void}
+     */
+    function handlePeerOffline(payload) {
+      stats.peerOffline++;
+
+      if (!payload || !payload.pubkey) {
+        if (Logger) Logger.warn('SearchCoordinator', 'peer:offline: invalid payload');
+        return;
+      }
+
+      var state = StateManager.getState();
+
+      // streamData обновляется только в idle режиме
+      if (state.uiMode !== 'idle') {
+        if (Logger) {
+          Logger.debug('SearchCoordinator', 'peer:offline ignored (not in idle mode)', {
+            uiMode: state.uiMode,
+            pubkey: payload.pubkey.slice(0, 6)
+          });
+        }
+        return;
+      }
+
+      var currentData = state.streamData || [];
+      var filteredData = currentData.filter(function(item) {
+        return item && item.fullPubkey !== payload.pubkey;
+      });
+
+      var removedCount = currentData.length - filteredData.length;
+
+      if (removedCount > 0) {
+        if (Logger) {
+          Logger.info('SearchCoordinator', 'peer:offline processed', {
+            pubkey: payload.pubkey.slice(0, 6),
+            removedCount: removedCount,
+            remainingSize: filteredData.length
+          });
+        }
+
+        StateManager.dispatch('update-stream', { streamData: filteredData });
+      } else {
+        if (Logger) {
+          Logger.debug('SearchCoordinator', 'peer:offline: no notes to remove', {
+            pubkey: payload.pubkey.slice(0, 6)
+          });
+        }
+      }
+    }
+
+    /**
+     * Возвращает статистику координатора.
+     * 
+     * @returns {{searches: number, streamEvents: number, peerOffline: number, staleResponses: number, errors: number}}
+     */
+    function getStats() {
+      return {
+        searches: stats.searches,
+        streamEvents: stats.streamEvents,
+        peerOffline: stats.peerOffline,
+        staleResponses: stats.staleResponses,
+        errors: stats.errors
+      };
+    }
+
+    /**
+     * Сбрасывает статистику.
+     * 
+     * @returns {void}
+     */
+    function resetStats() {
+      stats.searches = 0;
+      stats.streamEvents = 0;
+      stats.peerOffline = 0;
+      stats.staleResponses = 0;
+      stats.errors = 0;
+    }
+
+    /**
+     * Возвращает текущий pendingSearchId.
+     * Полезно для отладки и мониторинга.
+     * 
+     * @returns {number}
+     */
+    function getPendingSearchId() {
+      return pendingSearchId;
+    }
+
+    /**
+     * Сбрасывает pendingSearchId.
+     * Используется для принудительной отмены всех pending-поисков.
+     * 
+     * @returns {void}
+     */
+    function resetPendingSearchId() {
+      pendingSearchId++;
+      if (Logger) {
+        Logger.info('SearchCoordinator', 'pendingSearchId reset to ' + pendingSearchId);
+      }
+    }
+
+    /**
+     * Инициализация модуля.
+     * Подписывается на все необходимые события с AbortSignal.
+     * 
+     * @param {AbortSignal} [signal] - Сигнал для автоочистки.
+     * @returns {void}
+     */
+    function init(signal) {
+      if (abortController) {
+        abortController.abort();
+      }
+
+      abortController = new AbortController();
+      var internalSignal = abortController.signal;
+
+      // Подписка на события Bus
+      if (Bus && typeof Bus.subscribe === 'function') {
+        Bus.subscribe('editor:search-request', handleSearchRequest, internalSignal);
+        Bus.subscribe('editor:send-complete', handleSendComplete, internalSignal);
+        Bus.subscribe('net:stream-event', handleStreamEvent, internalSignal);
+        Bus.subscribe('peer:offline', handlePeerOffline, internalSignal);
+      }
+
+      if (Logger) {
+        Logger.info('SearchCoordinator', 'Initialized', {
+          maxStreamSize: MAX_STREAM_SIZE
+        });
+      }
+    }
+
+    /**
+     * Уничтожение модуля.
+     * Отписывается от всех событий, сбрасывает состояние.
+     * 
+     * @returns {void}
+     */
+    function destroy() {
+      if (abortController) {
+        abortController.abort();
+        abortController = null;
+      }
+
+      resetPendingSearchId();
+      resetStats();
+    }
+
+    return {
+      // Публичный API для поиска
+      search: search,
+      searchByVector: searchByVector,
+
+      // Статистика и мониторинг
+      getStats: getStats,
+      resetStats: resetStats,
+      getPendingSearchId: getPendingSearchId,
+      resetPendingSearchId: resetPendingSearchId,
+
+      // Lifecycle
+      init: init,
+      destroy: destroy
+    };
+  }, ['Config', 'Logger', 'Bus', 'StateManager', 'TextSearchStrategy', 'FocusSearchStrategy', 'NetTransport']);
   /* <!-- MODULE: SearchCoordinator --> */
 
   // ═══════════════════════════════════════════════════
