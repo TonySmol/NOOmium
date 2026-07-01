@@ -7540,21 +7540,24 @@ DI.register('Utils', function() {
     /**
      * Получает публичный ключ из приватного через nostr-tools.
      * 
+     * ИСПРАВЛЕНИЕ v2.0.1:
+     * Ранее пытался получить nostr-tools через NetTransport._nostr (несуществующее свойство).
+     * Теперь использует корректный API NetTransport.getNostrTools().
+     * 
      * @param {string} hexKey - Приватный ключ в hex-формате.
      * @returns {string | null} Публичный ключ или null при ошибке.
      */
     function getPubkeyFromHex(hexKey) {
       try {
         var NetTransport = DI.resolve('NetTransport');
-        if (!NetTransport) return null;
+        if (!NetTransport || typeof NetTransport.getNostrTools !== 'function') {
+          if (Logger) Logger.warn('AuthService', 'NetTransport.getNostrTools not available');
+          return null;
+        }
         
-        var nostr = null;
-        try {
-          var mod = NetTransport;
-          if (mod && mod._nostr) nostr = mod._nostr;
-        } catch (e) { /* ignore */ }
-        
+        var nostr = NetTransport.getNostrTools();
         if (!nostr || typeof nostr.getPublicKey !== 'function') {
+          if (Logger) Logger.warn('AuthService', 'nostr-tools not loaded in NetTransport');
           return null;
         }
         
