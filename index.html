@@ -19173,8 +19173,477 @@ kbd {
   /* <!-- MODULE: Modal --> */
 
   /* <!-- MODULE: Toast --> */
-  старт
-  энд
+  /**
+   * @typedef {'ok' | 'err' | 'warn' | 'info'} ToastType
+   * @description Тип отображаемого уведомления.
+   * - `ok` — успех (зелёная иконка ✓)
+   * - `err` — ошибка (красная иконка ×)
+   * - `warn` — предупреждение (жёлтая иконка !)
+   * - `info` — информация (синяя иконка ◆)
+   */
+
+  /**
+   * @typedef {Object} ToastRecord
+   * @description Внутренняя запись о показанном тосте.
+   * @property {HTMLDivElement} element - DOM-элемент тоста.
+   * @property {number} timer - ID таймера авто-скрытия.
+   * @property {number} createdAt - Timestamp создания.
+   */
+
+  /**
+   * @module Toast
+   * @description Компонент уведомлений (toast notifications).
+   * 
+   * Зона ответственности:
+   * - Показ кратковременных уведомлений пользователю
+   * - Лимит одновременно видимых тостов (по умолчанию 3)
+   * - Автоматическое скрытие через заданное время
+   * - Плавная анимация появления и исчезновения
+   * - Четыре типа уведомлений с разной иконкой и цветом
+   * - FIFO удаление при превышении лимита
+   * 
+   * Архитектурные принципы:
+   * - НЕ знает о бизнес-логике (только отображение)
+   * - Lazy creation контейнера (создаётся при первом show)
+   * - XSS-safe: textContent для всех текстовых вставок
+   * - Whitelist валидация типов тостов
+   * - Проверка parentNode перед DOM-операциями (защита от refreshUI)
+   * - AbortSignal для автоматической отписки при destroy
+   * - Автоматическая очистка таймеров при уничтожении
+   * 
+   * Визуальное оформление:
+   * - Позиционирование: fixed, bottom: calc(80px + safe-bot), center
+   * - Flex column-reverse: новые тосты снизу
+   * - Анимация появления: fade + translateY
+   * - Анимация скрытия: opacity → 0
+   * - Box shadow для визуального отделения
+   * - Минимальная высота 36px, nowrap
+   * 
+   * Слушает события:
+   * - `toast:show` — запрос на показ уведомления
+   *   payload: {type: ToastType, msg: string, duration?: number}
+   * 
+   * Используется модулями:
+   * - EditorComponent → Toast.show('err', 'напишите что-нибудь')
+   * - SearchService → Toast.show('ok', 'опубликовано')
+   * - StreamViewComponent → Toast.show('ok', 'скопировано')
+   * - BaseViewComponent → Toast.show('ok', '✓ 142')
+   * - UI.Menu → Toast.show('info', 'перезапуск сети...')
+   * - AuthService → Toast.show('err', 'Неверный пароль')
+   * 
+   * @namespace Toast
+   */
+  DI.register('Toast', function(Config, Logger, Bus) {
+    
+    /**
+     * DOM-контейнер для тостов.
+     * Создаётся лениво при первом show(), переиспользуется.
+     * Проверяется parentNode при каждом обращении (защита от refreshUI).
+     * @type {HTMLDivElement | null}
+     */
+    var container = null;
+
+    /**
+     * Массив активных тостов для FIFO управления лимитом.
+     * @type {ToastRecord[]}
+     */
+    var activeToasts = [];
+
+    /**
+     * Контроллер для автоматической отписки при destroy.
+     * @type {AbortController | null}
+     */
+    var abortController = null;
+
+    /**
+     * Whitelist валидных типов тостов.
+     * Используется для защиты от injection через внешние данные.
+     * @type {Set<ToastType>}
+     */
+    var VALID_TYPES = new Set(['ok', 'err', 'warn', 'info']);
+
+    /**
+     * Словарь иконок для каждого типа тоста.
+     * @type {Object<ToastType, string>}
+     */
+    var ICONS = {
+      ok: '✓',
+      err: '×',
+      warn: '!',
+      info: '◆'
+    };
+
+    /**
+     * Счётчик показанных тостов (для статистики).
+     * @type {{ok: number, err: number, warn: number, info: number, total: number}}
+     */
+    var stats = {
+      ok: 0,
+      err: 0,
+      warn: 0,
+      info: 0,
+      total: 0
+    };
+
+    /**
+     * Создаёт DOM-контейнер для тостов при первом обращении.
+     * 
+     * Проверяет, что контейнер существует и не был удалён из DOM
+     * (например, при refreshUI во время смены языка).
+     * 
+     * Контейнер позиционируется фиксированно внизу экрана
+     * через CSS класс .tc (определён в глобальных стилях).
+     * 
+     * @returns {void}
+     */
+    function ensureContainer() {
+      if (container && container.parentNode) return;
+      
+      if (typeof document === 'undefined') return;
+      
+      // Ищем существующий контейнер (может быть создан в UI.Layout)
+      var existing = document.querySelector('.tc');
+      if (existing) {
+        container = existing;
+        return;
+      }
+      
+      // Создаём новый контейнер
+      container = document.createElement('div');
+      container.className = 'tc';
+      document.body.appendChild(container);
+    }
+
+    /**
+     * Удаляет тост из DOM и массива активных.
+     * 
+     * @param {ToastRecord} record - Запись тоста для удаления.
+     * @returns {void}
+     */
+    function removeToast(record) {
+      if (!record) return;
+      
+      // Очистка таймера
+      if (record.timer) {
+        clearTimeout(record.timer);
+        record.timer = null;
+      }
+      
+      // Удаление из DOM
+      if (record.element && record.element.parentNode) {
+        try {
+          record.element.parentNode.removeChild(record.element);
+        } catch (e) {
+          // Игнорируем ошибки удаления
+        }
+      }
+      
+      // Удаление из массива активных
+      var idx = activeToasts.indexOf(record);
+      if (idx > -1) {
+        activeToasts.splice(idx, 1);
+      }
+    }
+
+    /**
+     * Показывает всплывающее уведомление (тост).
+     * 
+     * Алгоритм:
+     * 1. Валидация типа через whitelist
+     * 2. ensureContainer() — создание контейнера если нужно
+     * 3. Создание DOM-элемента тоста (createElement + textContent)
+     * 4. Добавление в контейнер
+     * 5. FIFO удаление старых тостов при превышении лимита
+     * 6. Планирование авто-скрытия с анимацией
+     * 
+     * @param {ToastType} type - Тип уведомления.
+     * @param {string} msg - Текст уведомления.
+     * @param {number} [duration] - Длительность показа в мс (fallback на Config).
+     * @returns {void}
+     * 
+     * @example
+     * Toast.show('ok', 'сохранено');
+     * Toast.show('err', 'ошибка сети', 5000);
+     * Toast.show('warn', 'превышен лимит');
+     * Toast.show('info', 'перезапуск сети...');
+     */
+    function show(type, msg, duration) {
+      stats.total++;
+      
+      // Валидация типа через whitelist
+      var safeType = VALID_TYPES.has(type) ? type : 'info';
+      stats[safeType]++;
+      
+      // Валидация сообщения
+      if (msg === null || msg === undefined) {
+        msg = '';
+      }
+      var text = String(msg);
+      
+      // Создание контейнера
+      ensureContainer();
+      if (!container) {
+        if (Logger) Logger.error('Toast', 'Failed to create container');
+        return;
+      }
+      
+      // Создание DOM-элемента тоста
+      var el = document.createElement('div');
+      el.className = 'tt ' + safeType;
+      
+      var ic = document.createElement('span');
+      ic.className = 'tt-ic';
+      ic.textContent = ICONS[safeType] || ICONS.info;
+      
+      var m = document.createElement('span');
+      m.textContent = text;
+      
+      el.appendChild(ic);
+      el.appendChild(m);
+      container.appendChild(el);
+      
+      // Запись для отслеживания
+      var record = {
+        element: el,
+        timer: null,
+        createdAt: Date.now()
+      };
+      activeToasts.push(record);
+      
+      // FIFO удаление старых тостов при превышении лимита
+      var limit = Config ? Config.get('toastMaxVisible', 3) : 3;
+      while (activeToasts.length > limit) {
+        var oldest = activeToasts[0];
+        removeToast(oldest);
+      }
+      
+      // Планирование авто-скрытия с анимацией
+      var hideDuration = duration || (Config ? Config.get('toastDefaultDuration', 2200) : 2200);
+      
+      record.timer = setTimeout(function() {
+        // Анимация исчезновения
+        el.style.transition = 'opacity .2s';
+        el.style.opacity = '0';
+        
+        // Удаление из DOM после завершения анимации
+        setTimeout(function() {
+          removeToast(record);
+        }, 200);
+      }, hideDuration);
+      
+      if (Logger) {
+        Logger.debug('Toast', 'Shown', {
+          type: safeType,
+          text: text.slice(0, 50),
+          duration: hideDuration,
+          activeCount: activeToasts.length
+        });
+      }
+    }
+
+    /**
+     * Показывает уведомление об успехе.
+     * Convenience метод для show('ok', ...).
+     * 
+     * @param {string} msg - Текст уведомления.
+     * @param {number} [duration] - Длительность показа в мс.
+     * @returns {void}
+     */
+    function success(msg, duration) {
+      show('ok', msg, duration);
+    }
+
+    /**
+     * Показывает уведомление об ошибке.
+     * Convenience метод для show('err', ...).
+     * 
+     * @param {string} msg - Текст уведомления.
+     * @param {number} [duration] - Длительность показа в мс.
+     * @returns {void}
+     */
+    function error(msg, duration) {
+      show('err', msg, duration);
+    }
+
+    /**
+     * Показывает предупреждение.
+     * Convenience метод для show('warn', ...).
+     * 
+     * @param {string} msg - Текст уведомления.
+     * @param {number} [duration] - Длительность показа в мс.
+     * @returns {void}
+     */
+    function warning(msg, duration) {
+      show('warn', msg, duration);
+    }
+
+    /**
+     * Показывает информационное уведомление.
+     * Convenience метод для show('info', ...).
+     * 
+     * @param {string} msg - Текст уведомления.
+     * @param {number} [duration] - Длительность показа в мс.
+     * @returns {void}
+     */
+    function info(msg, duration) {
+      show('info', msg, duration);
+    }
+
+    /**
+     * Немедленно удаляет все активные тосты.
+     * Вызывается при destroy() или глобальном reset.
+     * 
+     * @returns {number} Количество удалённых тостов.
+     */
+    function clearAll() {
+      var count = activeToasts.length;
+      
+      // Копируем массив, так как removeToast модифицирует activeToasts
+      var toRemove = activeToasts.slice();
+      
+      for (var i = 0; i < toRemove.length; i++) {
+        removeToast(toRemove[i]);
+      }
+      
+      if (Logger && count > 0) {
+        Logger.info('Toast', 'All toasts cleared', { count: count });
+      }
+      
+      return count;
+    }
+
+    /**
+     * Возвращает количество активных (видимых) тостов.
+     * 
+     * @returns {number}
+     */
+    function getActiveCount() {
+      return activeToasts.length;
+    }
+
+    /**
+     * Обработчик события toast:show.
+     * Делегирует в show() с валидацией payload.
+     * 
+     * @param {Object} payload - Payload события.
+     * @param {ToastType} payload.type - Тип уведомления.
+     * @param {string} payload.msg - Текст уведомления.
+     * @param {number} [payload.duration] - Длительность показа в мс.
+     * @returns {void}
+     */
+    function handleToastShow(payload) {
+      if (!payload) return;
+      
+      var type = payload.type || 'info';
+      var msg = payload.msg || '';
+      var duration = payload.duration;
+      
+      show(type, msg, duration);
+    }
+
+    /**
+     * Возвращает статистику компонента.
+     * 
+     * @returns {{ok: number, err: number, warn: number, info: number, total: number, active: number}}
+     */
+    function getStats() {
+      return {
+        ok: stats.ok,
+        err: stats.err,
+        warn: stats.warn,
+        info: stats.info,
+        total: stats.total,
+        active: activeToasts.length
+      };
+    }
+
+    /**
+     * Сбрасывает статистику.
+     * 
+     * @returns {void}
+     */
+    function resetStats() {
+      stats.ok = 0;
+      stats.err = 0;
+      stats.warn = 0;
+      stats.info = 0;
+      stats.total = 0;
+    }
+
+    /**
+     * Инициализация модуля.
+     * Подписывается на событие toast:show с AbortSignal.
+     * 
+     * @param {AbortSignal} [signal] - Сигнал для автоочистки.
+     * @returns {void}
+     */
+    function init(signal) {
+      if (abortController) {
+        abortController.abort();
+      }
+
+      abortController = new AbortController();
+      var internalSignal = abortController.signal;
+
+      // Подписка на событие toast:show
+      if (Bus && typeof Bus.subscribe === 'function') {
+        Bus.subscribe('toast:show', handleToastShow, internalSignal);
+      }
+
+      if (Logger) {
+        Logger.info('Toast', 'Initialized', {
+          maxVisible: Config ? Config.get('toastMaxVisible', 3) : 3,
+          defaultDuration: Config ? Config.get('toastDefaultDuration', 2200) : 2200
+        });
+      }
+    }
+
+    /**
+     * Уничтожение модуля.
+     * Удаляет все активные тосты, отписывается от событий.
+     * 
+     * @returns {void}
+     */
+    function destroy() {
+      // Удаление всех активных тостов (с очисткой таймеров)
+      clearAll();
+      
+      // Отписка от событий
+      if (abortController) {
+        abortController.abort();
+        abortController = null;
+      }
+      
+      // Очистка ссылки на контейнер (но не удаление из DOM,
+      // так как он мог быть создан в UI.Layout)
+      container = null;
+      
+      resetStats();
+    }
+
+    return {
+      // Основной API
+      show: show,
+      
+      // Convenience методы
+      success: success,
+      error: error,
+      warning: warning,
+      info: info,
+      
+      // Управление
+      clearAll: clearAll,
+      getActiveCount: getActiveCount,
+      
+      // Статистика
+      getStats: getStats,
+      resetStats: resetStats,
+      
+      // Lifecycle
+      init: init,
+      destroy: destroy
+    };
+  }, ['Config', 'Logger', 'Bus']);
   /* <!-- MODULE: Toast --> */
 
   /* <!-- MODULE: Progress --> */
