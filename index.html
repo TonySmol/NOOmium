@@ -16546,8 +16546,1388 @@ kbd {
   /* <!-- MODULE: StreamViewComponent --> */
 
   /* <!-- MODULE: BaseViewComponent --> */
-  старт
-  энд
+  /**
+   * @typedef {Object} BaseViewState
+   * @description Внутреннее состояние компонента вкладки "База".
+   * @property {Note[]} filteredNotes - Отфильтрованный и отсортированный массив заметок.
+   * @property {Array<{element: HTMLDivElement, dataIndex: number}>} poolItems - Пул DOM-элементов виртуального скролла.
+   * @property {HTMLDivElement|null} listContainer - Ссылка на контейнер списка.
+   * @property {HTMLDivElement|null} activeNoteView - Ссылка на активный оверлей NoteView.
+   * @property {AbortController|null} abortController - Контроллер для автоотписки.
+   * @property {function():void|null} stateUnsubscribe - Функция отписки от StateManager.
+   * @property {number|null} scrollRAF - ID requestAnimationFrame для throttling скролла.
+   */
+
+  /**
+   * @typedef {Object} NoteViewElements
+   * @description DOM-элементы NoteView для передачи в обработчики.
+   * @property {HTMLDivElement} overlay - Корневой оверлей NoteView.
+   * @property {HTMLTextAreaElement} textarea - Поле редактирования текста.
+   * @property {Note} record - Данные заметки.
+   */
+
+  /**
+   * @module BaseViewComponent
+   * @description Компонент вкладки "База" — локальное хранилище заметок.
+   * 
+   * Зона ответственности:
+   * - Статистика базы (всего / открыто / лично)
+   * - Текстовый поиск по заметкам с debounce
+   * - Сортировка (новые / старые / а-я)
+   * - Виртуальный скролл для больших баз (100,000+ заметок)
+   * - NoteView — полноэкранное редактирование локальных заметок
+   * - Навигация по Parent/Child связям
+   * - Экспорт/импорт данных в JSON
+   * - Удаление заметок и toggle shared
+   * 
+   * Архитектурные принципы:
+   * - НЕ читает DOM для бизнес-логики (Принцип #1)
+   * - Использует NoteCache.getAll() как источник данных
+   * - Виртуальный скролл через пул из POOL_SIZE DOM-элементов
+   * - DocumentFragment для создания статистики (XSS-safe)
+   * - textContent для всех текстовых вставок
+   * - AbortSignal для автоматической отписки при destroy
+   * - LayoutMetrics для ROW_SIZE (высота + gap)
+   * 
+   * Виртуальный скролл:
+   * - POOL_SIZE = 15 DOM-элементов переиспользуются
+   * - При скролле вычисляется видимая область: startIdx = floor(scrollTop / ROW_SIZE)
+   * - Элементы пула позиционируются через transform: translateY
+   * - За пределами видимой области → translateY(-9999px)
+   * 
+   * NoteView:
+   * - Открывается только для локальных заметок из БД
+   * - Если заметки нет → тост "Note not found"
+   * - Escape handler привязан к конкретному overlay
+   * - Навигация по parentId через рекурсивные openNoteView()
+   * 
+   * Экспорт/импорт:
+   * - Экспорт: все заметки в JSON с метаданными (app, format, version, exportedAt)
+   * - Импорт: валидация структуры, очистка невалидных записей
+   * - Fallback на DB.all() при ошибке NoteCache
+   * 
+   * Слушает события:
+   * - `state:changed` — изменение состояния (перерисовка при переключении на вкладку)
+   * - `i18n:change` — смена языка (обновление переводов)
+   * - `state:lists-changed` — изменение списков (обновление статистики)
+   * - `view:changed` — смена активной вкладки (рендеринг при активации)
+   * - `editor:edit-note` — редактирование заметки из карусели
+   * - `base:show-children` — показ дочерних заметок
+   * 
+   * Эмитит события:
+   * - `editor:search-request` — повторный поиск после мутации
+   * - `state:lists-changed` — уведомление об изменении
+   * - `base:show-children` — запрос на показ дочерних заметок
+   * 
+   * Использует сервисы:
+   * - `NoteCache.getAll()` — получение всех заметок
+   * - `DB.del(id)` — удаление заметки
+   * - `DB.put(note)` — сохранение изменений
+   * - `DB.get(id)` — получение заметки по ID
+   * - `DB.bulkPut(notes)` — массовая вставка при импорте
+   * - `DB.reset()` — полная очистка при wipe
+   * - `AI.embed(text)` — вычисление вектора при редактировании
+   * - `Toast.show()` — уведомления
+   * - `LayoutMetrics` — ROW_SIZE для виртуального скролла
+   * 
+   * @namespace BaseViewComponent
+   */
+  DI.register('BaseViewComponent', function(
+    Config, Logger, Bus, I18n, Utils, StateManager, DB, AI,
+    Toast, SearchService, LayoutMetrics, NoteCache
+  ) {
+    
+    /**
+     * Количество DOM-элементов в пуле для виртуального рендеринга.
+     * Оптимально для экранов мобильных устройств (3-4 видимых + буфер).
+     * @type {number}
+     */
+    var POOL_SIZE = 15;
+
+    /**
+     * Внутреннее состояние компонента.
+     * @type {BaseViewState}
+     */
+    var state = {
+      filteredNotes: [],
+      poolItems: [],
+      listContainer: null,
+      activeNoteView: null,
+      abortController: null,
+      stateUnsubscribe: null,
+      scrollRAF: null
+    };
+
+    /**
+     * Счётчик рендеров (для статистики).
+     * @type {number}
+     */
+    var renderCount = 0;
+
+    /**
+     * Счётчик операций (для статистики).
+     * @type {{deletes: number, edits: number, toggles: number, exports: number, imports: number}}
+     */
+    var opStats = {
+      deletes: 0,
+      edits: 0,
+      toggles: 0,
+      exports: 0,
+      imports: 0
+    };
+
+    /**
+     * Создаёт DOM-элемент карточки статистики.
+     * 
+     * @param {number|string} value - Значение (число или строка).
+     * @param {string} label - Подпись (локализованная).
+     * @returns {HTMLDivElement} Элемент статистики.
+     */
+    function buildStatCard(value, label) {
+      var card = document.createElement('div');
+      card.className = 'stat';
+      
+      var valueEl = document.createElement('div');
+      valueEl.className = 'stat-v';
+      valueEl.textContent = String(value);
+      card.appendChild(valueEl);
+      
+      var labelEl = document.createElement('div');
+      labelEl.className = 'stat-l';
+      labelEl.textContent = label;
+      card.appendChild(labelEl);
+      
+      return card;
+    }
+
+    /**
+     * Создаёт DOM-структуру пустого состояния (empty state).
+     * 
+     * @param {string} icon - Символ иконки (например, '▤').
+     * @param {string} title - Заголовок.
+     * @param {string} description - Описание.
+     * @returns {HTMLDivElement} Элемент empty state.
+     */
+    function buildEmptyState(icon, title, description) {
+      var emptyDiv = document.createElement('div');
+      emptyDiv.className = 'feed-empty';
+      
+      var icEl = document.createElement('div');
+      icEl.className = 'feed-empty-ic';
+      icEl.textContent = icon;
+      emptyDiv.appendChild(icEl);
+      
+      var titleEl = document.createElement('div');
+      titleEl.className = 'feed-empty-t';
+      titleEl.textContent = title;
+      emptyDiv.appendChild(titleEl);
+      
+      var descEl = document.createElement('div');
+      descEl.className = 'feed-empty-d';
+      descEl.textContent = description;
+      emptyDiv.appendChild(descEl);
+      
+      return emptyDiv;
+    }
+
+    /**
+     * Заполняет DOM-элемент пула данными конкретной заметки.
+     * 
+     * Структура карточки:
+     * <div class="bi [shared]" data-id="{id}">
+     *   <div class="bi-t [truncated]">{text}</div>
+     *   <div class="bi-f">
+     *     <div class="bi-meta">
+     *       <span class="bi-tag">{private/shared}</span>
+     *       [parentLink]
+     *       [childCount]
+     *       <span class="bi-date">{date}</span>
+     *     </div>
+     *   </div>
+     * </div>
+     * 
+     * XSS-safe:
+     * - textContent для всех текстов
+     * - Нет innerHTML с user-data
+     * 
+     * @param {HTMLDivElement} element - Целевой DOM-узел из пула.
+     * @param {Note} note - Данные заметки (локальная).
+     * @returns {void}
+     */
+    function fillBaseItem(element, note) {
+      // Очистка предыдущего содержимого
+      while (element.firstChild) {
+        element.removeChild(element.firstChild);
+      }
+      
+      element.className = 'bi' + (note.shared ? ' shared' : '');
+      element.setAttribute('data-id', note.id);
+
+      // Текст заметки с truncation
+      var truncateLength = Config ? Config.get('truncateTextLength', 120) : 120;
+      var textEl = document.createElement('div');
+      textEl.className = 'bi-t' + (note.text && note.text.length > truncateLength ? ' truncated' : '');
+      textEl.textContent = note.text || '';
+      element.appendChild(textEl);
+
+      // Footer с метаданными
+      var foot = document.createElement('div');
+      foot.className = 'bi-f';
+      
+      var meta = document.createElement('div');
+      meta.className = 'bi-meta';
+      
+      // Тег (private/shared)
+      var tagEl = document.createElement('span');
+      tagEl.className = 'bi-tag';
+      tagEl.textContent = note.shared
+        ? (I18n ? I18n.t('base.tag.shared') : 'открыто')
+        : (I18n ? I18n.t('base.tag.private') : 'лично');
+      meta.appendChild(tagEl);
+
+      // Ссылка на родителя (только для локальных)
+      if (note.parentId) {
+        var parentLink = document.createElement('a');
+        parentLink.href = '#';
+        parentLink.className = 'fi-parent';
+        parentLink.setAttribute('data-parent-id', note.parentId);
+        parentLink.textContent = '↳ ' + (I18n ? I18n.t('note.parent') : 'В ответ на');
+        
+        parentLink.onclick = function(e) {
+          e.preventDefault();
+          e.stopPropagation();
+          openNoteView(note.parentId);
+        };
+        
+        meta.appendChild(parentLink);
+      }
+
+      // Индикатор дочерних ответов
+      if (note.children && note.children.length > 0) {
+        var childLink = document.createElement('a');
+        childLink.href = '#';
+        childLink.className = 'fi-children';
+        childLink.textContent = '💬 ' + note.children.length;
+        
+        childLink.onclick = function(e) {
+          e.preventDefault();
+          e.stopPropagation();
+          
+          if (Bus && Bus.emit) {
+            try {
+              Bus.emit('base:show-children', {
+                parentId: note.id,
+                children: note.children
+              });
+            } catch (err) {
+              if (Logger) Logger.error('BaseViewComponent', 'Bus.emit base:show-children failed', err);
+            }
+          }
+        };
+        
+        meta.appendChild(childLink);
+      }
+
+      // Дата создания/редактирования
+      var dateEl = document.createElement('span');
+      dateEl.className = 'bi-date';
+      
+      var lang = I18n ? I18n.getLang() : 'ru';
+      var ts = (note.updatedAt && note.updatedAt > note.createdAt) ? note.updatedAt : note.createdAt;
+      var prefix = (note.updatedAt && note.updatedAt > note.createdAt)
+        ? (lang === 'ru' ? 'Ред. ' : 'Edit. ')
+        : '';
+      
+      dateEl.textContent = prefix + Utils.fmtTime(ts, lang) + ' ' + Utils.fmtDate(ts, lang);
+      
+      meta.appendChild(dateEl);
+      foot.appendChild(meta);
+      element.appendChild(foot);
+    }
+
+    /**
+     * Вычисляет видимую область и обновляет содержимое/позицию элементов пула.
+     * 
+     * Алгоритм виртуального скролла:
+     * 1. Получить scrollTop контейнера
+     * 2. Вычислить startIdx = floor(scrollTop / ROW_SIZE)
+     * 3. Clamp startIdx в диапазон [0, filteredNotes.length - POOL_SIZE]
+     * 4. Для каждого элемента пула:
+     *    a. dataIndex = startIdx + i
+     *    b. Если dataIndex в диапазоне → fillBaseItem + translateY(dataIndex * ROW_SIZE)
+     *    c. Иначе → очистить + translateY(-9999px)
+     * 
+     * @returns {void}
+     */
+    function updateVisibleItems() {
+      if (!state.listContainer || state.poolItems.length === 0) return;
+      
+      var scrollTop = state.listContainer.scrollTop;
+      var ROW_SIZE = LayoutMetrics ? LayoutMetrics.getBaseRowSize() : 108;
+      var startIdx = Math.floor(scrollTop / ROW_SIZE);
+      var maxStart = Math.max(0, state.filteredNotes.length - POOL_SIZE);
+      
+      if (startIdx > maxStart) {
+        startIdx = maxStart;
+      }
+
+      for (var i = 0; i < state.poolItems.length; i++) {
+        var poolItem = state.poolItems[i];
+        var dataIdx = startIdx + i;
+
+        if (dataIdx >= 0 && dataIdx < state.filteredNotes.length) {
+          // Элемент в видимой области
+          if (poolItem.dataIndex !== dataIdx) {
+            fillBaseItem(poolItem.element, state.filteredNotes[dataIdx]);
+            poolItem.dataIndex = dataIdx;
+          }
+          poolItem.element.style.transform = 'translateY(' + (dataIdx * ROW_SIZE) + 'px)';
+        } else {
+          // Элемент за пределами видимой области
+          if (poolItem.dataIndex !== -1) {
+            while (poolItem.element.firstChild) {
+              poolItem.element.removeChild(poolItem.element.firstChild);
+            }
+            poolItem.element.className = 'bi';
+            poolItem.element.removeAttribute('data-id');
+            poolItem.dataIndex = -1;
+          }
+          poolItem.element.style.transform = 'translateY(-9999px)';
+        }
+      }
+    }
+
+    /**
+     * Обработчик скролла списка (throttled через requestAnimationFrame).
+     * 
+     * @returns {void}
+     */
+    function onListScroll() {
+      if (state.scrollRAF) return;
+      
+      state.scrollRAF = requestAnimationFrame(function() {
+        updateVisibleItems();
+        state.scrollRAF = null;
+      });
+    }
+
+    /**
+     * Полностью перерисовывает вкладку "База".
+     * 
+     * Алгоритм:
+     * 1. Получить все заметки через NoteCache.getAll()
+     * 2. Обновить статистику (всего / открыто / лично)
+     * 3. Применить фильтр (текстовый поиск)
+     * 4. Применить сортировку (новые / старые / а-я)
+     * 5. Если filteredNotes пуст → показать empty state
+     * 6. Иначе → создать spacer + items container + пул элементов
+     * 7. Привязать scroll listener
+     * 8. Вызвать updateVisibleItems()
+     * 
+     * @returns {void}
+     */
+    function renderBase() {
+      state.listContainer = document.getElementById('base-list');
+      if (!state.listContainer) return;
+
+      renderCount++;
+
+      // Снимаем старый scroll listener перед пересозданием
+      state.listContainer.removeEventListener('scroll', onListScroll);
+      if (state.scrollRAF) {
+        cancelAnimationFrame(state.scrollRAF);
+        state.scrollRAF = null;
+      }
+
+      var queryInput = document.getElementById('base-q');
+      var sortSelect = document.getElementById('base-sort');
+      var queryValue = queryInput ? queryInput.value.trim().toLowerCase() : '';
+      var sortValue = sortSelect ? sortSelect.value : 'new';
+
+      // Получение всех заметок
+      var notesPromise;
+      if (NoteCache && NoteCache.getAll) {
+        notesPromise = NoteCache.getAll();
+      } else if (DB && DB.all) {
+        notesPromise = DB.all();
+      } else {
+        notesPromise = Promise.resolve([]);
+      }
+
+      notesPromise.then(function(allNotes) {
+        if (!Array.isArray(allNotes)) {
+          allNotes = [];
+        }
+
+        // Обновление статистики
+        var statsEl = document.getElementById('base-stats');
+        if (statsEl) {
+          while (statsEl.firstChild) {
+            statsEl.removeChild(statsEl.firstChild);
+          }
+          
+          var sharedCount = 0;
+          for (var i = 0; i < allNotes.length; i++) {
+            if (allNotes[i] && allNotes[i].shared) {
+              sharedCount++;
+            }
+          }
+          
+          statsEl.appendChild(buildStatCard(allNotes.length, I18n ? I18n.t('base.stat.total') : 'всего'));
+          statsEl.appendChild(buildStatCard(sharedCount, I18n ? I18n.t('base.stat.open') : 'открыто'));
+          statsEl.appendChild(buildStatCard(allNotes.length - sharedCount, I18n ? I18n.t('base.stat.priv') : 'лично'));
+        }
+
+        // Фильтрация по текстовому запросу
+        state.filteredNotes = allNotes.slice();
+        if (queryValue) {
+          state.filteredNotes = state.filteredNotes.filter(function(n) {
+            return n.text && n.text.toLowerCase().indexOf(queryValue) >= 0;
+          });
+        }
+
+        // Сортировка
+        if (sortValue === 'old') {
+          state.filteredNotes.sort(function(a, b) {
+            return (a.createdAt || 0) - (b.createdAt || 0);
+          });
+        } else if (sortValue === 'az') {
+          var lang = I18n ? I18n.getLang() : 'ru';
+          state.filteredNotes.sort(function(a, b) {
+            return (a.text || '').localeCompare(b.text || '', lang === 'en' ? 'en' : 'ru');
+          });
+        } else {
+          state.filteredNotes.sort(function(a, b) {
+            return (b.createdAt || 0) - (a.createdAt || 0);
+          });
+        }
+
+        // Очистка контейнера
+        while (state.listContainer.firstChild) {
+          state.listContainer.removeChild(state.listContainer.firstChild);
+        }
+
+        // Пустой список → empty state
+        if (state.filteredNotes.length === 0) {
+          var emptyTitle = I18n ? I18n.t('empty.base.t') : 'База пуста';
+          var emptyDesc = allNotes.length === 0
+            ? (I18n ? I18n.t('empty.base.d') : 'Запишите первую мысль')
+            : (I18n ? I18n.t('empty.base.empty') : 'Под фильтр ничего не подошло');
+          
+          state.listContainer.appendChild(buildEmptyState('▤', emptyTitle, emptyDesc));
+          state.poolItems = [];
+          return;
+        }
+
+        // Создание spacer для общей высоты
+        var ROW_SIZE = LayoutMetrics ? LayoutMetrics.getBaseRowSize() : 108;
+        var totalHeight = state.filteredNotes.length * ROW_SIZE;
+
+        var spacer = document.createElement('div');
+        spacer.className = 'base-spacer';
+        spacer.style.height = totalHeight + 'px';
+        state.listContainer.appendChild(spacer);
+
+        // Создание контейнера для элементов пула
+        var itemsContainer = document.createElement('div');
+        itemsContainer.className = 'base-items';
+        itemsContainer.style.height = totalHeight + 'px';
+        state.listContainer.appendChild(itemsContainer);
+
+        // Создание пула элементов
+        state.poolItems = [];
+        for (var j = 0; j < POOL_SIZE; j++) {
+          var item = document.createElement('div');
+          item.className = 'bi';
+          itemsContainer.appendChild(item);
+          state.poolItems.push({ element: item, dataIndex: -1 });
+        }
+
+        // Привязка scroll listener
+        var signal = state.abortController ? state.abortController.signal : null;
+        state.listContainer.addEventListener('scroll', onListScroll, {
+          passive: true,
+          signal: signal
+        });
+        
+        state.listContainer.scrollTop = 0;
+        updateVisibleItems();
+      }).catch(function(err) {
+        if (Logger) Logger.error('BaseViewComponent', 'renderBase failed', err);
+        if (Toast && Toast.show) {
+          Toast.show('err', String(err && err.message || err) || 'Base load failed');
+        }
+      });
+    }
+
+    /**
+     * Копирует текст в буфер обмена с фоллбэком на execCommand.
+     * 
+     * @param {string} text - Текст для копирования.
+     * @returns {void}
+     */
+    function copyToClipboard(text) {
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text).then(
+            function() {
+              if (Toast && Toast.show) {
+                Toast.show('ok', I18n ? I18n.t('toast.copied') : 'скопировано');
+              }
+            },
+            function() {
+              if (Toast && Toast.show) {
+                Toast.show('err', I18n ? I18n.t('toast.copy.fail') : 'не удалось');
+              }
+            }
+          );
+        } else {
+          var ta = document.createElement('textarea');
+          ta.value = text;
+          ta.style.position = 'fixed';
+          ta.style.top = '-9999px';
+          document.body.appendChild(ta);
+          ta.select();
+          
+          try {
+            document.execCommand('copy');
+            if (Toast && Toast.show) {
+              Toast.show('ok', I18n ? I18n.t('toast.copied') : 'скопировано');
+            }
+          } catch (err) {
+            if (Toast && Toast.show) {
+              Toast.show('err', I18n ? I18n.t('toast.copy.fail') : 'не удалось');
+            }
+          }
+          
+          document.body.removeChild(ta);
+        }
+      } catch (err) {
+        if (Toast && Toast.show) {
+          Toast.show('err', I18n ? I18n.t('toast.copy.fail') : 'не удалось');
+        }
+      }
+    }
+
+    /**
+     * Обрабатывает удаление заметки из NoteView.
+     * 
+     * @param {string} id - ID заметки.
+     * @param {HTMLDivElement} nvOverlay - Оверлей NoteView.
+     * @returns {void}
+     */
+    function handleDelete(id, nvOverlay) {
+      opStats.deletes++;
+      
+      var confirmMsg = I18n ? I18n.t('nv.delete.confirm') : 'Удалить эту заметку навсегда?';
+      if (!confirm(confirmMsg)) return;
+      
+      if (DB && DB.del) {
+        DB.del(id).then(function() {
+          if (Toast && Toast.show) {
+            Toast.show('ok', I18n ? I18n.t('toast.deleted') : 'удалено');
+          }
+          
+          closeNoteView(nvOverlay);
+          renderBase();
+          
+          if (Bus && Bus.emit) {
+            try {
+              Bus.emit('editor:search-request', { force: true });
+            } catch (e) {
+              if (Logger) Logger.error('BaseViewComponent', 'Bus.emit editor:search-request failed', e);
+            }
+          }
+          
+          if (Bus && Bus.emit) {
+            try {
+              Bus.emit('state:lists-changed');
+            } catch (e) {
+              if (Logger) Logger.error('BaseViewComponent', 'Bus.emit state:lists-changed failed', e);
+            }
+          }
+        }).catch(function(err) {
+          if (Toast && Toast.show) {
+            Toast.show('err', String(err && err.message || err) || 'Delete failed');
+          }
+        });
+      }
+    }
+
+    /**
+     * Обрабатывает переключение видимости заметки (личное/открытое).
+     * 
+     * @param {string} id - ID заметки.
+     * @param {Note} record - Объект заметки.
+     * @param {HTMLButtonElement} toggleBtn - Кнопка переключения.
+     * @returns {void}
+     */
+    function handleToggle(id, record, toggleBtn) {
+      opStats.toggles++;
+      
+      record.shared = !record.shared;
+      
+      if (DB && DB.put) {
+        DB.put(record).then(function() {
+          var msg = record.shared
+            ? (I18n ? I18n.t('toast.saved.public') : 'опубликовано')
+            : (I18n ? I18n.t('toast.saved.private') : 'сохранено лично');
+          
+          if (Toast && Toast.show) {
+            Toast.show('ok', msg);
+          }
+          
+          toggleBtn.setAttribute('aria-label', record.shared
+            ? (I18n ? I18n.t('btn.toggle.priv') : 'Скрыть')
+            : (I18n ? I18n.t('btn.toggle.pub') : 'Открыть'));
+          
+          toggleBtn.textContent = record.shared
+            ? (I18n ? I18n.t('btn.toggle.priv') : 'Скрыть')
+            : (I18n ? I18n.t('btn.toggle.pub') : 'Открыть');
+          
+          renderBase();
+          
+          if (Bus && Bus.emit) {
+            try {
+              Bus.emit('editor:search-request', { force: true });
+            } catch (e) {
+              if (Logger) Logger.error('BaseViewComponent', 'Bus.emit editor:search-request failed', e);
+            }
+          }
+          
+          if (Bus && Bus.emit) {
+            try {
+              Bus.emit('state:lists-changed');
+            } catch (e) {
+              if (Logger) Logger.error('BaseViewComponent', 'Bus.emit state:lists-changed failed', e);
+            }
+          }
+        }).catch(function(err) {
+          if (Toast && Toast.show) {
+            Toast.show('err', String(err && err.message || err) || 'Toggle failed');
+          }
+        });
+      }
+    }
+
+    /**
+     * Обрабатывает сохранение изменений заметки из NoteView.
+     * 
+     * Pipeline:
+     * 1. Валидация текста (не пустой)
+     * 2. Проверка готовности AI
+     * 3. Обновление record.text и record.updatedAt
+     * 4. AI.embed(newText) → новый вектор
+     * 5. DB.put(record)
+     * 6. Закрытие NoteView
+     * 7. Перерисовка базы
+     * 8. Эмиссия событий для обновления поисковых индексов
+     * 
+     * @param {string} id - ID заметки.
+     * @param {Note} record - Объект заметки.
+     * @param {HTMLTextAreaElement} ta - Текстовое поле с новым содержимым.
+     * @param {HTMLDivElement} nvOverlay - Оверлей NoteView.
+     * @returns {void}
+     */
+    function handleSave(id, record, ta, nvOverlay) {
+      opStats.edits++;
+      
+      var newText = ta.value.trim();
+      
+      if (!newText) {
+        if (Toast && Toast.show) {
+          Toast.show('err', I18n ? I18n.t('toast.empty') : 'напишите что-нибудь');
+        }
+        return;
+      }
+      
+      if (!AI || !AI.ready()) {
+        if (Toast && Toast.show) {
+          Toast.show('err', I18n ? I18n.t('toast.ai.notready') : 'ии не готов');
+        }
+        return;
+      }
+      
+      record.text = newText;
+      record.updatedAt = Date.now();
+      
+      AI.embed(newText).then(function(v) {
+        record.vector = v;
+        return DB.put(record);
+      }).then(function() {
+        if (Toast && Toast.show) {
+          Toast.show('ok', I18n ? I18n.t('toast.edit.saved') : 'сохранено');
+        }
+        
+        closeNoteView(nvOverlay);
+        renderBase();
+        
+        if (Bus && Bus.emit) {
+          try {
+            Bus.emit('editor:search-request', { force: true });
+          } catch (e) {
+            if (Logger) Logger.error('BaseViewComponent', 'Bus.emit editor:search-request failed', e);
+          }
+        }
+        
+        if (Bus && Bus.emit) {
+          try {
+            Bus.emit('state:lists-changed');
+          } catch (e) {
+            if (Logger) Logger.error('BaseViewComponent', 'Bus.emit state:lists-changed failed', e);
+          }
+        }
+      }).catch(function(err) {
+        if (Toast && Toast.show) {
+          Toast.show('err', String(err && err.message || err) || 'Edit failed');
+        }
+      });
+    }
+
+    /**
+     * Закрывает NoteView и удаляет его из DOM с задержкой для анимации.
+     * 
+     * @param {HTMLDivElement} nvOverlay - Оверлей NoteView.
+     * @returns {void}
+     */
+    function closeNoteView(nvOverlay) {
+      if (!nvOverlay) return;
+      
+      // Удаляем Escape handler
+      if (nvOverlay._escapeHandler) {
+        document.removeEventListener('keydown', nvOverlay._escapeHandler);
+        delete nvOverlay._escapeHandler;
+      }
+      
+      nvOverlay.classList.remove('on');
+      
+      var animationDelay = Config ? Config.get('noteViewAnimationDelay', 200) : 200;
+      
+      setTimeout(function() {
+        if (nvOverlay && nvOverlay.parentNode) {
+          try {
+            nvOverlay.parentNode.removeChild(nvOverlay);
+          } catch (e) {
+            // Игнорируем ошибки удаления
+          }
+        }
+        
+        if (state.activeNoteView === nvOverlay) {
+          state.activeNoteView = null;
+        }
+      }, animationDelay);
+    }
+
+    /**
+     * Открывает полноэкранное модальное окно редактирования заметки (NoteView).
+     * 
+     * Работает только с локальными заметками из БД.
+     * Если заметки нет в БД → тост "Note not found" и выход.
+     * 
+     * Структура NoteView:
+     * <div class="nv on">
+     *   <div class="nv-f">[del, copy, toggle]</div>
+     *   <div class="nv-b">[infoRow, textarea]</div>
+     *   <div class="nv-f-bottom">[cancel, save]</div>
+     * </div>
+     * 
+     * @param {string} id - ID заметки для открытия.
+     * @returns {void}
+     */
+    function openNoteView(id) {
+      // Закрытие предыдущего NoteView
+      if (state.activeNoteView) {
+        closeNoteView(state.activeNoteView);
+      }
+
+      if (!DB || !DB.get) {
+        if (Logger) Logger.error('BaseViewComponent', 'DB.get not available');
+        return;
+      }
+
+      DB.get(id).then(function(record) {
+        if (!record) {
+          if (Toast && Toast.show) {
+            Toast.show('warn', 'Note not found');
+          }
+          return;
+        }
+
+        var nvOverlay = document.createElement('div');
+        nvOverlay.className = 'nv on';
+        document.body.appendChild(nvOverlay);
+        state.activeNoteView = nvOverlay;
+
+        // Верхний бар с кнопками действий
+        var topFooter = document.createElement('div');
+        topFooter.className = 'nv-f';
+
+        var delBtn = document.createElement('button');
+        delBtn.className = 'nv-act danger';
+        delBtn.id = 'nv-del';
+        delBtn.setAttribute('aria-label', I18n ? I18n.t('btn.del') : 'Удалить');
+        delBtn.textContent = I18n ? I18n.t('btn.del') : 'Удалить';
+        delBtn.onclick = function() { handleDelete(id, nvOverlay); };
+        topFooter.appendChild(delBtn);
+
+        var copyBtn = document.createElement('button');
+        copyBtn.className = 'nv-act';
+        copyBtn.id = 'nv-copy';
+        copyBtn.setAttribute('aria-label', I18n ? I18n.t('btn.copy') : 'Копировать');
+        copyBtn.textContent = I18n ? I18n.t('btn.copy') : 'Копировать';
+        copyBtn.onclick = function() { copyToClipboard(record.text); };
+        topFooter.appendChild(copyBtn);
+
+        var toggleBtn = document.createElement('button');
+        toggleBtn.className = 'nv-act';
+        toggleBtn.id = 'nv-toggle';
+        toggleBtn.setAttribute('aria-label', record.shared
+          ? (I18n ? I18n.t('btn.toggle.priv') : 'Скрыть')
+          : (I18n ? I18n.t('btn.toggle.pub') : 'Открыть'));
+        toggleBtn.textContent = record.shared
+          ? (I18n ? I18n.t('btn.toggle.priv') : 'Скрыть')
+          : (I18n ? I18n.t('btn.toggle.pub') : 'Открыть');
+        toggleBtn.onclick = function() { handleToggle(id, record, toggleBtn); };
+        topFooter.appendChild(toggleBtn);
+
+        nvOverlay.appendChild(topFooter);
+
+        // Центральная область с информацией и текстовым полем
+        var body = document.createElement('div');
+        body.className = 'nv-b';
+
+        var infoRow = document.createElement('div');
+        infoRow.className = 'info-row';
+
+        var tagEl = document.createElement('span');
+        tagEl.className = 'bi-tag';
+        tagEl.textContent = record.shared
+          ? (I18n ? I18n.t('base.tag.shared') : 'открыто')
+          : (I18n ? I18n.t('base.tag.private') : 'лично');
+        infoRow.appendChild(tagEl);
+
+        // Ссылка на родителя
+        if (record.parentId) {
+          var parentLink = document.createElement('a');
+          parentLink.href = '#';
+          parentLink.className = 'fi-parent';
+          parentLink.textContent = '↳ ' + (I18n ? I18n.t('note.parent') : 'В ответ на');
+          
+          parentLink.onclick = function(e) {
+            e.preventDefault();
+            closeNoteView(nvOverlay);
+            setTimeout(function() { openNoteView(record.parentId); }, 250);
+          };
+          
+          infoRow.appendChild(parentLink);
+        }
+
+        // Индикатор дочерних ответов
+        if (record.children && record.children.length > 0) {
+          var childCount = document.createElement('span');
+          childCount.className = 'fi-children';
+          childCount.textContent = '💬 ' + record.children.length + ' ' + (I18n ? I18n.t('note.children') : 'ответов');
+          infoRow.appendChild(childCount);
+        }
+
+        var dateEl = document.createElement('span');
+        dateEl.className = 'note-date';
+        
+        var lang = I18n ? I18n.getLang() : 'ru';
+        var ts = (record.updatedAt && record.updatedAt > record.createdAt) ? record.updatedAt : record.createdAt;
+        var prefix = (record.updatedAt && record.updatedAt > record.createdAt)
+          ? (lang === 'ru' ? 'Ред. ' : 'Edit. ')
+          : '';
+        
+        dateEl.textContent = prefix + Utils.fmtTime(ts, lang) + ' ' + Utils.fmtDate(ts, lang);
+        infoRow.appendChild(dateEl);
+
+        body.appendChild(infoRow);
+
+        var ta = document.createElement('textarea');
+        ta.className = 'nv-ta';
+        ta.id = 'nv-ta';
+        ta.value = record.text || '';
+        body.appendChild(ta);
+
+        nvOverlay.appendChild(body);
+
+        // Нижний бар с кнопками управления
+        var bottomFooter = document.createElement('div');
+        bottomFooter.className = 'nv-f-bottom';
+
+        var cancelBtn = document.createElement('button');
+        cancelBtn.className = 'nv-act';
+        cancelBtn.id = 'nv-cancel';
+        cancelBtn.setAttribute('aria-label', I18n ? I18n.t('btn.cancel') : 'Отмена');
+        cancelBtn.textContent = I18n ? I18n.t('btn.cancel') : 'Отмена';
+        cancelBtn.onclick = function() { closeNoteView(nvOverlay); };
+        bottomFooter.appendChild(cancelBtn);
+
+        var saveBtn = document.createElement('button');
+        saveBtn.className = 'nv-act primary';
+        saveBtn.id = 'nv-save';
+        saveBtn.textContent = I18n ? I18n.t('btn.save') : 'Сохранить';
+        saveBtn.onclick = function() { handleSave(id, record, ta, nvOverlay); };
+        bottomFooter.appendChild(saveBtn);
+
+        nvOverlay.appendChild(bottomFooter);
+
+        // Escape handler привязан к конкретному overlay
+        var escapeHandler = function(e) {
+          if (e.key === 'Escape' && state.activeNoteView === nvOverlay) {
+            closeNoteView(nvOverlay);
+          }
+        };
+        
+        var signal = state.abortController ? state.abortController.signal : null;
+        document.addEventListener('keydown', escapeHandler, { signal: signal });
+        
+        nvOverlay._escapeHandler = escapeHandler;
+
+      }).catch(function(err) {
+        if (Toast && Toast.show) {
+          Toast.show('err', String(err && err.message || err) || 'Load note failed');
+        }
+      });
+    }
+
+    /**
+     * Экспортирует все заметки в JSON-файл и инициирует скачивание.
+     * 
+     * Формат экспорта:
+     * {
+     *   app: 'noomium',
+     *   format: 'v1',
+     *   version: 1,
+     *   exportedAt: timestamp,
+     *   notes: Note[]
+     * }
+     * 
+     * @returns {void}
+     */
+    function exportData() {
+      opStats.exports++;
+      
+      var notesPromise;
+      if (DB && DB.all) {
+        notesPromise = DB.all();
+      } else {
+        notesPromise = Promise.resolve([]);
+      }
+      
+      notesPromise.then(function(notes) {
+        if (!notes || notes.length === 0) {
+          if (Toast && Toast.show) {
+            Toast.show('err', '0');
+          }
+          return;
+        }
+        
+        var capsule = {
+          app: 'noomium',
+          format: 'v1',
+          version: 1,
+          exportedAt: Date.now(),
+          notes: notes
+        };
+        
+        var blob = new Blob([JSON.stringify(capsule, null, 2)], { type: 'application/json' });
+        var url = URL.createObjectURL(blob);
+        
+        var anchor = document.createElement('a');
+        anchor.href = url;
+        anchor.download = 'noomium-' + new Date().toISOString().slice(0, 10) + '.json';
+        document.body.appendChild(anchor);
+        anchor.click();
+        
+        URL.revokeObjectURL(url);
+        anchor.remove();
+        
+        if (Toast && Toast.show) {
+          Toast.show('ok', '✓ ' + notes.length);
+        }
+      }).catch(function(err) {
+        if (Toast && Toast.show) {
+          Toast.show('err', String(err && err.message || err) || 'Export failed');
+        }
+      });
+    }
+
+    /**
+     * Открывает диалог выбора файла, парсит JSON и импортирует заметки в базу.
+     * 
+     * Валидация:
+     * - Проверяет что notes — массив
+     * - Фильтрует записи без text или с пустым text
+     * - Генерирует ID для записей без ID
+     * - Приводит createdAt к number (fallback на Date.now())
+     * - Нормализует vector/shared/parentId/children
+     * 
+     * @returns {void}
+     */
+    function importData() {
+      opStats.imports++;
+      
+      var input = document.createElement('input');
+      input.type = 'file';
+      input.accept = 'application/json,.json';
+      
+      input.onchange = function() {
+        var file = input.files && input.files[0];
+        if (!file) return;
+        
+        var reader = new FileReader();
+        
+        reader.onload = function() {
+          try {
+            var data = JSON.parse(String(reader.result || '{}'));
+            var notes = Array.isArray(data) ? data : (data.notes || []);
+            
+            if (!Array.isArray(notes)) {
+              throw new Error('bad format');
+            }
+            
+            var clean = [];
+            for (var i = 0; i < notes.length; i++) {
+              var note = notes[i];
+              
+              if (!note || typeof note.text !== 'string' || !note.text.trim()) {
+                continue;
+              }
+              
+              clean.push({
+                id: note.id || ('i' + Math.random().toString(36).slice(2, 10)),
+                text: note.text.trim(),
+                vector: Array.isArray(note.vector) ? note.vector : null,
+                shared: !!note.shared,
+                createdAt: typeof note.createdAt === 'number' ? note.createdAt : Date.now(),
+                parentId: typeof note.parentId === 'string' ? note.parentId : undefined,
+                children: Array.isArray(note.children) ? note.children : undefined
+              });
+            }
+            
+            if (DB && DB.bulkPut) {
+              DB.bulkPut(clean).then(function() {
+                if (Toast && Toast.show) {
+                  Toast.show('ok', '✓ ' + clean.length);
+                }
+                
+                var sm = StateManager ? StateManager.getState() : {};
+                if (sm.view === 'base') {
+                  renderBase();
+                }
+                
+                if (Bus && Bus.emit) {
+                  try {
+                    Bus.emit('editor:search-request', { force: true });
+                  } catch (e) {
+                    if (Logger) Logger.error('BaseViewComponent', 'Bus.emit editor:search-request failed', e);
+                  }
+                }
+                
+                if (Bus && Bus.emit) {
+                  try {
+                    Bus.emit('state:lists-changed');
+                  } catch (e) {
+                    if (Logger) Logger.error('BaseViewComponent', 'Bus.emit state:lists-changed failed', e);
+                  }
+                }
+              }).catch(function(err) {
+                if (Toast && Toast.show) {
+                  Toast.show('err', String(err && err.message || err) || 'Import failed');
+                }
+              });
+            }
+          } catch (err) {
+            if (Toast && Toast.show) {
+              Toast.show('err', String(err && err.message || err) || 'Import parse failed');
+            }
+          }
+        };
+        
+        reader.readAsText(file);
+      };
+      
+      input.click();
+    }
+
+    /**
+     * Привязывает события к элементам вкладки "База".
+     * Все обработчики привязываются к AbortSignal для автоматической очистки.
+     * 
+     * @returns {void}
+     */
+    function bindDOMEvents() {
+      if (!state.abortController) return;
+      var signal = state.abortController.signal;
+      
+      // Клики по карточкам заметок
+      var baseContainer = document.getElementById('ws-base');
+      if (baseContainer) {
+        baseContainer.addEventListener('click', function(e) {
+          var bi = e.target.closest('.bi');
+          if (bi) {
+            var id = bi.getAttribute('data-id');
+            if (id) openNoteView(id);
+          }
+        }, { signal: signal });
+      }
+      
+      // Поиск по базе (input event)
+      var baseSearchInput = document.getElementById('base-q');
+      if (baseSearchInput) {
+        baseSearchInput.addEventListener('input', function() {
+          renderBase();
+        }, { signal: signal });
+      }
+      
+      // Сортировка (change event)
+      var baseSortSelect = document.getElementById('base-sort');
+      if (baseSortSelect) {
+        baseSortSelect.addEventListener('change', function() {
+          renderBase();
+        }, { signal: signal });
+      }
+    }
+
+    /**
+     * Обработчик события state:changed.
+     * Перерисовывает базу при активации вкладки.
+     * 
+     * @param {AppState} newState - Новое состояние.
+     * @returns {void}
+     */
+    function handleStateChanged(newState) {
+      if (!newState) return;
+      
+      if (newState.view === 'base') {
+        renderBase();
+      }
+    }
+
+    /**
+     * Обработчик события i18n:change.
+     * Обновляет переводы элементов базы.
+     * 
+     * @returns {void}
+     */
+    function handleI18nChange() {
+      var baseSearch = document.getElementById('base-q');
+      if (baseSearch) {
+        baseSearch.placeholder = I18n ? I18n.t('base.search') : 'поиск...';
+      }
+      
+      var sort = document.getElementById('base-sort');
+      if (sort) {
+        var opts = sort.querySelectorAll('option');
+        if (opts[0]) opts[0].textContent = I18n ? I18n.t('base.sort.new') : 'новые';
+        if (opts[1]) opts[1].textContent = I18n ? I18n.t('base.sort.old') : 'старые';
+        if (opts[2]) opts[2].textContent = I18n ? I18n.t('base.sort.az') : 'а-я';
+      }
+      
+      var sm = StateManager ? StateManager.getState() : {};
+      if (sm.view === 'base') {
+        renderBase();
+      }
+    }
+
+    /**
+     * Обработчик события state:lists-changed.
+     * Перерисовывает базу при изменении списков.
+     * 
+     * @returns {void}
+     */
+    function handleListsChanged() {
+      var sm = StateManager ? StateManager.getState() : {};
+      if (sm.view === 'base') {
+        renderBase();
+      }
+    }
+
+    /**
+     * Обработчик события view:changed.
+     * Рендерит базу при переключении на вкладку "База".
+     * 
+     * @param {Object} payload - Payload события.
+     * @param {ViewName} payload.view - Новая активная вкладка.
+     * @returns {void}
+     */
+    function handleViewChanged(payload) {
+      if (payload && payload.view === 'base') {
+        renderBase();
+      }
+    }
+
+    /**
+     * Обработчик события editor:edit-note.
+     * Открывает NoteView для указанной заметки.
+     * 
+     * @param {Object} payload - Payload события.
+     * @param {string} payload.id - ID заметки для редактирования.
+     * @returns {void}
+     */
+    function handleEditNote(payload) {
+      if (payload && payload.id) {
+        openNoteView(payload.id);
+      }
+    }
+
+    /**
+     * Обработчик события base:show-children.
+     * Показывает тост с количеством дочерних заметок (placeholder для будущего UI).
+     * 
+     * @param {Object} payload - Payload события.
+     * @param {string[]} payload.children - Массив ID дочерних заметок.
+     * @returns {void}
+     */
+    function handleShowChildren(payload) {
+      if (payload && payload.children) {
+        if (Toast && Toast.show) {
+          Toast.show('info', 'Children: ' + payload.children.length);
+        }
+      }
+    }
+
+    /**
+     * Возвращает статистику компонента.
+     * 
+     * @returns {{renders: number, operations: Object}}
+     */
+    function getStats() {
+      return {
+        renders: renderCount,
+        operations: {
+          deletes: opStats.deletes,
+          edits: opStats.edits,
+          toggles: opStats.toggles,
+          exports: opStats.exports,
+          imports: opStats.imports
+        }
+      };
+    }
+
+    /**
+     * Сбрасывает статистику.
+     * 
+     * @returns {void}
+     */
+    function resetStats() {
+      renderCount = 0;
+      opStats.deletes = 0;
+      opStats.edits = 0;
+      opStats.toggles = 0;
+      opStats.exports = 0;
+      opStats.imports = 0;
+    }
+
+    /**
+     * Инициализация модуля.
+     * Привязывает события, подписывается на Bus, рендерит UI при активации.
+     * 
+     * @param {AbortSignal} [signal] - Сигнал для автоочистки.
+     * @returns {void}
+     */
+    function init(signal) {
+      if (state.abortController) {
+        state.abortController.abort();
+      }
+
+      state.abortController = new AbortController();
+      var internalSignal = state.abortController.signal;
+      
+      bindDOMEvents();
+
+      // Bus-подписки с автоотпиской через signal
+      if (Bus && typeof Bus.subscribe === 'function') {
+        Bus.subscribe('i18n:change', handleI18nChange, internalSignal);
+        Bus.subscribe('state:lists-changed', handleListsChanged, internalSignal);
+        Bus.subscribe('view:changed', handleViewChanged, internalSignal);
+        Bus.subscribe('editor:edit-note', handleEditNote, internalSignal);
+        Bus.subscribe('base:show-children', handleShowChildren, internalSignal);
+      }
+
+      // StateManager.subscribe не поддерживает signal, сохраняем функцию отписки
+      if (StateManager && typeof StateManager.subscribe === 'function') {
+        state.stateUnsubscribe = StateManager.subscribe(handleStateChanged);
+        
+        internalSignal.addEventListener('abort', function() {
+          if (state.stateUnsubscribe) {
+            state.stateUnsubscribe();
+            state.stateUnsubscribe = null;
+          }
+        }, { once: true });
+      }
+
+      var sm = StateManager ? StateManager.getState() : {};
+      if (sm.view === 'base') {
+        renderBase();
+      }
+
+      if (Logger) {
+        Logger.info('BaseViewComponent', 'Initialized', {
+          poolSize: POOL_SIZE
+        });
+      }
+    }
+
+    /**
+     * Уничтожение модуля.
+     * Закрывает NoteView, отменяет RAF, отписывается от всех событий.
+     * 
+     * @returns {void}
+     */
+    function destroy() {
+      // Закрытие активного NoteView
+      if (state.activeNoteView) {
+        closeNoteView(state.activeNoteView);
+      }
+      
+      // Отмена pending requestAnimationFrame
+      if (state.scrollRAF) {
+        cancelAnimationFrame(state.scrollRAF);
+        state.scrollRAF = null;
+      }
+      
+      // Отписка от всех событий через AbortController
+      if (state.abortController) {
+        state.abortController.abort();
+        state.abortController = null;
+      }
+      
+      // Очистка ссылок
+      if (state.listContainer) {
+        state.listContainer.removeEventListener('scroll', onListScroll);
+        state.listContainer = null;
+      }
+      
+      state.poolItems = [];
+      state.filteredNotes = [];
+      
+      // Очистка функции отписки от StateManager
+      if (state.stateUnsubscribe) {
+        state.stateUnsubscribe();
+        state.stateUnsubscribe = null;
+      }
+      
+      resetStats();
+    }
+
+    return {
+      // Lifecycle
+      init: init,
+      destroy: destroy,
+
+      // Публичный API
+      renderBase: renderBase,
+      exportData: exportData,
+      importData: importData,
+
+      // Статистика
+      getStats: getStats,
+      resetStats: resetStats
+    };
+  }, ['Config', 'Logger', 'Bus', 'I18n', 'Utils', 'StateManager', 'DB', 'AI', 'Toast', 'SearchService', 'LayoutMetrics', 'NoteCache']);
   /* <!-- MODULE: BaseViewComponent --> */
 
   /* <!-- MODULE: HeaderStatusComponent --> */
