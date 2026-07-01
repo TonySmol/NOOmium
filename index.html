@@ -7841,18 +7841,1590 @@ kbd {
   // ═══════════════════════════════════════════════════
 
   /* <!-- MODULE: PeerManager --> */
-  старт
-  энд
+  /**
+   * @typedef {Object} PeerInfo
+   * @description Информация о пире.
+   * @property {string} pubkey - Полный публичный ключ (64 hex символа).
+   * @property {number} lastSeen - Timestamp последнего события от пира.
+   * @property {number} firstSeen - Timestamp первого события от пира.
+   */
+
+  /**
+   * @module PeerManager
+   * @description Управление активными пирами и их эфемерностью.
+   * 
+   * Зона ответственности:
+   * - Хранение Map активных пиров (pubkey → timestamp)
+   * - Heartbeat для обнаружения устаревших пиров
+   * - Эмиссия `peer:offline` при превышении TTL
+   * - API для проверки статуса пиров из других модулей
+   * 
+   * Архитектурные принципы:
+   * - НЕ знает о заметках, поиске, фокусе
+   * - НЕ хранит answers (это делает NetTransport)
+   * - Делегирует очистку streamData в LiveStreamService через события
+   * - Использует AsyncScheduler для heartbeat (вместо setInterval)
+   * - Whitelist валидация pubkey (64 hex символа)
+   * 
+   * Слушает события:
+   * - `net:peer-activity` — обновление timestamp пира от NetTransport
+   *   payload: {pubkey: string}
+   * 
+   * Эмитит события:
+   * - `peer:offline` — пир отключился (превышен TTL)
+   *   payload: {pubkey: string, lastSeen: number}
+   * - `peer:online` — новый пир появился
+   *   payload: {pubkey: string, firstSeen: number}
+   * - `peer:count-changed` — изменение количества активных пиров
+   *   payload: {count: number, added: boolean}
+   * 
+   * @namespace PeerManager
+   */
+  DI.register('PeerManager', function(Config, Logger, Bus, AsyncScheduler) {
+    
+    /**
+     * Map активных пиров: pubkey → PeerInfo.
+     * @type {Map<string, PeerInfo>}
+     */
+    var peers = new Map();
+
+    /**
+     * Ключ задачи heartbeat в AsyncScheduler.
+     * Используется для отмены при destroy().
+     * @type {string}
+     */
+    var HEARTBEAT_KEY = 'peermanager-heartbeat';
+
+    /**
+     * Regex для валидации hex-формата публичного ключа.
+     * 64 hex-символа (256 бит).
+     * @type {RegExp}
+     */
+    var HEX_REGEX = /^[0-9a-f]{64}$/i;
+
+    /**
+     * Флаг активности heartbeat.
+     * @type {boolean}
+     */
+    var heartbeatActive = false;
+
+    /**
+     * Контроллер для управления подписками.
+     * @type {AbortController | null}
+     */
+    var abortController = null;
+
+    /**
+     * Счётчик добавленных пиров (для статистики).
+     * @type {number}
+     */
+    var addedCount = 0;
+
+    /**
+     * Счётчик удалённых пиров (для статистики).
+     * @type {number}
+     */
+    var removedCount = 0;
+
+    /**
+     * Валидирует формат публичного ключа.
+     * 
+     * @param {string} pubkey - Публичный ключ для проверки.
+     * @returns {boolean} true если формат валидный.
+     */
+    function isValidPubkey(pubkey) {
+      return typeof pubkey === 'string' && HEX_REGEX.test(pubkey);
+    }
+
+    /**
+     * Обновляет timestamp последнего события от пира.
+     * Если пир новый — добавляет его и эмитит peer:online.
+     * 
+     * @param {string} pubkey - Публичный ключ пира.
+     * @returns {boolean} true если пир был добавлен как новый.
+     */
+    function updateTimestamp(pubkey) {
+      if (!isValidPubkey(pubkey)) {
+        if (Logger) Logger.warn('PeerManager', 'Invalid pubkey format', pubkey);
+        return false;
+      }
+
+      var now = Date.now();
+      var existing = peers.get(pubkey);
+
+      if (existing) {
+        // Обновляем существующего пира
+        existing.lastSeen = now;
+        return false;
+      }
+
+      // Добавляем нового пира
+      var peerInfo = {
+        pubkey: pubkey,
+        lastSeen: now,
+        firstSeen: now
+      };
+      peers.set(pubkey, peerInfo);
+      addedCount++;
+
+      if (Logger) {
+        Logger.debug('PeerManager', 'New peer online', {
+          pubkey: pubkey.slice(0, 6),
+          totalPeers: peers.size
+        });
+      }
+
+      if (Bus && Bus.emit) {
+        try {
+          Bus.emit('peer:online', {
+            pubkey: pubkey,
+            firstSeen: now
+          });
+          Bus.emit('peer:count-changed', {
+            count: peers.size,
+            added: true
+          });
+        } catch (e) {
+          if (Logger) Logger.error('PeerManager', 'Bus.emit failed', e);
+        }
+      }
+
+      return true;
+    }
+
+    /**
+     * Проверяет, онлайн ли пир.
+     * 
+     * @param {string} pubkey - Публичный ключ пира.
+     * @returns {boolean} true если пир активен.
+     */
+    function isOnline(pubkey) {
+      if (!isValidPubkey(pubkey)) return false;
+      return peers.has(pubkey);
+    }
+
+    /**
+     * Возвращает информацию о пире.
+     * 
+     * @param {string} pubkey - Публичный ключ пира.
+     * @returns {PeerInfo | null} Информация о пире или null.
+     */
+    function getPeer(pubkey) {
+      if (!isValidPubkey(pubkey)) return null;
+      return peers.get(pubkey) || null;
+    }
+
+    /**
+     * Возвращает количество активных пиров.
+     * 
+     * @returns {number}
+     */
+    function getCount() {
+      return peers.size;
+    }
+
+    /**
+     * Возвращает список всех активных пиров.
+     * 
+     * @returns {PeerInfo[]} Массив информации о пирах.
+     */
+    function getAll() {
+      return Array.from(peers.values());
+    }
+
+    /**
+     * Возвращает список pubkey всех активных пиров.
+     * 
+     * @returns {string[]} Массив публичных ключей.
+     */
+    function getPubkeys() {
+      return Array.from(peers.keys());
+    }
+
+    /**
+     * Принудительно удаляет пира из активных.
+     * Эмитит peer:offline.
+     * 
+     * @param {string} pubkey - Публичный ключ пира.
+     * @returns {boolean} true если пир был удалён.
+     */
+    function removePeer(pubkey) {
+      if (!isValidPubkey(pubkey)) return false;
+      
+      var peerInfo = peers.get(pubkey);
+      if (!peerInfo) return false;
+
+      peers.delete(pubkey);
+      removedCount++;
+
+      if (Logger) {
+        Logger.info('PeerManager', 'Peer removed manually', {
+          pubkey: pubkey.slice(0, 6),
+          totalPeers: peers.size
+        });
+      }
+
+      if (Bus && Bus.emit) {
+        try {
+          Bus.emit('peer:offline', {
+            pubkey: pubkey,
+            lastSeen: peerInfo.lastSeen
+          });
+          Bus.emit('peer:count-changed', {
+            count: peers.size,
+            added: false
+          });
+        } catch (e) {
+          if (Logger) Logger.error('PeerManager', 'Bus.emit failed', e);
+        }
+      }
+
+      return true;
+    }
+
+    /**
+     * Выполняет heartbeat: проверяет всех пиров на TTL.
+     * Удаляет устаревших и эмитит peer:offline для каждого.
+     * 
+     * @returns {number} Количество удалённых пиров.
+     */
+    function heartbeat() {
+      var now = Date.now();
+      var peerTTL = Config ? Config.get('peerTTL', 60000) : 60000;
+      var removed = [];
+
+      peers.forEach(function(peerInfo, pubkey) {
+        if (now - peerInfo.lastSeen > peerTTL) {
+          removed.push(peerInfo);
+        }
+      });
+
+      for (var i = 0; i < removed.length; i++) {
+        var peer = removed[i];
+        peers.delete(peer.pubkey);
+        removedCount++;
+
+        if (Logger) {
+          Logger.info('PeerManager', 'Peer offline (TTL exceeded)', {
+            pubkey: peer.pubkey.slice(0, 6),
+            lastSeen: peer.lastSeen,
+            age: now - peer.lastSeen,
+            totalPeers: peers.size
+          });
+        }
+
+        if (Bus && Bus.emit) {
+          try {
+            Bus.emit('peer:offline', {
+              pubkey: peer.pubkey,
+              lastSeen: peer.lastSeen
+            });
+          } catch (e) {
+            if (Logger) Logger.error('PeerManager', 'Bus.emit peer:offline failed', e);
+          }
+        }
+      }
+
+      if (removed.length > 0 && Bus && Bus.emit) {
+        try {
+          Bus.emit('peer:count-changed', {
+            count: peers.size,
+            added: false
+          });
+        } catch (e) {
+          if (Logger) Logger.error('PeerManager', 'Bus.emit peer:count-changed failed', e);
+        }
+      }
+
+      return removed.length;
+    }
+
+    /**
+     * Запускает heartbeat с интервалом из Config.
+     * Использует AsyncScheduler для глобальной отмены.
+     * 
+     * @returns {void}
+     */
+    function startHeartbeat() {
+      if (heartbeatActive) return;
+
+      heartbeatActive = true;
+      var interval = Config ? Config.get('heartbeat', 30000) : 30000;
+
+      if (Logger) {
+        Logger.info('PeerManager', 'Heartbeat started', { interval: interval });
+      }
+
+      if (!AsyncScheduler || !AsyncScheduler.repeat) {
+        if (Logger) Logger.warn('PeerManager', 'AsyncScheduler not available, heartbeat disabled');
+        return;
+      }
+
+      AsyncScheduler.repeat(HEARTBEAT_KEY, heartbeat, interval);
+    }
+
+    /**
+     * Останавливает heartbeat.
+     * 
+     * @returns {void}
+     */
+    function stopHeartbeat() {
+      if (!heartbeatActive) return;
+
+      heartbeatActive = false;
+
+      if (AsyncScheduler && AsyncScheduler.cancel) {
+        AsyncScheduler.cancel(HEARTBEAT_KEY);
+      }
+
+      if (Logger) {
+        Logger.info('PeerManager', 'Heartbeat stopped');
+      }
+    }
+
+    /**
+     * Возвращает статистику PeerManager.
+     * 
+     * @returns {{active: number, added: number, removed: number}}
+     */
+    function getStats() {
+      return {
+        active: peers.size,
+        added: addedCount,
+        removed: removedCount
+      };
+    }
+
+    /**
+     * Сбрасывает статистику.
+     * 
+     * @returns {void}
+     */
+    function resetStats() {
+      addedCount = 0;
+      removedCount = 0;
+    }
+
+    /**
+     * Очищает всех пиров (без эмиссии событий).
+     * Вызывается при destroy().
+     * 
+     * @returns {void}
+     */
+    function clearAll() {
+      peers.clear();
+      if (Logger) {
+        Logger.info('PeerManager', 'All peers cleared');
+      }
+    }
+
+    /**
+     * Обработчик события net:peer-activity от NetTransport.
+     * Делегирует в updateTimestamp().
+     * 
+     * @param {Object} payload - Payload события.
+     * @param {string} payload.pubkey - Публичный ключ пира.
+     * @returns {void}
+     */
+    function handlePeerActivity(payload) {
+      if (!payload || !payload.pubkey) return;
+      updateTimestamp(payload.pubkey);
+    }
+
+    /**
+     * Инициализация модуля.
+     * Подписывается на net:peer-activity и запускает heartbeat.
+     * 
+     * @param {AbortSignal} [signal] - Сигнал для автоочистки.
+     * @returns {void}
+     */
+    function init(signal) {
+      if (abortController) {
+        abortController.abort();
+      }
+
+      abortController = new AbortController();
+      var internalSignal = abortController.signal;
+
+      if (Bus && typeof Bus.subscribe === 'function') {
+        Bus.subscribe('net:peer-activity', handlePeerActivity, internalSignal);
+      }
+
+      startHeartbeat();
+
+      if (Logger) {
+        Logger.info('PeerManager', 'Initialized', {
+          peerTTL: Config ? Config.get('peerTTL', 60000) : 60000,
+          heartbeat: Config ? Config.get('heartbeat', 30000) : 30000
+        });
+      }
+    }
+
+    /**
+     * Уничтожение модуля.
+     * Останавливает heartbeat, отписывается от событий, очищает пиров.
+     * 
+     * @returns {void}
+     */
+    function destroy() {
+      stopHeartbeat();
+
+      if (abortController) {
+        abortController.abort();
+        abortController = null;
+      }
+
+      clearAll();
+      resetStats();
+    }
+
+    return {
+      updateTimestamp: updateTimestamp,
+      isOnline: isOnline,
+      getPeer: getPeer,
+      getCount: getCount,
+      getAll: getAll,
+      getPubkeys: getPubkeys,
+      removePeer: removePeer,
+      heartbeat: heartbeat,
+      startHeartbeat: startHeartbeat,
+      stopHeartbeat: stopHeartbeat,
+      getStats: getStats,
+      resetStats: resetStats,
+      clearAll: clearAll,
+      init: init,
+      destroy: destroy
+    };
+  }, ['Config', 'Logger', 'Bus', 'AsyncScheduler']);
   /* <!-- MODULE: PeerManager --> */
 
   /* <!-- MODULE: QueryHandler --> */
-  старт
-  энд
+  /**
+   * @typedef {Object} QueryInboundPayload
+   * @description Payload события query:inbound от EventRouter.
+   * @property {NostrEvent} event - Входящее Nostr-событие Kind 21000.
+   * @property {Object} parsed - Распарсенный content.
+   * @property {Vector} parsed.vector - Вектор запроса.
+   * @property {number|null} parsed.threshold - Порог (или null для fallback).
+   * @property {number|null} parsed.serendipity - Дельта озарений (или null).
+   * @property {number} parsed.version - Версия протокола (1 или 2).
+   */
+
+  /**
+   * @typedef {Object} AnswerCandidate
+   * @description Кандидат на ответ.
+   * @property {string} id - ID заметки.
+   * @property {string} text - Текст заметки.
+   * @property {Vector} vector - Вектор заметки.
+   * @property {number} score - Косинусное сходство.
+   * @property {number} [z_score] - Z-score (вычисляется после фильтрации).
+   */
+
+  /**
+   * @module QueryHandler
+   * @description Обработка входящих поисковых запросов (Kind 21000) от других пиров.
+   * 
+   * Зона ответственности:
+   * - Слушает `query:inbound` от EventRouter
+   * - Inbound rate limiting (per-peer и global)
+   * - Валидация структуры запроса и порогов
+   * - Поиск совпадений в shared-заметках через NoteCache
+   * - Вычисление Z-score для отфильтрованных кандидатов
+   * - Делегирование публикации ответов в NotePublisher
+   * - Stagger delay между ответами через AsyncScheduler
+   * 
+   * Архитектурные принципы:
+   * - НЕ знает о UI, StateManager, фокусе
+   * - Делегирует публикацию в NotePublisher
+   * - Использует NoteCache для shared-заметок (единый источник)
+   * - AbortSignal для отмены при destroy
+   * - Try/catch на каждом шаге pipeline
+   * 
+   * Rate limiting:
+   * - Per-peer: 1 запрос на пир в 5 секунд
+   * - Global: 10 запросов в секунду (sliding window)
+   * - При превышении — тихое игнорирование (без ответа)
+   * 
+   * Алгоритм обработки запроса:
+   * 1. Rate limiting check
+   * 2. Валидация структуры (vector length, dim match)
+   * 3. Валидация порогов (fallback на локальные Config)
+   * 4. NoteCache.getShared() → shared-заметки
+   * 5. AI.cosineBatch(vector, sharedNotes) → scores
+   * 6. Фильтрация: score >= threshold - serendipity
+   * 7. Вычисление Z-score (mean, stddev, z = (score - mean) / stddev)
+   * 8. Сортировка по score desc
+   * 9. Обрезка до maxAnswersPerQuery (5)
+   * 10. AsyncScheduler.stagger → NotePublisher.publishAnswer
+   * 
+   * Слушает события:
+   * - `query:inbound` — входящий поисковый запрос от EventRouter
+   * 
+   * @namespace QueryHandler
+   */
+  DI.register('QueryHandler', function(
+    Config, Logger, Bus, PeerManager, AI, NoteCache, NotePublisher, AsyncScheduler
+  ) {
+    
+    /**
+     * Контроллер для управления подписками.
+     * @type {AbortController | null}
+     */
+    var abortController = null;
+
+    /**
+     * Rate limiting per-peer: pubkey → timestamp последнего обработанного запроса.
+     * Используется для ограничения 1 запрос/пир/5с.
+     * @type {Map<string, number>}
+     */
+    var peerRateLimit = new Map();
+
+    /**
+     * Rate limiting global: очередь timestamps последних запросов.
+     * Используется для sliding window 10 запросов/секунду.
+     * @type {number[]}
+     */
+    var globalRateLimitQueue = [];
+
+    /**
+     * Ключ stagger-задачи в AsyncScheduler.
+     * @type {string}
+     */
+    var STAGGER_KEY_PREFIX = 'queryhandler-response-';
+
+    /**
+     * Счётчик обработанных запросов (для статистики).
+     * @type {{total: number, processed: number, rateLimited: number, errors: number}}
+     */
+    var stats = {
+      total: 0,
+      processed: 0,
+      rateLimited: 0,
+      errors: 0
+    };
+
+    /**
+     * Regex для валидации hex-формата публичного ключа.
+     * @type {RegExp}
+     */
+    var HEX_REGEX = /^[0-9a-f]{64}$/i;
+
+    /**
+     * Проверяет rate limiting для входящего запроса.
+     * 
+     * Два уровня защиты:
+     * 1. Per-peer: не более 1 запроса от одного пира в peerRateLimitWindow (5с)
+     * 2. Global: не более maxGlobalRate запросов в globalRateWindow (1с)
+     * 
+     * При превышении лимита запрос тихо игнорируется (без ответа пиру).
+     * 
+     * @param {string} pubkey - Публичный ключ пира.
+     * @returns {boolean} true если запрос разрешён.
+     */
+    function checkRateLimit(pubkey) {
+      var now = Date.now();
+
+      // Per-peer rate limiting
+      var peerWindow = Config ? Config.get('peerQueryRateLimit', 5000) : 5000;
+      var lastPeerQuery = peerRateLimit.get(pubkey) || 0;
+      
+      if (now - lastPeerQuery < peerWindow) {
+        stats.rateLimited++;
+        if (Logger) {
+          Logger.debug('QueryHandler', 'Rate limited (per-peer)', {
+            pubkey: pubkey.slice(0, 6),
+            timeSinceLast: now - lastPeerQuery,
+            window: peerWindow
+          });
+        }
+        return false;
+      }
+
+      // Global rate limiting (sliding window)
+      var globalWindow = Config ? Config.get('globalQueryRateWindow', 1000) : 1000;
+      var maxGlobalRate = Config ? Config.get('globalQueryRateLimit', 10) : 10;
+      
+      // Удаляем timestamps старше globalWindow
+      var cutoff = now - globalWindow;
+      while (globalRateLimitQueue.length > 0 && globalRateLimitQueue[0] < cutoff) {
+        globalRateLimitQueue.shift();
+      }
+      
+      if (globalRateLimitQueue.length >= maxGlobalRate) {
+        stats.rateLimited++;
+        if (Logger) {
+          Logger.debug('QueryHandler', 'Rate limited (global)', {
+            currentRate: globalRateLimitQueue.length,
+            maxRate: maxGlobalRate,
+            window: globalWindow
+          });
+        }
+        return false;
+      }
+
+      // Запрос разрешён — обновляем лимиты
+      peerRateLimit.set(pubkey, now);
+      globalRateLimitQueue.push(now);
+      
+      return true;
+    }
+
+    /**
+     * Валидирует структуру входящего запроса.
+     * 
+     * Проверяет:
+     * - Наличие и тип vector (Array)
+     * - Длину vector (должна совпадать с Config.dim)
+     * - Наличие event и parsed в payload
+     * - Формат pubkey
+     * 
+     * @param {QueryInboundPayload} payload - Payload события.
+     * @returns {boolean} true если структура валидна.
+     */
+    function validatePayload(payload) {
+      if (!payload || !payload.event || !payload.parsed) {
+        return false;
+      }
+
+      var event = payload.event;
+      var parsed = payload.parsed;
+
+      if (typeof event.pubkey !== 'string' || !HEX_REGEX.test(event.pubkey)) {
+        return false;
+      }
+
+      if (!Array.isArray(parsed.vector) || parsed.vector.length === 0) {
+        return false;
+      }
+
+      var expectedDim = Config ? Config.get('dim', 384) : 384;
+      if (parsed.vector.length !== expectedDim) {
+        if (Logger) {
+          Logger.warn('QueryHandler', 'Incompatible vector dimension', {
+            expected: expectedDim,
+            got: parsed.vector.length,
+            pubkey: event.pubkey.slice(0, 6)
+          });
+        }
+        return false;
+      }
+
+      return true;
+    }
+
+    /**
+     * Нормализует пороги из запроса с fallback на локальные Config.
+     * 
+     * Для protocol_version === 2:
+     * - Использует threshold/serendipity из запроса если валидны (0..1)
+     * - Иначе fallback на локальные значения
+     * 
+     * Для protocol_version === 1:
+     * - Всегда использует локальные значения (legacy)
+     * 
+     * @param {Object} parsed - Распарсенный content запроса.
+     * @returns {{threshold: number, serendipity: number}}
+     */
+    function normalizeThresholds(parsed) {
+      var localThreshold = Config ? Config.get('threshold', 0.7) : 0.7;
+      var localSerendipity = Config ? Config.get('serendipity', 0.3) : 0.3;
+
+      if (parsed.version !== 2) {
+        return { threshold: localThreshold, serendipity: localSerendipity };
+      }
+
+      var threshold = (typeof parsed.threshold === 'number' && 
+                       isFinite(parsed.threshold) && 
+                       parsed.threshold >= 0 && 
+                       parsed.threshold <= 1)
+        ? parsed.threshold 
+        : localThreshold;
+
+      var serendipity = (typeof parsed.serendipity === 'number' && 
+                         isFinite(parsed.serendipity) && 
+                         parsed.serendipity >= 0 && 
+                         parsed.serendipity <= 1)
+        ? parsed.serendipity 
+        : localSerendipity;
+
+      return { threshold: threshold, serendipity: serendipity };
+    }
+
+    /**
+     * Вычисляет Z-score для массива кандидатов.
+     * 
+     * Z-score = (score - mean) / stddev
+     * Показывает, насколько score отклоняется от среднего в единицах стандартного отклонения.
+     * 
+     * Edge cases:
+     * - count === 0: возвращает пустой массив
+     * - count === 1: stddev = 0, z_score = 0 для всех
+     * - stddev === 0 (все scores одинаковые): z_score = 0
+     * 
+     * @param {AnswerCandidate[]} candidates - Массив кандидатов с полем score.
+     * @returns {AnswerCandidate[]} Кандидаты с добавленным полем z_score.
+     */
+    function computeZScores(candidates) {
+      if (!candidates || candidates.length === 0) {
+        return [];
+      }
+
+      var count = candidates.length;
+      var mean = 0;
+      for (var i = 0; i < count; i++) {
+        mean += candidates[i].score;
+      }
+      mean /= count;
+
+      var stddev = 0;
+      if (count > 1) {
+        var sumSq = 0;
+        for (var j = 0; j < count; j++) {
+          var diff = candidates[j].score - mean;
+          sumSq += diff * diff;
+        }
+        stddev = Math.sqrt(sumSq / (count - 1));
+      }
+
+      for (var k = 0; k < count; k++) {
+        candidates[k].z_score = stddev > 0 
+          ? (candidates[k].score - mean) / stddev 
+          : 0;
+      }
+
+      return candidates;
+    }
+
+    /**
+     * Отправляет ответы пиру с stagger delay.
+     * Каждый ответ отправляется с задержкой 500мс от предыдущего.
+     * Делегирует фактическую публикацию в NotePublisher.
+     * 
+     * @param {string} queryId - ID запроса, на который отвечаем.
+     * @param {AnswerCandidate[]} answers - Массив ответов.
+     * @param {string} peerPubkey - Публичный ключ пира-запросчика.
+     * @returns {void}
+     */
+    function sendAnswers(queryId, answers, peerPubkey) {
+      if (!answers || answers.length === 0) {
+        return;
+      }
+
+      var staggerDelay = Config ? Config.get('answerStaggerDelay', 500) : 500;
+
+      for (var i = 0; i < answers.length; i++) {
+        (function(answer, index) {
+          var delay = index * staggerDelay;
+          var taskKey = STAGGER_KEY_PREFIX + queryId + '-' + index;
+
+          if (AsyncScheduler && AsyncScheduler.delay) {
+            AsyncScheduler.delay(taskKey, function() {
+              if (NotePublisher && NotePublisher.publishAnswer) {
+                NotePublisher.publishAnswer(queryId, answer, peerPubkey);
+              }
+            }, delay);
+          } else {
+            // Fallback: setTimeout если AsyncScheduler недоступен
+            setTimeout(function() {
+              if (NotePublisher && NotePublisher.publishAnswer) {
+                NotePublisher.publishAnswer(queryId, answer, peerPubkey);
+              }
+            }, delay);
+          }
+        })(answers[i], i);
+      }
+    }
+
+    /**
+     * Главный обработчик входящего поискового запроса.
+     * 
+     * Pipeline:
+     * 1. Rate limiting check
+     * 2. Payload validation
+     * 3. Threshold normalization
+     * 4. NoteCache.getShared() → shared-заметки
+     * 5. AI.cosineBatch(vector, sharedNotes) → scores
+     * 6. Фильтрация: score >= threshold - serendipity
+     * 7. Z-score computation
+     * 8. Sort by score desc
+     * 9. Trim to maxAnswersPerQuery
+     * 10. sendAnswers с stagger
+     * 
+     * @param {QueryInboundPayload} payload - Payload события.
+     * @returns {void}
+     */
+    function handleQueryInbound(payload) {
+      stats.total++;
+
+      if (!validatePayload(payload)) {
+        stats.errors++;
+        if (Logger) {
+          Logger.warn('QueryHandler', 'Invalid payload', {
+            eventId: payload && payload.event ? payload.event.id : 'unknown'
+          });
+        }
+        return;
+      }
+
+      var event = payload.event;
+      var parsed = payload.parsed;
+      var pubkey = event.pubkey;
+
+      // Rate limiting
+      if (!checkRateLimit(pubkey)) {
+        return;
+      }
+
+      // Нормализация порогов
+      var thresholds = normalizeThresholds(parsed);
+      var threshold = thresholds.threshold;
+      var serendipity = thresholds.serendipity;
+      var minScore = threshold - serendipity;
+
+      if (Logger) {
+        Logger.debug('QueryHandler', 'Processing query', {
+          pubkey: pubkey.slice(0, 6),
+          eventId: event.id,
+          version: parsed.version,
+          threshold: threshold,
+          serendipity: serendipity,
+          minScore: minScore
+        });
+      }
+
+      // Получение shared-заметок
+      var sharedNotes;
+      try {
+        sharedNotes = NoteCache ? NoteCache.getShared() : [];
+      } catch (e) {
+        stats.errors++;
+        if (Logger) Logger.error('QueryHandler', 'NoteCache.getShared failed', e);
+        return;
+      }
+
+      if (!sharedNotes || sharedNotes.length === 0) {
+        if (Logger) {
+          Logger.debug('QueryHandler', 'No shared notes to answer', {
+            pubkey: pubkey.slice(0, 6)
+          });
+        }
+        return;
+      }
+
+      // Подготовка кандидатов для AI
+      var candidates = [];
+      for (var i = 0; i < sharedNotes.length; i++) {
+        var note = sharedNotes[i];
+        if (note && note.vector && Array.isArray(note.vector)) {
+          candidates.push({
+            id: note.id,
+            vector: note.vector
+          });
+        }
+      }
+
+      if (candidates.length === 0) {
+        return;
+      }
+
+      // Вычисление cosine similarity через AI
+      var cosinePromise;
+      try {
+        cosinePromise = AI.cosineBatch(parsed.vector, candidates);
+      } catch (e) {
+        stats.errors++;
+        if (Logger) Logger.error('QueryHandler', 'AI.cosineBatch failed', e);
+        return;
+      }
+
+      if (!cosinePromise || typeof cosinePromise.then !== 'function') {
+        stats.errors++;
+        if (Logger) Logger.error('QueryHandler', 'AI.cosineBatch did not return Promise');
+        return;
+      }
+
+      cosinePromise.then(function(scores) {
+        if (!scores || !Array.isArray(scores) || scores.length === 0) {
+          return;
+        }
+
+        // Создание map id → note для быстрого доступа
+        var noteMap = new Map();
+        for (var i = 0; i < sharedNotes.length; i++) {
+          noteMap.set(sharedNotes[i].id, sharedNotes[i]);
+        }
+
+        // Фильтрация по minScore и построение AnswerCandidate
+        var filtered = [];
+        for (var j = 0; j < scores.length; j++) {
+          var s = scores[j];
+          if (s && typeof s.score === 'number' && s.score >= minScore) {
+            var note = noteMap.get(s.id);
+            if (note) {
+              filtered.push({
+                id: note.id,
+                text: note.text,
+                vector: note.vector,
+                score: s.score
+              });
+            }
+          }
+        }
+
+        if (filtered.length === 0) {
+          if (Logger) {
+            Logger.debug('QueryHandler', 'No candidates passed filter', {
+              pubkey: pubkey.slice(0, 6),
+              minScore: minScore,
+              totalScores: scores.length
+            });
+          }
+          return;
+        }
+
+        // Z-score computation
+        filtered = computeZScores(filtered);
+
+        // Сортировка по score desc
+        filtered.sort(function(a, b) {
+          return b.score - a.score;
+        });
+
+        // Обрезка до maxAnswersPerQuery
+        var maxAnswers = Config ? Config.get('maxAnswersPerQuery', 5) : 5;
+        var answers = filtered.slice(0, maxAnswers);
+
+        stats.processed++;
+
+        if (Logger) {
+          Logger.info('QueryHandler', 'Sending answers', {
+            pubkey: pubkey.slice(0, 6),
+            queryId: event.id,
+            answerCount: answers.length,
+            topScore: answers[0] ? answers[0].score : 0
+          });
+        }
+
+        // Отправка с stagger
+        sendAnswers(event.id, answers, pubkey);
+      }).catch(function(err) {
+        stats.errors++;
+        if (Logger) Logger.error('QueryHandler', 'cosineBatch promise rejected', err);
+      });
+    }
+
+    /**
+     * Очищает устаревшие записи в peerRateLimit.
+     * Вызывается периодически для предотвращения утечки памяти.
+     * 
+     * @returns {number} Количество удалённых записей.
+     */
+    function cleanupPeerRateLimit() {
+      var now = Date.now();
+      var peerWindow = Config ? Config.get('peerQueryRateLimit', 5000) : 5000;
+      var cleanupThreshold = peerWindow * 10; // Удаляем записи старше 10x window
+      var removed = 0;
+
+      peerRateLimit.forEach(function(timestamp, pubkey) {
+        if (now - timestamp > cleanupThreshold) {
+          peerRateLimit.delete(pubkey);
+          removed++;
+        }
+      });
+
+      return removed;
+    }
+
+    /**
+     * Возвращает статистику QueryHandler.
+     * 
+     * @returns {{total: number, processed: number, rateLimited: number, errors: number}}
+     */
+    function getStats() {
+      return {
+        total: stats.total,
+        processed: stats.processed,
+        rateLimited: stats.rateLimited,
+        errors: stats.errors
+      };
+    }
+
+    /**
+     * Сбрасывает статистику.
+     * 
+     * @returns {void}
+     */
+    function resetStats() {
+      stats.total = 0;
+      stats.processed = 0;
+      stats.rateLimited = 0;
+      stats.errors = 0;
+    }
+
+    /**
+     * Инициализация модуля.
+     * Подписывается на query:inbound с AbortSignal.
+     * 
+     * @param {AbortSignal} [signal] - Сигнал для автоочистки.
+     * @returns {void}
+     */
+    function init(signal) {
+      if (abortController) {
+        abortController.abort();
+      }
+
+      abortController = new AbortController();
+      var internalSignal = abortController.signal;
+
+      if (Bus && typeof Bus.subscribe === 'function') {
+        Bus.subscribe('query:inbound', handleQueryInbound, internalSignal);
+      }
+
+      // Периодическая очистка peerRateLimit (каждые 5 минут)
+      if (AsyncScheduler && AsyncScheduler.repeat) {
+        AsyncScheduler.repeat('queryhandler-cleanup', cleanupPeerRateLimit, 300000);
+      }
+
+      if (Logger) {
+        Logger.info('QueryHandler', 'Initialized', {
+          peerRateLimit: Config ? Config.get('peerQueryRateLimit', 5000) : 5000,
+          globalRateLimit: Config ? Config.get('globalQueryRateLimit', 10) : 10,
+          maxAnswersPerQuery: Config ? Config.get('maxAnswersPerQuery', 5) : 5,
+          staggerDelay: Config ? Config.get('answerStaggerDelay', 500) : 500
+        });
+      }
+    }
+
+    /**
+     * Уничтожение модуля.
+     * Отписывается от событий, очищает rate limiting maps.
+     * 
+     * @returns {void}
+     */
+    function destroy() {
+      if (abortController) {
+        abortController.abort();
+        abortController = null;
+      }
+
+      if (AsyncScheduler && AsyncScheduler.cancel) {
+        AsyncScheduler.cancel('queryhandler-cleanup');
+      }
+
+      peerRateLimit.clear();
+      globalRateLimitQueue.length = 0;
+      resetStats();
+    }
+
+    return {
+      init: init,
+      destroy: destroy,
+      getStats: getStats,
+      resetStats: resetStats,
+      cleanupPeerRateLimit: cleanupPeerRateLimit
+    };
+  }, ['Config', 'Logger', 'Bus', 'PeerManager', 'AI', 'NoteCache', 'NotePublisher', 'AsyncScheduler']);
   /* <!-- MODULE: QueryHandler --> */
 
   /* <!-- MODULE: LiveStreamService --> */
-  старт
-  энд
+  /**
+   * @typedef {Object} StreamNote
+   * @description Эфемерная заметка в Live Stream.
+   * @property {string} id - ID заметки (из Nostr-события).
+   * @property {string} text - Текст заметки.
+   * @property {Vector} vector - Вектор эмбеддинга.
+   * @property {string} peer - Короткий ID пира (первые 6 символов pubkey).
+   * @property {string} fullPubkey - Полный публичный ключ пира.
+   * @property {number} createdAt - Timestamp получения заметки.
+   * @property {string[]} [children] - Массив ID дочерних заметок (всегда пуст для сетевых).
+   */
+
+  /**
+   * @module LiveStreamService
+   * @description Управление эфемерным Live Stream (режим IDLE).
+   * 
+   * Зона ответственности:
+   * - Хранение streamData в памяти (эфемерно, не в БД)
+   * - FIFO добавление новых заметок (лимит 50)
+   * - Дедупликация по id (защита от повторов через разные релеи)
+   * - Очистка заметок при peer:offline (эфемерность)
+   * - Удаление заметок по net:deletion (Kind 21002, если поддерживается)
+   * - Эмиссия stream:updated для UI компонентов
+   * 
+   * Архитектурные принципы:
+   * - НЕ сохраняет в IndexedDB (эфемерная модель)
+   * - НЕ знает о поиске, фокусе, редакторе
+   * - Делегирует UI-обновления через stream:updated событие
+   * - Привязка к пирам: каждая заметка содержит fullPubkey
+   * - AbortSignal для автоматической отписки
+   * 
+   * Слушает события:
+   * - `net:stream-event` — новая заметка от NetTransport
+   *   payload: {note: StreamNote}
+   * - `peer:offline` — пир отключился от PeerManager
+   *   payload: {pubkey: string, lastSeen: number}
+   * - `net:peer-offline` — альтернативное событие от NetTransport (fallback)
+   *   payload: {pubkey: string}
+   * - `net:deletion` — уведомление об удалении заметки (Kind 21002)
+   *   payload: {id: string}
+   * 
+   * Эмитит события:
+   * - `stream:updated` — обновление streamData
+   *   payload: {streamData: StreamNote[]}
+   * - `stream:count-changed` — изменение количества заметок
+   *   payload: {count: number, added: boolean}
+   * 
+   * @namespace LiveStreamService
+   */
+  DI.register('LiveStreamService', function(Config, Logger, Bus, PeerManager) {
+    
+    /**
+     * Контроллер для управления подписками.
+     * @type {AbortController | null}
+     */
+    var abortController = null;
+
+    /**
+     * Массив эфемерных заметок в Live Stream.
+     * FIFO: новые добавляются в начало, старые обрезаются при превышении лимита.
+     * @type {StreamNote[]}
+     */
+    var streamData = [];
+
+    /**
+     * Set для быстрой дедупликации по id.
+     * @type {Set<string>}
+     */
+    var seenIds = new Set();
+
+    /**
+     * Максимальное количество заметок в streamData.
+     * @type {number}
+     */
+    var MAX_STREAM_SIZE = 50;
+
+    /**
+     * Счётчик добавленных заметок (для статистики).
+     * @type {number}
+     */
+    var addedCount = 0;
+
+    /**
+     * Счётчик удалённых заметок (для статистики).
+     * @type {number}
+     */
+    var removedCount = 0;
+
+    /**
+     * Счётчик дедуплицированных заметок (для статистики).
+     * @type {number}
+     */
+    var deduplicatedCount = 0;
+
+    /**
+     * Валидирует структуру StreamNote.
+     * 
+     * @param {Object} note - Объект для проверки.
+     * @returns {boolean} true если структура валидна.
+     */
+    function isValidNote(note) {
+      if (!note || typeof note !== 'object') return false;
+      if (typeof note.id !== 'string' || !note.id) return false;
+      if (typeof note.text !== 'string' || !note.text) return false;
+      if (!Array.isArray(note.vector) || note.vector.length === 0) return false;
+      if (typeof note.fullPubkey !== 'string' || !note.fullPubkey) return false;
+      if (typeof note.peer !== 'string' || !note.peer) return false;
+      if (typeof note.createdAt !== 'number') return false;
+      return true;
+    }
+
+    /**
+     * Добавляет новую заметку в streamData (FIFO).
+     * 
+     * Алгоритм:
+     * 1. Валидация структуры
+     * 2. Дедупликация по id (через seenIds Set)
+     * 3. Проверка, что пир всё ещё онлайн (через PeerManager)
+     * 4. Добавление в начало массива
+     * 5. Обрезка до MAX_STREAM_SIZE
+     * 6. Эмиссия stream:updated
+     * 
+     * @param {StreamNote} note - Заметка для добавления.
+     * @returns {boolean} true если заметка добавлена.
+     */
+    function addNote(note) {
+      if (!isValidNote(note)) {
+        if (Logger) {
+          Logger.warn('LiveStreamService', 'Invalid note structure', {
+            id: note && note.id
+          });
+        }
+        return false;
+      }
+
+      // Дедупликация
+      if (seenIds.has(note.id)) {
+        deduplicatedCount++;
+        if (Logger) {
+          Logger.debug('LiveStreamService', 'Duplicate note ignored', {
+            id: note.id.slice(0, 6),
+            peer: note.peer
+          });
+        }
+        return false;
+      }
+
+      // Проверка, что пир онлайн
+      if (PeerManager && !PeerManager.isOnline(note.fullPubkey)) {
+        if (Logger) {
+          Logger.debug('LiveStreamService', 'Note from offline peer ignored', {
+            id: note.id.slice(0, 6),
+            peer: note.peer
+          });
+        }
+        return false;
+      }
+
+      // Добавляем в начало (FIFO: самое свежее сверху)
+      streamData.unshift(note);
+      seenIds.add(note.id);
+      addedCount++;
+
+      // Обрезка до лимита
+      if (streamData.length > MAX_STREAM_SIZE) {
+        var removed = streamData.pop();
+        if (removed) {
+          seenIds.delete(removed.id);
+        }
+      }
+
+      if (Logger) {
+        Logger.debug('LiveStreamService', 'Note added to stream', {
+          id: note.id.slice(0, 6),
+          peer: note.peer,
+          streamSize: streamData.length
+        });
+      }
+
+      emitUpdate(true);
+      return true;
+    }
+
+    /**
+     * Удаляет все заметки от указанного пира.
+     * Вызывается при получении peer:offline.
+     * 
+     * @param {string} pubkey - Полный публичный ключ пира.
+     * @returns {number} Количество удалённых заметок.
+     */
+    function removePeerNotes(pubkey) {
+      if (typeof pubkey !== 'string' || !pubkey) return 0;
+
+      var before = streamData.length;
+      var filtered = [];
+
+      for (var i = 0; i < streamData.length; i++) {
+        var note = streamData[i];
+        if (note && note.fullPubkey !== pubkey) {
+          filtered.push(note);
+        } else if (note && note.id) {
+          seenIds.delete(note.id);
+        }
+      }
+
+      streamData = filtered;
+      var removedCount = before - streamData.length;
+
+      if (removedCount > 0) {
+        removedCount += removedCount;
+
+        if (Logger) {
+          Logger.info('LiveStreamService', 'Removed peer notes', {
+            pubkey: pubkey.slice(0, 6),
+            removedCount: removedCount,
+            remainingSize: streamData.length
+          });
+        }
+
+        emitUpdate(false);
+      }
+
+      return removedCount;
+    }
+
+    /**
+     * Удаляет конкретную заметку по id.
+     * Вызывается при получении net:deletion (Kind 21002).
+     * 
+     * @param {string} id - ID заметки для удаления.
+     * @returns {boolean} true если заметка удалена.
+     */
+    function removeNote(id) {
+      if (typeof id !== 'string' || !id) return false;
+
+      var before = streamData.length;
+      var filtered = [];
+
+      for (var i = 0; i < streamData.length; i++) {
+        var note = streamData[i];
+        if (note && note.id !== id) {
+          filtered.push(note);
+        }
+      }
+
+      streamData = filtered;
+      var removed = before - streamData.length;
+
+      if (removed > 0) {
+        seenIds.delete(id);
+        removedCount += removed;
+
+        if (Logger) {
+          Logger.info('LiveStreamService', 'Note removed by deletion event', {
+            id: id.slice(0, 6),
+            remainingSize: streamData.length
+          });
+        }
+
+        emitUpdate(false);
+      }
+
+      return removed > 0;
+    }
+
+    /**
+     * Эмитит событие stream:updated с текущим streamData.
+     * 
+     * @param {boolean} added - true если добавлена заметка, false если удалена.
+     * @returns {void}
+     */
+    function emitUpdate(added) {
+      if (Bus && Bus.emit) {
+        try {
+          Bus.emit('stream:updated', {
+            streamData: streamData.slice() // Копия для защиты от мутации
+          });
+          Bus.emit('stream:count-changed', {
+            count: streamData.length,
+            added: added
+          });
+        } catch (e) {
+          if (Logger) Logger.error('LiveStreamService', 'Bus.emit failed', e);
+        }
+      }
+    }
+
+    /**
+     * Возвращает текущий streamData (копия).
+     * 
+     * @returns {StreamNote[]} Копия массива заметок.
+     */
+    function getStreamData() {
+      return streamData.slice();
+    }
+
+    /**
+     * Возвращает количество заметок в streamData.
+     * 
+     * @returns {number}
+     */
+    function getCount() {
+      return streamData.length;
+    }
+
+    /**
+     * Проверяет, существует ли заметка с указанным id.
+     * 
+     * @param {string} id - ID заметки.
+     * @returns {boolean}
+     */
+    function hasNote(id) {
+      return seenIds.has(id);
+    }
+
+    /**
+     * Возвращает заметку по id.
+     * 
+     * @param {string} id - ID заметки.
+     * @returns {StreamNote | null}
+     */
+    function getNote(id) {
+      for (var i = 0; i < streamData.length; i++) {
+        if (streamData[i] && streamData[i].id === id) {
+          return streamData[i];
+        }
+      }
+      return null;
+    }
+
+    /**
+     * Возвращает все заметки от указанного пира.
+     * 
+     * @param {string} pubkey - Полный публичный ключ пира.
+     * @returns {StreamNote[]}
+     */
+    function getPeerNotes(pubkey) {
+      var result = [];
+      for (var i = 0; i < streamData.length; i++) {
+        var note = streamData[i];
+        if (note && note.fullPubkey === pubkey) {
+          result.push(note);
+        }
+      }
+      return result;
+    }
+
+    /**
+     * Очищает весь streamData.
+     * Вызывается при destroy() или ручном reset.
+     * 
+     * @returns {number} Количество удалённых заметок.
+     */
+    function clearAll() {
+      var count = streamData.length;
+      streamData = [];
+      seenIds.clear();
+
+      if (count > 0) {
+        removedCount += count;
+
+        if (Logger) {
+          Logger.info('LiveStreamService', 'All stream notes cleared', {
+            count: count
+          });
+        }
+
+        emitUpdate(false);
+      }
+
+      return count;
+    }
+
+    /**
+     * Возвращает статистику LiveStreamService.
+     * 
+     * @returns {{current: number, added: number, removed: number, deduplicated: number}}
+     */
+    function getStats() {
+      return {
+        current: streamData.length,
+        added: addedCount,
+        removed: removedCount,
+        deduplicated: deduplicatedCount
+      };
+    }
+
+    /**
+     * Сбрасывает статистику.
+     * 
+     * @returns {void}
+     */
+    function resetStats() {
+      addedCount = 0;
+      removedCount = 0;
+      deduplicatedCount = 0;
+    }
+
+    /**
+     * Обработчик события net:stream-event от NetTransport.
+     * Делегирует в addNote().
+     * 
+     * @param {Object} payload - Payload события.
+     * @param {StreamNote} payload.note - Заметка для добавления.
+     * @returns {void}
+     */
+    function handleStreamEvent(payload) {
+      if (!payload || !payload.note) return;
+      addNote(payload.note);
+    }
+
+    /**
+     * Обработчик события peer:offline от PeerManager.
+     * Делегирует в removePeerNotes().
+     * 
+     * @param {Object} payload - Payload события.
+     * @param {string} payload.pubkey - Публичный ключ пира.
+     * @returns {void}
+     */
+    function handlePeerOffline(payload) {
+      if (!payload || !payload.pubkey) return;
+      removePeerNotes(payload.pubkey);
+    }
+
+    /**
+     * Обработчик события net:deletion (Kind 21002).
+     * Делегирует в removeNote().
+     * 
+     * @param {Object} payload - Payload события.
+     * @param {string} payload.id - ID заметки для удаления.
+     * @returns {void}
+     */
+    function handleDeletion(payload) {
+      if (!payload || !payload.id) return;
+      removeNote(payload.id);
+    }
+
+    /**
+     * Инициализация модуля.
+     * Подписывается на события с AbortSignal.
+     * 
+     * @param {AbortSignal} [signal] - Сигнал для автоочистки.
+     * @returns {void}
+     */
+    function init(signal) {
+      if (abortController) {
+        abortController.abort();
+      }
+
+      abortController = new AbortController();
+      var internalSignal = abortController.signal;
+
+      if (Bus && typeof Bus.subscribe === 'function') {
+        Bus.subscribe('net:stream-event', handleStreamEvent, internalSignal);
+        Bus.subscribe('peer:offline', handlePeerOffline, internalSignal);
+        Bus.subscribe('net:peer-offline', handlePeerOffline, internalSignal); // Fallback
+        Bus.subscribe('net:deletion', handleDeletion, internalSignal);
+      }
+
+      if (Logger) {
+        Logger.info('LiveStreamService', 'Initialized', {
+          maxSize: MAX_STREAM_SIZE
+        });
+      }
+    }
+
+    /**
+     * Уничтожение модуля.
+     * Отписывается от событий, очищает streamData.
+     * 
+     * @returns {void}
+     */
+    function destroy() {
+      if (abortController) {
+        abortController.abort();
+        abortController = null;
+      }
+
+      clearAll();
+      resetStats();
+    }
+
+    return {
+      addNote: addNote,
+      removePeerNotes: removePeerNotes,
+      removeNote: removeNote,
+      getStreamData: getStreamData,
+      getCount: getCount,
+      hasNote: hasNote,
+      getNote: getNote,
+      getPeerNotes: getPeerNotes,
+      clearAll: clearAll,
+      getStats: getStats,
+      resetStats: resetStats,
+      init: init,
+      destroy: destroy
+    };
+  }, ['Config', 'Logger', 'Bus', 'PeerManager']);
   /* <!-- MODULE: LiveStreamService --> */
 
   /* <!-- MODULE: NoteCache --> */
