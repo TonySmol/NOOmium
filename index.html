@@ -1,7 +1,7 @@
 <!doctype html>
 <html lang="ru">
 <head>
-  <meta name="app-version" content="2.0.0">
+  <meta name="app-version" content="2.0.1">
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,maximum-scale=1">
   <meta name="mobile-web-app-capable" content="yes">
@@ -6921,6 +6921,32 @@ DI.register('Utils', function() {
     }
 
     /**
+     * Публикует заранее подписанное Nostr-событие в сеть.
+     * Используется NotePublisher для отправки ответов на Kind 21000.
+     * 
+     * @param {NostrEvent} event - Подписанное Nostr-событие.
+     * @returns {Promise<boolean>} Promise: true если событие передано в safePublish.
+     */
+    function publishRaw(event) {
+      if (!event || !event.id || !event.sig) {
+        if (Logger) Logger.warn('NetTransport', 'publishRaw: invalid event');
+        return Promise.resolve(false);
+      }
+      safePublish(event);
+      return Promise.resolve(true);
+    }
+
+    /**
+     * Возвращает инстанс nostr-tools для использования в других модулях
+     * (например, в AuthService для вычисления публичного ключа).
+     * 
+     * @returns {Object|null} nostr-tools модуль или null если не загружен.
+     */
+    function getNostrTools() {
+      return nostr;
+    }
+
+    /**
      * Инициализация модуля (вызывается DI.initAll).
      * NetTransport не требует автоматической инициализации —
      * init() вызывается явно из App.Boot после загрузки AI.
@@ -6961,6 +6987,8 @@ DI.register('Utils', function() {
       stop: stop,
       restart: restart,
       publishNote: publishNote,
+      publishRaw: publishRaw,
+      getNostrTools: getNostrTools,
       initModule: initModule,
       destroy: destroy
     };
@@ -13646,9 +13674,9 @@ DI.register('Utils', function() {
 
   /**
    * @typedef {Object} PeerOfflinePayload
-   * @description Payload события peer:offline.
+   * @description Payload события peer:offline или net:peer-offline.
    * @property {string} pubkey - Публичный ключ отключившегося пира.
-   * @property {number} lastSeen - Timestamp последнего события от пира.
+   * @property {number} [lastSeen] - Timestamp последнего события от пира.
    */
 
   /**
@@ -13659,7 +13687,7 @@ DI.register('Utils', function() {
    * - Слушает события от EditorComponent, NetTransport, PeerManager
    * - Делегирует поиск в TextSearchStrategy или FocusSearchStrategy
    * - Обновляет StateManager через dispatch
-   * - Обрабатывает Live Stream события (net:stream-event, peer:offline)
+   * - Обрабатывает Live Stream события (net:stream-event, peer:offline, net:peer-offline)
    * - Защищает от stale-ответов через pendingSearchId
    * 
    * Архитектурные принципы:
@@ -13684,34 +13712,18 @@ DI.register('Utils', function() {
    *   payload: {note: StreamNote}
    * - `peer:offline` — пир отключился от PeerManager
    *   payload: {pubkey: string, lastSeen: number}
+   * - `net:peer-offline` — пир отключился от NetTransport (FALLBACK, критично для эфемерности)
+   *   payload: {pubkey: string}
    * 
    * Эмитит события: нет (только dispatch в StateManager)
    * 
-   * КЛЮЧЕВЫЕ ИЗМЕНЕНИЯ v2.0:
-   * 
-   * 1. **pendingSearchId для отмены stale-ответов:**
-   *    - Инкрементируется при каждом новом поисковом запросе
-   *    - Перед обновлением state проверяется `currentId === pendingSearchId`
-   *    - Защищает от race conditions при быстром вводе текста
-   * 
-   * 2. **Обработка peer:offline всегда:**
-   *    - Раньше (v1): обрабатывался только в idle режиме
-   *    - Теперь: обрабатывается всегда для консистентности
-   *    - Но обновление streamData происходит только в idle
-   * 
-   * 3. **Обработка net:stream-event:**
-   *    - FIFO добавление в streamData (лимит 50)
-   *    - Дедупликация по id
-   *    - Обновление state только в idle режиме
-   * 
-   * 4. **Гарантированный возврат Promise:**
-   *    - search() и searchByVector() всегда возвращают Promise
-   *    - Устраняет краш "Cannot read properties of undefined (reading 'then')"
-   * 
-   * Используется модулями:
-   * - EditorComponent → через Bus.emit('editor:search-request')
-   * - SearchService → через search() / searchByVector()
-   * - App.Boot → через init()
+   * ИСПРАВЛЕНИЕ v2.0.1:
+   * Добавлена подписка на `net:peer-offline` как fallback.
+   * PeerManager в текущей архитектуре является модулем-призраком (его Map пиров
+   * пуст, потому что NetTransport не эмитит net:peer-activity).
+   * NetTransport ведёт собственный peers Map и эмитит net:peer-offline
+   * из своего heartbeat. Без этой подписки state.streamData не очищался
+   * при отключении пиров, что нарушало Принцип #2 (Эфемерность).
    * 
    * @namespace SearchCoordinator
    */
@@ -13922,12 +13934,6 @@ DI.register('Utils', function() {
      * @param {string} text - Поисковый запрос.
      * @param {boolean} [force=false] - Принудительная отправка в сеть.
      * @returns {Promise<void>} Promise, разрешающийся после завершения поиска.
-     * 
-     * @example
-     * SearchCoordinator.search('медитация', false)
-     *   .then(function() {
-     *     console.log('Search completed');
-     *   });
      */
     function search(text, force) {
       var trimmed = (text || '').trim();
@@ -14050,9 +14056,13 @@ DI.register('Utils', function() {
       var currentData = state.streamData || [];
 
       // Дедупликация по id
-      var exists = currentData.some(function(item) {
-        return item && item.id === newNote.id;
-      });
+      var exists = false;
+      for (var i = 0; i < currentData.length; i++) {
+        if (currentData[i] && currentData[i].id === newNote.id) {
+          exists = true;
+          break;
+        }
+      }
 
       if (exists) {
         if (Logger) {
@@ -14083,16 +14093,19 @@ DI.register('Utils', function() {
     }
 
     /**
-     * Обработчик события peer:offline (пир отключился).
+     * Обработчик событий peer:offline и net:peer-offline (пир отключился).
      * 
      * Алгоритм:
      * 1. Проверяет что uiMode === 'idle' (streamData актуален только в idle)
      * 2. Фильтрует streamData, удаляя все заметки от этого пира
      * 3. dispatch('update-stream', {streamData})
      * 
-     * КЛЮЧЕВОЕ ИЗМЕНЕНИЕ v2.0:
-     * Обрабатывается всегда (не только в idle), но обновление state только в idle.
-     * Это обеспечивает консистентность данных.
+     * ВАЖНО: Подписан на ОБА события:
+     * - `peer:offline` от PeerManager (архитектурно правильный, но сейчас не работает)
+     * - `net:peer-offline` от NetTransport (fallback, реальный источник эфемерности)
+     * 
+     * Это обеспечивает Принцип #2 (Эфемерность): при уходе пира его мысли
+     * немедленно удаляются из Live Stream.
      * 
      * @param {PeerOfflinePayload} payload - Payload события.
      * @returns {void}
@@ -14119,9 +14132,12 @@ DI.register('Utils', function() {
       }
 
       var currentData = state.streamData || [];
-      var filteredData = currentData.filter(function(item) {
-        return item && item.fullPubkey !== payload.pubkey;
-      });
+      var filteredData = [];
+      for (var i = 0; i < currentData.length; i++) {
+        if (currentData[i] && currentData[i].fullPubkey !== payload.pubkey) {
+          filteredData.push(currentData[i]);
+        }
+      }
 
       var removedCount = currentData.length - filteredData.length;
 
@@ -14199,6 +14215,12 @@ DI.register('Utils', function() {
      * Инициализация модуля.
      * Подписывается на все необходимые события с AbortSignal.
      * 
+     * КЛЮЧЕВОЕ ИЗМЕНЕНИЕ v2.0.1:
+     * Добавлена подписка на `net:peer-offline` — это событие эмитится
+     * модулем NetTransport из его внутреннего heartbeat. Без этой подписки
+     * эфемерность не работала: заметки отключившихся пиров оставались
+     * в state.streamData навсегда.
+     * 
      * @param {AbortSignal} [signal] - Сигнал для автоочистки.
      * @returns {void}
      */
@@ -14216,11 +14238,17 @@ DI.register('Utils', function() {
         Bus.subscribe('editor:send-complete', handleSendComplete, internalSignal);
         Bus.subscribe('net:stream-event', handleStreamEvent, internalSignal);
         Bus.subscribe('peer:offline', handlePeerOffline, internalSignal);
+        // v2.0.1: Fallback-подписка на net:peer-offline от NetTransport
+        // Необходима, потому что PeerManager сейчас не получает net:peer-activity
+        // и его Map пиров пуст. NetTransport ведёт собственный peers Map
+        // и эмитит net:peer-offline из своего heartbeat.
+        Bus.subscribe('net:peer-offline', handlePeerOffline, internalSignal);
       }
 
       if (Logger) {
         Logger.info('SearchCoordinator', 'Initialized', {
-          maxStreamSize: MAX_STREAM_SIZE
+          maxStreamSize: MAX_STREAM_SIZE,
+          subscribedToNetPeerOffline: true
         });
       }
     }
