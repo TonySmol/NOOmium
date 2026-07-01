@@ -1,7 +1,7 @@
 <!doctype html>
 <html lang="ru">
 <head>
-  <meta name="app-version" content="2.0.0">
+  <meta name="app-version" content="2.0.1">
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,maximum-scale=1">
   <meta name="mobile-web-app-capable" content="yes">
@@ -2410,15 +2410,491 @@ DI.register('Utils', function() {
 }, []);
 /* <!-- MODULE: Utils --> */
 
-  /* <!-- MODULE: Logger --> */
-  старт
-  энд
-  /* <!-- MODULE: Logger --> */
+/* <!-- MODULE: Logger --> */
+/**
+ * @module Logger
+ * @description Централизованное логирование с timestamps и уровнями.
+ *
+ * Уровни (по возрастанию строгости):
+ * - debug (0) — детальная отладка, отключена в production
+ * - info (1) — информационные сообщения
+ * - warn (2) — предупреждения
+ * - error (3) — ошибки (всегда логируются)
+ *
+ * Формат лога: [HH:MM:SS.mmm] [LEVEL] [Tag] message data
+ *
+ * Архитектурные принципы:
+ * - Не имеет зависимостей (самый базовый модуль)
+ * - Синхронный (не блокирует event loop)
+ * - Может быть отключён через Config.debug = false
+ *
+ * @namespace Logger
+ */
+DI.register('Logger', function() {
 
-  /* <!-- MODULE: Bus --> */
-  старт
-  энд
-  /* <!-- MODULE: Bus --> */
+  /**
+   * Уровни логирования с числовыми значениями для сравнения.
+   * @type {Object<string, number>}
+   */
+  var LEVELS = {
+    debug: 0,
+    info: 1,
+    warn: 2,
+    error: 3
+  };
+
+  /**
+   * Текущий минимальный уровень логирования.
+   * Сообщения с уровнем ниже этого игнорируются.
+   * @type {number}
+   */
+  var currentLevel = LEVELS.debug;
+
+  /**
+   * Флаг включения/выключения логирования.
+   * @type {boolean}
+   */
+  var enabled = true;
+
+  /**
+   * Форматирует текущее время в формат HH:MM:SS.mmm
+   * @returns {string}
+   */
+  function getTimestamp() {
+    var now = new Date();
+    var h = String(now.getHours()).padStart(2, '0');
+    var m = String(now.getMinutes()).padStart(2, '0');
+    var s = String(now.getSeconds()).padStart(2, '0');
+    var ms = String(now.getMilliseconds()).padStart(3, '0');
+    return h + ':' + m + ':' + s + '.' + ms;
+  }
+
+  /**
+   * Внутренний диспетчер логирования.
+   * Форматирует сообщение и делегирует в соответствующий метод консоли.
+   *
+   * @param {string} level - Уровень лога ('debug' | 'info' | 'warn' | 'error').
+   * @param {string} tag - Тег модуля для идентификации источника.
+   * @param {string} msg - Сообщение.
+   * @param {*} [data] - Дополнительные данные.
+   * @returns {void}
+   */
+  function emit(level, tag, msg, data) {
+    if (!enabled) return;
+    if (LEVELS[level] < currentLevel) return;
+
+    var timestamp = getTimestamp();
+    var prefix = '[' + timestamp + '] [' + level.toUpperCase() + '] [' + tag + ']';
+
+    var consoleFn = console[level] || console.log;
+
+    if (data !== undefined) {
+      consoleFn.call(console, prefix, msg, data);
+    } else {
+      consoleFn.call(console, prefix, msg);
+    }
+  }
+
+  /**
+   * Устанавливает минимальный уровень логирования.
+   *
+   * @param {'debug' | 'info' | 'warn' | 'error'} level - Новый уровень.
+   * @returns {void}
+   */
+  function setLevel(level) {
+    if (LEVELS[level] !== undefined) {
+      currentLevel = LEVELS[level];
+    }
+  }
+
+  /**
+   * Включает/выключает логирование.
+   *
+   * @param {boolean} state - true для включения, false для выключения.
+   * @returns {void}
+   */
+  function setEnabled(state) {
+    enabled = !!state;
+  }
+
+  /**
+   * Логирует отладочное сообщение.
+   *
+   * @param {string} tag - Тег модуля.
+   * @param {string} msg - Сообщение.
+   * @param {*} [data] - Дополнительные данные.
+   * @returns {void}
+   */
+  function debug(tag, msg, data) {
+    emit('debug', tag, msg, data);
+  }
+
+  /**
+   * Логирует информационное сообщение.
+   *
+   * @param {string} tag - Тег модуля.
+   * @param {string} msg - Сообщение.
+   * @param {*} [data] - Дополнительные данные.
+   * @returns {void}
+   */
+  function info(tag, msg, data) {
+    emit('info', tag, msg, data);
+  }
+
+  /**
+   * Логирует предупреждение.
+   *
+   * @param {string} tag - Тег модуля.
+   * @param {string} msg - Сообщение.
+   * @param {*} [data] - Дополнительные данные.
+   * @returns {void}
+   */
+  function warn(tag, msg, data) {
+    emit('warn', tag, msg, data);
+  }
+
+  /**
+   * Логирует ошибку.
+   * Всегда выводится, независимо от текущего уровня.
+   *
+   * @param {string} tag - Тег модуля.
+   * @param {string} msg - Сообщение.
+   * @param {*} [data] - Дополнительные данные.
+   * @returns {void}
+   */
+  function error(tag, msg, data) {
+    emit('error', tag, msg, data);
+  }
+
+  /**
+   * Инициализация модуля (вызывается DI.initAll).
+   * Устанавливает уровень из Config если доступен.
+   *
+   * @param {AbortSignal} [signal] - Сигнал для автоочистки (не используется).
+   * @returns {void}
+   */
+  function init(signal) {
+    // Logger не имеет зависимостей, поэтому Config недоступен при init
+    // Уровень устанавливается вручную через setLevel() или остаётся debug
+  }
+
+  /**
+   * Уничтожение модуля (вызывается DI.destroyAll).
+   * Очищает ресурсы (у Logger их нет).
+   *
+   * @returns {void}
+   */
+  function destroy() {
+    // Нет ресурсов для очистки
+  }
+
+  return {
+    debug: debug,
+    info: info,
+    warn: warn,
+    error: error,
+    setLevel: setLevel,
+    setEnabled: setEnabled,
+    init: init,
+    destroy: destroy
+  };
+}, []);
+/* <!-- MODULE: Logger --> */
+
+/* <!-- MODULE: Bus --> */
+/**
+ * @typedef {number} SubscriptionID
+ * @description Уникальный идентификатор подписки на событие.
+ */
+
+/**
+ * @typedef {Object} SubscriptionRecord
+ * @description Внутренняя запись о подписке.
+ * @property {function(*): void} handler - Обработчик события.
+ * @property {AbortSignal} [signal] - Опциональный сигнал для автоотписки.
+ * @property {function(): void} [abortHandler] - Ссылка на обработчик abort для очистки.
+ */
+
+/**
+ * @module Bus
+ * @description EventBus с поддержкой subscription ID и AbortSignal.
+ *
+ * Ключевой компонент event-driven архитектуры — все межмодульные взаимодействия
+ * проходят через него, обеспечивая слабую связанность.
+ *
+ * Архитектурные принципы:
+ * - Двухуровневая структура: event → Map<subId, record>
+ * - O(1) добавление/удаление подписок по ID
+ * - Автоотписка через AbortSignal (при abort — автоматический off)
+ * - Безопасная итерация: emit создаёт копию listeners перед вызовом
+ * - Изоляция ошибок: один упавший handler не прерывает уведомление остальных
+ *
+ * @namespace Bus
+ */
+DI.register('Bus', function() {
+
+  /**
+   * Реестр подписчиков: event → Map<subscriptionId, SubscriptionRecord>.
+   * @type {Map<string, Map<SubscriptionID, SubscriptionRecord>>}
+   */
+  var map = new Map();
+
+  /**
+   * Глобальный счётчик для генерации уникальных ID подписок.
+   * @type {number}
+   */
+  var nextId = 1;
+
+  /**
+   * Подписывает обработчик на событие.
+   * Возвращает уникальный ID подписки для последующей отписки через off().
+   *
+   * @param {string} event - Имя события.
+   * @param {function(*): void} handler - Обработчик (принимает payload).
+   * @returns {SubscriptionID} Уникальный ID подписки.
+   * @throws {Error} Если handler не является функцией.
+   */
+  function on(event, handler) {
+    if (typeof handler !== 'function') {
+      throw new Error('[Bus] handler must be a function');
+    }
+
+    if (!map.has(event)) {
+      map.set(event, new Map());
+    }
+
+    var id = nextId++;
+    map.get(event).set(id, { handler: handler });
+    return id;
+  }
+
+  /**
+   * Подписывает обработчик на событие с автоотпиской через AbortSignal.
+   *
+   * Если signal уже aborted — подписка не создаётся, возвращается null.
+   * При срабатывании signal.abort автоматически вызывает off(id).
+   *
+   * @param {string} event - Имя события.
+   * @param {function(*): void} handler - Обработчик события.
+   * @param {AbortSignal} [signal] - Опциональный сигнал для автоотписки.
+   * @returns {SubscriptionID | null} ID подписки или null, если signal уже aborted.
+   */
+  function subscribe(event, handler, signal) {
+    if (signal && signal.aborted) {
+      return null;
+    }
+
+    var id = on(event, handler);
+
+    if (signal) {
+      var record = map.get(event).get(id);
+      record.signal = signal;
+
+      var onAbort = function() {
+        off(id);
+        signal.removeEventListener('abort', onAbort);
+      };
+
+      record.abortHandler = onAbort;
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+
+    return id;
+  }
+
+  /**
+   * Отписывает обработчик от события.
+   *
+   * Поддерживает два режима:
+   * 1. Передача subscriptionId (число) — удаляет конкретную подписку.
+   * 2. Передача event + handler (legacy) — ищет и удаляет первую найденную.
+   *
+   * Если после удаления в Map не остаётся подписчиков, ключ события удаляется.
+   *
+   * @param {string | SubscriptionID} eventOrId - Имя события или ID подписки.
+   * @param {function(*): void} [handler] - Обработчик (только для режима event).
+   * @returns {boolean} true, если подписка была найдена и удалена.
+   */
+  function off(eventOrId, handler) {
+    if (typeof eventOrId === 'number') {
+      return offById(eventOrId);
+    }
+    return offByHandler(eventOrId, handler);
+  }
+
+  /**
+   * Внутренний метод: удаление подписки по ID.
+   * Ищет подписку по всем событиям, очищает abort listener.
+   *
+   * @param {SubscriptionID} targetId - ID подписки.
+   * @returns {boolean} true если найдена и удалена.
+   */
+  function offById(targetId) {
+    var found = false;
+    var eventsToDelete = [];
+
+    map.forEach(function(subMap, event) {
+      if (subMap.has(targetId)) {
+        var record = subMap.get(targetId);
+
+        if (record.signal && record.abortHandler) {
+          record.signal.removeEventListener('abort', record.abortHandler);
+        }
+
+        subMap.delete(targetId);
+        found = true;
+
+        if (subMap.size === 0) {
+          eventsToDelete.push(event);
+        }
+      }
+    });
+
+    for (var i = 0; i < eventsToDelete.length; i++) {
+      map.delete(eventsToDelete[i]);
+    }
+
+    return found;
+  }
+
+  /**
+   * Внутренний метод: удаление подписки по event + handler.
+   * Ищет первую найденную подписку с указанным handler.
+   *
+   * @param {string} event - Имя события.
+   * @param {function(*): void} handler - Обработчик.
+   * @returns {boolean} true если найдена и удалена.
+   */
+  function offByHandler(event, handler) {
+    var subMap = map.get(event);
+    if (!subMap) return false;
+
+    var foundId = null;
+    subMap.forEach(function(record, id) {
+      if (record.handler === handler && !foundId) {
+        foundId = id;
+      }
+    });
+
+    if (foundId !== null) {
+      var record = subMap.get(foundId);
+
+      if (record.signal && record.abortHandler) {
+        record.signal.removeEventListener('abort', record.abortHandler);
+      }
+
+      subMap.delete(foundId);
+
+      if (subMap.size === 0) {
+        map.delete(event);
+      }
+
+      return true;
+    }
+
+    return false;
+  }
+
+  /**
+   * Публикует событие всем подписчикам.
+   *
+   * Создаёт массив-копию слушателей перед итерацией, чтобы удаление/добавление
+   * подписок внутри обработчиков не ломало цикл.
+   * Ошибки в отдельных обработчиках перехватываются и логируются.
+   *
+   * @param {string} event - Имя события.
+   * @param {*} [payload] - Данные события.
+   * @returns {void}
+   */
+  function emit(event, payload) {
+    var subMap = map.get(event);
+    if (!subMap) return;
+
+    var records = [];
+    subMap.forEach(function(record) {
+      records.push(record);
+    });
+
+    for (var i = 0; i < records.length; i++) {
+      try {
+        records[i].handler(payload);
+      } catch (err) {
+        console.error('[Bus] Error in listener for "' + event + '":', err);
+      }
+    }
+  }
+
+  /**
+   * Возвращает количество активных подписчиков на событие.
+   *
+   * @param {string} event - Имя события.
+   * @returns {number} Количество подписчиков.
+   */
+  function listenerCount(event) {
+    var subMap = map.get(event);
+    return subMap ? subMap.size : 0;
+  }
+
+  /**
+   * Возвращает список всех событий, на которые есть подписки.
+   *
+   * @returns {string[]} Массив имён событий.
+   */
+  function listEvents() {
+    return Array.from(map.keys());
+  }
+
+  /**
+   * Полностью очищает все подписки.
+   * Вызывается при уничтожении приложения или глобальном reset.
+   *
+   * @returns {void}
+   */
+  function clear() {
+    map.forEach(function(subMap) {
+      subMap.forEach(function(record) {
+        if (record.signal && record.abortHandler) {
+          record.signal.removeEventListener('abort', record.abortHandler);
+        }
+      });
+    });
+
+    map.clear();
+  }
+
+  /**
+   * Инициализация модуля.
+   *
+   * @param {AbortSignal} [signal] - Сигнал для автоочистки (не используется).
+   * @returns {void}
+   */
+  function init(signal) {
+    // Bus не требует инициализации
+  }
+
+  /**
+   * Уничтожение модуля.
+   * Очищает все подписки.
+   *
+   * @returns {void}
+   */
+  function destroy() {
+    clear();
+  }
+
+  return {
+    on: on,
+    subscribe: subscribe,
+    off: off,
+    emit: emit,
+    listenerCount: listenerCount,
+    listEvents: listEvents,
+    clear: clear,
+    init: init,
+    destroy: destroy
+  };
+}, []);
+/* <!-- MODULE: Bus --> */
 
   /* <!-- MODULE: Store --> */
   старт
