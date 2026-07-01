@@ -10469,8 +10469,573 @@ kbd {
   /* <!-- MODULE: TextSearchStrategy --> */
 
   /* <!-- MODULE: FocusSearchStrategy --> */
-  старт
-  энд
+  /**
+   * @typedef {Object} FocusSearchResult
+   * @description Результат выполнения поиска по вектору фокуса.
+   * @property {Object} lists - Результаты по сегментам.
+   * @property {SearchResult[]} lists.local - Всегда пустой в focus режиме.
+   * @property {SearchResult[]} lists.world - Всегда пустой в focus режиме.
+   * @property {SearchResult[]} lists.seren - Всегда пустой в focus режиме.
+   * @property {SearchResult[]} lists.focus - Единый список local + world.
+   */
+
+  /**
+   * @module FocusSearchStrategy
+   * @description Стратегия поиска по вектору закреплённой заметки (режим FOCUS).
+   * 
+   * Зона ответственности:
+   * - Поиск похожих заметок по вектору закрепа
+   * - Throttle 1.5с для сетевых запросов (защита от rate limit при "дрейфе")
+   * - Объединение local + world в единый список focus
+   * - Сортировка по score desc
+   * 
+   * Архитектурные принципы:
+   * - Stateless execute: принимает vector + signal, возвращает lists
+   * - AbortController для отмены предыдущего поиска
+   * - Делегирует кэширование в NoteCache
+   * - Делегирует сетевые запросы в NetTransport
+   * - Делегирует cosine вычисления в AI.cosineBatch
+   * - НЕ знает о UI, StateManager, редакторе
+   * 
+   * Алгоритм поиска:
+   * 1. Валидация вектора (Array, длина === dim)
+   * 2. sendWithThrottle(vector) — отправка в сеть с throttle 1.5с
+   * 3. NoteCache.getAll() → локальные заметки
+   * 4. AI.cosineBatch(vector, localNotes, signal) → scores
+   * 5. Построение localScored из результатов
+   * 6. NetTransport.activeAnswers() → сетевые ответы
+   * 7. Построение worldScored из ответов
+   * 8. Объединение localScored + worldScored
+   * 9. Сортировка по score desc
+   * 10. Обрезка до MAX_RESULTS_PER_LIST (100)
+   * 11. Return {lists: {local: [], world: [], seren: [], focus}}
+   * 
+   * Throttle логика (ключевое отличие от TextSearch):
+   * - Если прошло >= 1.5с с последнего запроса → отправляем сразу
+   * - Иначе → сохраняем vector в pendingVector
+   * - Timer запускается ОДИН РАЗ (не перезапускается при новом vector)
+   * - При срабатывании timer отправляется ПОСЛЕДНИЙ pendingVector
+   * 
+   * Это решает race condition при быстром переключении фокуса:
+   * пользователь может кликнуть 5 заметок за 1 секунду —
+   * отправится только последний запрос (экономия rate limit).
+   * 
+   * Используется модулями:
+   * - SearchCoordinator → вызывается при переходе в FOCUS режим
+   * 
+   * @namespace FocusSearchStrategy
+   */
+  DI.register('FocusSearchStrategy', function(
+    Config, Logger, AI, NetTransport, NoteCache, StateManager
+  ) {
+    
+    /**
+     * Максимальное количество результатов в списке focus.
+     * @type {number}
+     */
+    var MAX_RESULTS_PER_LIST = 100;
+
+    /**
+     * Задержка throttle для сетевых запросов (1.5 секунды).
+     * Защита от rate limit при быстром "дрейфе" по фокусам.
+     * @type {number}
+     */
+    var THROTTLE_DELAY = 1500;
+
+    /**
+     * Контроллер для отмены предыдущего поиска.
+     * @type {AbortController | null}
+     */
+    var searchController = null;
+
+    /**
+     * Timestamp последнего отправленного сетевого запроса.
+     * Используется для вычисления времени до следующего запроса.
+     * @type {number}
+     */
+    var lastRequestTime = 0;
+
+    /**
+     * Отложенный вектор для отправки после throttle.
+     * При быстром переключении фокуса обновляется, но timer не перезапускается.
+     * @type {Vector | null}
+     */
+    var pendingVector = null;
+
+    /**
+     * ID таймера throttle.
+     * null — если timer не активен.
+     * @type {number | null}
+     */
+    var throttleTimer = null;
+
+    /**
+     * Счётчик выполненных поисков (для статистики).
+     * @type {{total: number, aborted: number, errors: number, throttled: number}}
+     */
+    var stats = {
+      total: 0,
+      aborted: 0,
+      errors: 0,
+      throttled: 0
+    };
+
+    /**
+     * Валидирует вектор запроса.
+     * 
+     * @param {Vector} vector - Вектор для проверки.
+     * @returns {boolean} true если вектор валидный.
+     */
+    function isValidVector(vector) {
+      if (!Array.isArray(vector) || vector.length === 0) return false;
+      var expectedDim = Config ? Config.get('dim', 384) : 384;
+      return vector.length === expectedDim;
+    }
+
+    /**
+     * Отправляет вектор в сеть с throttle 1.5с.
+     * 
+     * Алгоритм (ИСПРАВЛЕНИЕ БАГА #7 из аудита):
+     * 1. Если прошло >= 1.5с → отправляем сразу, pendingVector = null
+     * 2. Иначе → сохраняем vector в pendingVector
+     * 3. Timer запускается ТОЛЬКО если его ещё нет (не перезапускается!)
+     * 4. При срабатывании timer → отправляем pendingVector (последний)
+     * 
+     * Это обеспечивает корректную работу при быстром переключении фокуса:
+     * - Пользователь кликает 5 заметок за 1 секунду
+     * - Timer запускается один раз (на 1.5с)
+     * - pendingVector обновляется 5 раз
+     * - Через 1.5с отправляется только ПОСЛЕДНИЙ vector
+     * 
+     * @param {Vector} vector - Вектор для отправки.
+     * @returns {void}
+     */
+    function sendWithThrottle(vector) {
+      var now = Date.now();
+
+      // Если прошло достаточно времени — отправляем сразу
+      if (now - lastRequestTime >= THROTTLE_DELAY) {
+        lastRequestTime = now;
+        pendingVector = null;
+
+        if (NetTransport && NetTransport.send) {
+          try {
+            var state = StateManager ? StateManager.getState() : {};
+            if (state.netAuthorized) {
+              NetTransport.send(vector);
+            }
+          } catch (e) {
+            if (Logger) Logger.warn('FocusSearchStrategy', 'NetTransport.send failed', e);
+          }
+        }
+        return;
+      }
+
+      // Иначе — откладываем отправку
+      pendingVector = vector;
+      stats.throttled++;
+
+      // Timer запускается ТОЛЬКО если его ещё нет
+      if (!throttleTimer) {
+        var delay = THROTTLE_DELAY - (now - lastRequestTime);
+
+        throttleTimer = setTimeout(function() {
+          throttleTimer = null;
+
+          if (pendingVector) {
+            lastRequestTime = Date.now();
+
+            if (NetTransport && NetTransport.send) {
+              try {
+                var state = StateManager ? StateManager.getState() : {};
+                if (state.netAuthorized) {
+                  NetTransport.send(pendingVector);
+                }
+              } catch (e) {
+                if (Logger) Logger.warn('FocusSearchStrategy', 'Delayed send failed', e);
+              }
+            }
+
+            pendingVector = null;
+          }
+        }, delay);
+      }
+    }
+
+    /**
+     * Формирует SearchResult из локальной заметки и score.
+     * 
+     * @param {Note} note - Заметка из NoteCache.
+     * @param {number} score - Косинусное сходство.
+     * @returns {SearchResult}
+     */
+    function buildLocalResult(note, score) {
+      return {
+        id: note.id,
+        text: note.text,
+        vector: note.vector,
+        score: score,
+        shared: note.shared,
+        createdAt: note.createdAt,
+        parentId: note.parentId,
+        children: note.children
+      };
+    }
+
+    /**
+     * Формирует SearchResult из сетевого ответа.
+     * 
+     * @param {NetworkAnswer} answer - Ответ из NetTransport.
+     * @returns {SearchResult}
+     */
+    function buildWorldResult(answer) {
+      return {
+        id: answer.id,
+        text: answer.text,
+        vector: answer.vector,
+        score: answer.score,
+        shared: true,
+        peer: answer.peer,
+        createdAt: answer.createdAt,
+        parentId: null,
+        children: []
+      };
+    }
+
+    /**
+     * Выполняет поиск по вектору фокуса.
+     * 
+     * @param {Vector} vector - Вектор закреплённой заметки.
+     * @param {AbortSignal} [externalSignal] - Внешний сигнал для отмены.
+     * @returns {Promise<FocusSearchResult>} Promise с результатами поиска.
+     * 
+     * @example
+     * FocusSearchStrategy.execute(focusItem.vector)
+     *   .then(function(result) {
+     *     console.log('Focus results:', result.lists.focus.length);
+     *   });
+     */
+    function execute(vector, externalSignal) {
+      stats.total++;
+
+      // Валидация вектора
+      if (!isValidVector(vector)) {
+        if (Logger) Logger.warn('FocusSearchStrategy', 'Invalid vector');
+        return Promise.resolve({
+          lists: { local: [], world: [], seren: [], focus: [] }
+        });
+      }
+
+      // Проверка готовности AI
+      if (!AI || !AI.ready()) {
+        if (Logger) Logger.warn('FocusSearchStrategy', 'AI not ready');
+        return Promise.resolve({
+          lists: { local: [], world: [], seren: [], focus: [] }
+        });
+      }
+
+      // Отмена предыдущего поиска
+      if (searchController) {
+        searchController.abort();
+        stats.aborted++;
+        searchController = null;
+      }
+
+      // Создание нового контроллера
+      searchController = new AbortController();
+      var internalSignal = searchController.signal;
+      var currentController = searchController;
+
+      // Объединение внешнего и внутреннего сигналов
+      var combinedSignal = internalSignal;
+      if (externalSignal) {
+        if (externalSignal.aborted) {
+          searchController.abort();
+          stats.aborted++;
+          return Promise.resolve({
+            lists: { local: [], world: [], seren: [], focus: [] }
+          });
+        }
+
+        externalSignal.addEventListener('abort', function() {
+          if (searchController === currentController) {
+            searchController.abort();
+          }
+        }, { once: true });
+      }
+
+      if (Logger) {
+        Logger.debug('FocusSearchStrategy', 'Executing focus search', {
+          vectorDim: vector.length
+        });
+      }
+
+      // Шаг 1: Отправка вектора в сеть с throttle
+      sendWithThrottle(vector);
+
+      // Шаг 2: Получение локальных заметок
+      var notesPromise;
+      if (NoteCache && NoteCache.getAll) {
+        notesPromise = NoteCache.getAll();
+      } else {
+        notesPromise = Promise.resolve([]);
+      }
+
+      return notesPromise.then(function(notes) {
+        if (combinedSignal.aborted) {
+          stats.aborted++;
+          return null;
+        }
+
+        if (!Array.isArray(notes)) {
+          if (Logger) Logger.warn('FocusSearchStrategy', 'NoteCache.getAll returned non-array');
+          notes = [];
+        }
+
+        // Шаг 3: Подготовка кандидатов для локального поиска
+        var localCandidates = [];
+        var localDataMap = new Map();
+
+        for (var i = 0; i < notes.length; i++) {
+          var note = notes[i];
+          if (note && note.vector && Array.isArray(note.vector)) {
+            localCandidates.push({
+              id: note.id,
+              vector: note.vector
+            });
+            localDataMap.set(note.id, note);
+          }
+        }
+
+        // Шаг 4: Вычисление cosine similarity для локальных заметок
+        var localScoresPromise;
+        if (localCandidates.length > 0) {
+          try {
+            localScoresPromise = AI.cosineBatch(vector, localCandidates, combinedSignal);
+          } catch (e) {
+            if (Logger) Logger.warn('FocusSearchStrategy', 'AI.cosineBatch throw', e);
+            localScoresPromise = Promise.resolve([]);
+          }
+        } else {
+          localScoresPromise = Promise.resolve([]);
+        }
+
+        if (!localScoresPromise || typeof localScoresPromise.then !== 'function') {
+          localScoresPromise = Promise.resolve([]);
+        }
+
+        return localScoresPromise.then(function(localScores) {
+          if (combinedSignal.aborted) {
+            stats.aborted++;
+            return null;
+          }
+
+          if (!Array.isArray(localScores)) {
+            localScores = [];
+          }
+
+          // Шаг 5: Формирование локальных результатов
+          var localScored = [];
+          for (var k = 0; k < localScores.length; k++) {
+            var s = localScores[k];
+            if (s && s.id) {
+              var note = localDataMap.get(s.id);
+              if (note && typeof s.score === 'number') {
+                localScored.push(buildLocalResult(note, s.score));
+              }
+            }
+          }
+
+          // Шаг 6: Получение сетевых ответов
+          var worldAnswers = [];
+          if (NetTransport && NetTransport.activeAnswers) {
+            try {
+              var state = StateManager ? StateManager.getState() : {};
+              if (state.netAuthorized) {
+                worldAnswers = NetTransport.activeAnswers();
+              }
+            } catch (e) {
+              if (Logger) Logger.warn('FocusSearchStrategy', 'NetTransport.activeAnswers failed', e);
+            }
+          }
+
+          // Шаг 7: Формирование сетевых результатов
+          var worldScored = [];
+          if (Array.isArray(worldAnswers)) {
+            for (var j = 0; j < worldAnswers.length; j++) {
+              var answer = worldAnswers[j];
+              if (answer && typeof answer.score === 'number') {
+                worldScored.push(buildWorldResult(answer));
+              }
+            }
+          }
+
+          // Шаг 8: Объединение local + world в единый список
+          var combined = localScored.concat(worldScored);
+
+          // Шаг 9: Сортировка по score desc
+          combined.sort(function(a, b) {
+            return b.score - a.score;
+          });
+
+          // Шаг 10: Обрезка до MAX_RESULTS_PER_LIST
+          var focusFiltered = combined.slice(0, MAX_RESULTS_PER_LIST);
+
+          if (Logger) {
+            Logger.info('FocusSearchStrategy', 'Focus search completed', {
+              localCount: localScored.length,
+              worldCount: worldScored.length,
+              focusCount: focusFiltered.length,
+              topScore: focusFiltered.length > 0 ? focusFiltered[0].score : 0
+            });
+          }
+
+          return {
+            lists: {
+              local: [],
+              world: [],
+              seren: [],
+              focus: focusFiltered
+            }
+          };
+        });
+      }).catch(function(err) {
+        if (combinedSignal.aborted) {
+          stats.aborted++;
+          return null;
+        }
+
+        stats.errors++;
+        if (Logger) Logger.error('FocusSearchStrategy', 'Search error', err);
+        return {
+          lists: { local: [], world: [], seren: [], focus: [] }
+        };
+      }).finally(function() {
+        // Очистка контроллера только если это текущий
+        if (searchController === currentController) {
+          searchController = null;
+        }
+      });
+    }
+
+    /**
+     * Очищает состояние стратегии.
+     * Отменяет активный поиск, очищает throttle timer.
+     * 
+     * @returns {void}
+     */
+    function cleanup() {
+      if (searchController) {
+        searchController.abort();
+        searchController = null;
+      }
+
+      if (throttleTimer) {
+        clearTimeout(throttleTimer);
+        throttleTimer = null;
+      }
+
+      pendingVector = null;
+      lastRequestTime = 0;
+    }
+
+    /**
+     * Проверяет, активен ли throttle timer.
+     * Полезно для отладки и мониторинга.
+     * 
+     * @returns {boolean}
+     */
+    function isThrottled() {
+      return throttleTimer !== null;
+    }
+
+    /**
+     * Возвращает pending vector (ожидающий отправки).
+     * null — если нет отложенного запроса.
+     * 
+     * @returns {Vector | null}
+     */
+    function getPendingVector() {
+      return pendingVector ? pendingVector.slice() : null;
+    }
+
+    /**
+     * Возвращает время до следующего разрешённого запроса (мс).
+     * 0 — если запрос можно отправить немедленно.
+     * 
+     * @returns {number}
+     */
+    function getTimeUntilNextRequest() {
+      var now = Date.now();
+      var elapsed = now - lastRequestTime;
+      return Math.max(0, THROTTLE_DELAY - elapsed);
+    }
+
+    /**
+     * Возвращает статистику стратегии.
+     * 
+     * @returns {{total: number, aborted: number, errors: number, throttled: number}}
+     */
+    function getStats() {
+      return {
+        total: stats.total,
+        aborted: stats.aborted,
+        errors: stats.errors,
+        throttled: stats.throttled
+      };
+    }
+
+    /**
+     * Сбрасывает статистику.
+     * 
+     * @returns {void}
+     */
+    function resetStats() {
+      stats.total = 0;
+      stats.aborted = 0;
+      stats.errors = 0;
+      stats.throttled = 0;
+    }
+
+    /**
+     * Инициализация модуля.
+     * FocusSearchStrategy не требует автоматической инициализации.
+     * 
+     * @param {AbortSignal} [signal] - Сигнал для автоочистки.
+     * @returns {void}
+     */
+    function init(signal) {
+      if (Logger) {
+        Logger.info('FocusSearchStrategy', 'Initialized', {
+          throttleDelay: THROTTLE_DELAY,
+          maxResultsPerList: MAX_RESULTS_PER_LIST
+        });
+      }
+    }
+
+    /**
+     * Уничтожение модуля.
+     * Отменяет активный поиск, очищает throttle timer.
+     * 
+     * @returns {void}
+     */
+    function destroy() {
+      cleanup();
+      resetStats();
+    }
+
+    return {
+      execute: execute,
+      cleanup: cleanup,
+      isThrottled: isThrottled,
+      getPendingVector: getPendingVector,
+      getTimeUntilNextRequest: getTimeUntilNextRequest,
+      getStats: getStats,
+      resetStats: resetStats,
+      init: init,
+      destroy: destroy
+    };
+  }, ['Config', 'Logger', 'AI', 'NetTransport', 'NoteCache', 'StateManager']);
   /* <!-- MODULE: FocusSearchStrategy --> */
 
   /* <!-- MODULE: NotePublisher --> */
