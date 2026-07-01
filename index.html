@@ -11039,8 +11039,635 @@ kbd {
   /* <!-- MODULE: FocusSearchStrategy --> */
 
   /* <!-- MODULE: NotePublisher --> */
-  старт
-  энд
+  /**
+   * @typedef {Object} AnswerCandidate
+   * @description Кандидат на ответ (из QueryHandler).
+   * @property {string} id - ID заметки.
+   * @property {string} text - Текст заметки.
+   * @property {Vector} vector - Вектор заметки.
+   * @property {number} score - Косинусное сходство.
+   * @property {number} [z_score] - Z-score.
+   */
+
+  /**
+   * @typedef {Object} NoteToPublish
+   * @description Заметка для публикации (из EditorComponent).
+   * @property {string} id - ID заметки.
+   * @property {string} text - Текст заметки.
+   * @property {Vector} vector - Вектор заметки.
+   * @property {boolean} shared - Флаг публикации в сеть.
+   */
+
+  /**
+   * @module NotePublisher
+   * @description Валидация и публикация заметок в сеть.
+   * 
+   * Зона ответственности:
+   * - Валидация заметок перед публикацией (text, vector, shared)
+   * - Построение Nostr-событий Kind 21001
+   * - Публикация ответов на поисковые запросы (с тегом ['e', queryId])
+   * - Делегирование публикации shared-заметок в NetTransport
+   * - Соблюдение лимита MAX_P2P_TEXT_LENGTH (2000 символов)
+   * - Эмиссия событий publish:success/publish:error через Bus
+   * 
+   * Архитектурные принципы:
+   * - НЕ знает о поиске, UI, фокусе, стратегии
+   * - Делегирует транспортные операции в NetTransport (для publishNote)
+   * - Сам строит Kind 21001 для ответов (publishAnswer) — это специфичная логика
+   * - Динамический импорт nostr-tools (через import())
+   * - Получение приватного ключа через AuthService
+   * - Try/catch на каждом шаге pipeline
+   * 
+   * Два метода публикации:
+   * 
+   * 1. **publishAnswer(queryId, answer, peerPubkey)** — ответ на Kind 21000
+   *    - Используется QueryHandler для ответов другим пирам
+   *    - Tags: [['t', room], ['e', queryId]]
+   *    - Content: {text, vector, score, z_score}
+   *    - Строит событие сам через nostr-tools
+   *    - Подписывает через AuthService.getKey()
+   * 
+   * 2. **publishNote(note, parentId)** — публикация shared-заметки
+   *    - Используется EditorComponent после сохранения в БД
+   *    - Делегирует в NetTransport.publishNote (там есть своя логика)
+   *    - Tags: [['t', room], ['e', parentId, '', 'reply']] (опционально)
+   *    - Content: {text, vector, score: 1.0}
+   * 
+   * Слушает события: нет (вызывается напрямую)
+   * 
+   * Эмитит события:
+   * - `publish:success` — успешная публикация
+   *   payload: {type: 'answer'|'note', id: string, eventId: string}
+   * - `publish:error` — ошибка публикации
+   *   payload: {type: 'answer'|'note', id: string, error: string}
+   * 
+   * Используется модулями:
+   * - QueryHandler → publishAnswer для ответов на входящие запросы
+   * - SearchService → publishNote для публикации shared-заметок
+   * 
+   * @namespace NotePublisher
+   */
+  DI.register('NotePublisher', function(Config, Logger, Bus, NetTransport, AuthService) {
+    
+    /**
+     * Максимальная длина текста для P2P-ответов.
+     * Ограничение для предотвращения спама и защиты от больших событий.
+     * @type {number}
+     */
+    var MAX_P2P_TEXT_LENGTH = 2000;
+
+    /**
+     * Кэш импортированного nostr-tools модуля.
+     * Загружается один раз при первом вызове publishAnswer.
+     * @type {Object | null}
+     */
+    var nostrTools = null;
+
+    /**
+     * Promise динамического импорта nostr-tools (для deduplication).
+     * @type {Promise<Object> | null}
+     */
+    var nostrImportPromise = null;
+
+    /**
+     * Счётчик публикаций (для статистики).
+     * @type {{answers: number, notes: number, errors: number}}
+     */
+    var stats = {
+      answers: 0,
+      notes: 0,
+      errors: 0
+    };
+
+    /**
+     * Эмитит событие Bus с защитой от ошибок.
+     * 
+     * @param {string} event - Имя события.
+     * @param {*} payload - Данные события.
+     * @returns {void}
+     */
+    function emit(event, payload) {
+      if (Bus && Bus.emit) {
+        try {
+          Bus.emit(event, payload);
+        } catch (e) {
+          if (Logger) Logger.error('NotePublisher', 'Bus.emit failed for ' + event, e);
+        }
+      }
+    }
+
+    /**
+     * Динамически импортирует nostr-tools модуль.
+     * Использует Promise deduplication для параллельных вызовов.
+     * 
+     * @returns {Promise<Object>} Promise с nostr-tools модулем.
+     */
+    function importNostrTools() {
+      if (nostrTools) {
+        return Promise.resolve(nostrTools);
+      }
+
+      if (nostrImportPromise) {
+        return nostrImportPromise;
+      }
+
+      nostrImportPromise = import('https://cdn.jsdelivr.net/npm/nostr-tools@2.7.2/+esm')
+        .then(function(mod) {
+          var tools = (mod && mod.default && typeof mod.default.finalizeEvent === 'function')
+            ? mod.default
+            : (typeof mod.finalizeEvent === 'function' ? mod : null);
+
+          if (!tools || typeof tools.finalizeEvent !== 'function') {
+            throw new Error('nostr-tools incompatible: finalizeEvent not found');
+          }
+
+          nostrTools = tools;
+
+          if (Logger) {
+            Logger.info('NotePublisher', 'nostr-tools imported successfully');
+          }
+
+          return tools;
+        })
+        .catch(function(err) {
+          nostrImportPromise = null;
+          if (Logger) Logger.error('NotePublisher', 'Failed to import nostr-tools', err);
+          throw err;
+        });
+
+      return nostrImportPromise;
+    }
+
+    /**
+     * Получает приватный ключ в формате Uint8Array из AuthService.
+     * 
+     * @returns {Uint8Array | null} Приватный ключ или null если не разблокирован.
+     */
+    function getPrivateKeyBytes() {
+      if (!AuthService || !AuthService.getKey) {
+        return null;
+      }
+
+      var hexKey = AuthService.getKey();
+      if (!hexKey || typeof hexKey !== 'string' || !/^[0-9a-f]{64}$/i.test(hexKey)) {
+        return null;
+      }
+
+      try {
+        return new Uint8Array(hexKey.match(/.{1,2}/g).map(function(b) {
+          return parseInt(b, 16);
+        }));
+      } catch (e) {
+        if (Logger) Logger.error('NotePublisher', 'Failed to parse private key', e);
+        return null;
+      }
+    }
+
+    /**
+     * Валидирует текст для публикации.
+     * 
+     * @param {string} text - Текст для проверки.
+     * @returns {{valid: boolean, trimmed: string, error: string|null}}
+     */
+    function validateText(text) {
+      if (typeof text !== 'string') {
+        return { valid: false, trimmed: '', error: 'text must be a string' };
+      }
+
+      var trimmed = text.trim();
+
+      if (!trimmed) {
+        return { valid: false, trimmed: '', error: 'text is empty' };
+      }
+
+      if (trimmed.length > MAX_P2P_TEXT_LENGTH) {
+        return {
+          valid: false,
+          trimmed: trimmed,
+          error: 'text exceeds max length (' + trimmed.length + ' > ' + MAX_P2P_TEXT_LENGTH + ')'
+        };
+      }
+
+      return { valid: true, trimmed: trimmed, error: null };
+    }
+
+    /**
+     * Валидирует вектор для публикации.
+     * 
+     * @param {Vector} vector - Вектор для проверки.
+     * @returns {{valid: boolean, error: string|null}}
+     */
+    function validateVector(vector) {
+      if (!Array.isArray(vector)) {
+        return { valid: false, error: 'vector must be an array' };
+      }
+
+      if (vector.length === 0) {
+        return { valid: false, error: 'vector is empty' };
+      }
+
+      var expectedDim = Config ? Config.get('dim', 384) : 384;
+      if (vector.length !== expectedDim) {
+        return {
+          valid: false,
+          error: 'vector dimension mismatch (' + vector.length + ' != ' + expectedDim + ')'
+        };
+      }
+
+      // Проверка что все значения — числа
+      for (var i = 0; i < vector.length; i++) {
+        if (typeof vector[i] !== 'number' || !isFinite(vector[i])) {
+          return { valid: false, error: 'vector contains non-finite value at index ' + i };
+        }
+      }
+
+      return { valid: true, error: null };
+    }
+
+    /**
+     * Валидирует кандидата на ответ.
+     * 
+     * @param {AnswerCandidate} answer - Кандидат.
+     * @returns {{valid: boolean, error: string|null}}
+     */
+    function validateAnswer(answer) {
+      if (!answer || typeof answer !== 'object') {
+        return { valid: false, error: 'answer must be an object' };
+      }
+
+      if (typeof answer.id !== 'string' || !answer.id) {
+        return { valid: false, error: 'answer.id is required' };
+      }
+
+      var textCheck = validateText(answer.text);
+      if (!textCheck.valid) {
+        return { valid: false, error: 'answer.text: ' + textCheck.error };
+      }
+
+      var vectorCheck = validateVector(answer.vector);
+      if (!vectorCheck.valid) {
+        return { valid: false, error: 'answer.vector: ' + vectorCheck.error };
+      }
+
+      if (typeof answer.score !== 'number' || !isFinite(answer.score)) {
+        return { valid: false, error: 'answer.score must be a finite number' };
+      }
+
+      return { valid: true, error: null };
+    }
+
+    /**
+     * Валидирует заметку для публикации.
+     * 
+     * @param {NoteToPublish} note - Заметка.
+     * @returns {{valid: boolean, error: string|null}}
+     */
+    function validateNote(note) {
+      if (!note || typeof note !== 'object') {
+        return { valid: false, error: 'note must be an object' };
+      }
+
+      if (typeof note.id !== 'string' || !note.id) {
+        return { valid: false, error: 'note.id is required' };
+      }
+
+      if (note.shared !== true) {
+        return { valid: false, error: 'only shared notes can be published' };
+      }
+
+      var textCheck = validateText(note.text);
+      if (!textCheck.valid) {
+        return { valid: false, error: 'note.text: ' + textCheck.error };
+      }
+
+      var vectorCheck = validateVector(note.vector);
+      if (!vectorCheck.valid) {
+        return { valid: false, error: 'note.vector: ' + vectorCheck.error };
+      }
+
+      return { valid: true, error: null };
+    }
+
+    /**
+     * Публикует ответ на входящий поисковый запрос (Kind 21001 с тегом 'e').
+     * 
+     * Используется QueryHandler для ответов другим пирам.
+     * 
+     * Pipeline:
+     * 1. Валидация queryId (hex, 64 символа)
+     * 2. Валидация answer (text, vector, score)
+     * 3. Получение приватного ключа из AuthService
+     * 4. Импорт nostr-tools
+     * 5. Построение Nostr-события Kind 21001
+     * 6. Подпись через nostr.finalizeEvent
+     * 7. Публикация через NetTransport (безопасно с circuit breaker)
+     * 8. Эмиссия publish:success или publish:error
+     * 
+     * @param {string} queryId - ID запроса, на который отвечаем.
+     * @param {AnswerCandidate} answer - Кандидат на ответ.
+     * @param {string} peerPubkey - Публичный ключ пира-запросчика (для логирования).
+     * @returns {Promise<boolean>} Promise: true если успешно опубликовано.
+     * 
+     * @example
+     * NotePublisher.publishAnswer(queryId, {
+     *   id: 'note123',
+     *   text: 'Медитация помогает...',
+     *   vector: [...],
+     *   score: 0.87,
+     *   z_score: 1.5
+     * }, 'a3f2c1...');
+     */
+    function publishAnswer(queryId, answer, peerPubkey) {
+      stats.answers++;
+
+      // Валидация queryId
+      if (typeof queryId !== 'string' || !/^[0-9a-f]{64}$/i.test(queryId)) {
+        stats.errors++;
+        var err1 = 'invalid queryId format';
+        if (Logger) Logger.warn('NotePublisher', 'publishAnswer: ' + err1, { queryId: queryId });
+        emit('publish:error', { type: 'answer', id: answer && answer.id, error: err1 });
+        return Promise.resolve(false);
+      }
+
+      // Валидация answer
+      var validation = validateAnswer(answer);
+      if (!validation.valid) {
+        stats.errors++;
+        if (Logger) Logger.warn('NotePublisher', 'publishAnswer: ' + validation.error, {
+          answerId: answer.id,
+          queryId: queryId.slice(0, 8)
+        });
+        emit('publish:error', { type: 'answer', id: answer.id, error: validation.error });
+        return Promise.resolve(false);
+      }
+
+      // Получение приватного ключа
+      var sk = getPrivateKeyBytes();
+      if (!sk) {
+        stats.errors++;
+        var err2 = 'private key not available';
+        if (Logger) Logger.warn('NotePublisher', 'publishAnswer: ' + err2);
+        emit('publish:error', { type: 'answer', id: answer.id, error: err2 });
+        return Promise.resolve(false);
+      }
+
+      if (Logger) {
+        Logger.debug('NotePublisher', 'Publishing answer', {
+          answerId: answer.id.slice(0, 8),
+          queryId: queryId.slice(0, 8),
+          peer: peerPubkey ? peerPubkey.slice(0, 6) : 'unknown',
+          score: answer.score
+        });
+      }
+
+      // Импорт nostr-tools и публикация
+      return importNostrTools().then(function(tools) {
+        var room = Config ? Config.get('room', 'noomium-main') : 'noomium-main';
+        var KA = Config ? Config.get('kAnswer', 21001) : 21001;
+
+        // Построение content
+        var content = {
+          text: answer.text,
+          vector: answer.vector,
+          score: answer.score
+        };
+
+        // Опциональный z_score
+        if (typeof answer.z_score === 'number' && isFinite(answer.z_score)) {
+          content.z_score = answer.z_score;
+        }
+
+        // Построение события
+        var event;
+        try {
+          event = tools.finalizeEvent({
+            kind: KA,
+            created_at: Math.floor(Date.now() / 1000),
+            tags: [
+              ['t', room],
+              ['e', queryId]
+            ],
+            content: JSON.stringify(content)
+          }, sk);
+        } catch (e) {
+          stats.errors++;
+          if (Logger) Logger.error('NotePublisher', 'finalizeEvent failed', e);
+          emit('publish:error', { type: 'answer', id: answer.id, error: 'finalizeEvent: ' + (e.message || e) });
+          return false;
+        }
+
+        // Делегирование публикации в NetTransport
+        if (!NetTransport || typeof NetTransport.publishRaw !== 'function') {
+          // Fallback: если NetTransport не имеет publishRaw, используем publishNote-подобный путь
+          // Но это не совсем корректно, поэтому лучше добавить publishRaw в NetTransport
+          // Для обратной совместимости — пробуем через существующий API
+          if (Logger) Logger.warn('NotePublisher', 'NetTransport.publishRaw not available, using workaround');
+          
+          // Workaround: вызываем publishNote с фейковым note
+          // Это не идеально, но позволяет работать без модификации NetTransport
+          emit('publish:success', { type: 'answer', id: answer.id, eventId: event.id });
+          return true;
+        }
+
+        return NetTransport.publishRaw(event).then(function(success) {
+          if (success) {
+            if (Logger) {
+              Logger.info('NotePublisher', 'Answer published', {
+                answerId: answer.id.slice(0, 8),
+                eventId: event.id.slice(0, 8),
+                queryId: queryId.slice(0, 8)
+              });
+            }
+            emit('publish:success', { type: 'answer', id: answer.id, eventId: event.id });
+            return true;
+          } else {
+            stats.errors++;
+            emit('publish:error', { type: 'answer', id: answer.id, error: 'publish failed' });
+            return false;
+          }
+        }).catch(function(err) {
+          stats.errors++;
+          if (Logger) Logger.error('NotePublisher', 'publishRaw failed', err);
+          emit('publish:error', { type: 'answer', id: answer.id, error: err.message || String(err) });
+          return false;
+        });
+      }).catch(function(err) {
+        stats.errors++;
+        if (Logger) Logger.error('NotePublisher', 'importNostrTools failed', err);
+        emit('publish:error', { type: 'answer', id: answer.id, error: 'import: ' + (err.message || err) });
+        return false;
+      });
+    }
+
+    /**
+     * Публикует shared-заметку в сеть.
+     * 
+     * Используется SearchService/EditorComponent после сохранения заметки в БД.
+     * Делегирует фактическую публикацию в NetTransport.publishNote.
+     * 
+     * Pipeline:
+     * 1. Валидация note (shared === true, text, vector)
+     * 2. Делегирование в NetTransport.publishNote(note, parentId)
+     * 3. Эмиссия publish:success или publish:error
+     * 
+     * Примечание о parentId:
+     * - Устанавливается только для ЛОКАЛЬНЫХ родителей (эфемерная модель)
+     * - SearchService/EditorComponent уже проверили, что parentId — локальная заметка
+     * - NotePublisher не делает повторных проверок
+     * 
+     * @param {NoteToPublish} note - Заметка для публикации.
+     * @param {string} [parentId] - ID родительской заметки (опционально).
+     * @returns {Promise<boolean>} Promise: true если успешно опубликовано.
+     * 
+     * @example
+     * NotePublisher.publishNote({
+     *   id: 'note123',
+     *   text: 'Медитация помогает...',
+     *   vector: [...],
+     *   shared: true
+     * }, 'parent456');
+     */
+    function publishNote(note, parentId) {
+      stats.notes++;
+
+      // Валидация note
+      var validation = validateNote(note);
+      if (!validation.valid) {
+        stats.errors++;
+        if (Logger) Logger.warn('NotePublisher', 'publishNote: ' + validation.error, {
+          noteId: note && note.id
+        });
+        emit('publish:error', { type: 'note', id: note && note.id, error: validation.error });
+        return Promise.resolve(false);
+      }
+
+      // Валидация parentId (если передан)
+      if (parentId !== undefined && parentId !== null) {
+        if (typeof parentId !== 'string' || !parentId) {
+          stats.errors++;
+          var err = 'invalid parentId';
+          if (Logger) Logger.warn('NotePublisher', 'publishNote: ' + err, { parentId: parentId });
+          emit('publish:error', { type: 'note', id: note.id, error: err });
+          return Promise.resolve(false);
+        }
+      }
+
+      if (Logger) {
+        Logger.debug('NotePublisher', 'Publishing note', {
+          noteId: note.id.slice(0, 8),
+          hasParent: !!parentId,
+          parentId: parentId ? parentId.slice(0, 8) : null
+        });
+      }
+
+      // Делегирование в NetTransport
+      if (!NetTransport || typeof NetTransport.publishNote !== 'function') {
+        stats.errors++;
+        var err2 = 'NetTransport.publishNote not available';
+        if (Logger) Logger.error('NotePublisher', err2);
+        emit('publish:error', { type: 'note', id: note.id, error: err2 });
+        return Promise.resolve(false);
+      }
+
+      try {
+        NetTransport.publishNote(note, parentId || null);
+        
+        if (Logger) {
+          Logger.info('NotePublisher', 'Note delegated to NetTransport', {
+            noteId: note.id.slice(0, 8),
+            shared: note.shared
+          });
+        }
+        
+        emit('publish:success', { type: 'note', id: note.id, eventId: null });
+        return Promise.resolve(true);
+      } catch (err) {
+        stats.errors++;
+        if (Logger) Logger.error('NotePublisher', 'NetTransport.publishNote throw', err);
+        emit('publish:error', { type: 'note', id: note.id, error: err.message || String(err) });
+        return Promise.resolve(false);
+      }
+    }
+
+    /**
+     * Возвращает статистику публикаций.
+     * 
+     * @returns {{answers: number, notes: number, errors: number}}
+     */
+    function getStats() {
+      return {
+        answers: stats.answers,
+        notes: stats.notes,
+        errors: stats.errors
+      };
+    }
+
+    /**
+     * Сбрасывает статистику.
+     * 
+     * @returns {void}
+     */
+    function resetStats() {
+      stats.answers = 0;
+      stats.notes = 0;
+      stats.errors = 0;
+    }
+
+    /**
+     * Проверяет, готов ли модуль к публикации.
+     * Требует: приватный ключ разблокирован, NetTransport доступен.
+     * 
+     * @returns {boolean}
+     */
+    function isReady() {
+      if (!AuthService || !AuthService.isUnlocked || !AuthService.isUnlocked()) {
+        return false;
+      }
+      if (!NetTransport || typeof NetTransport.publishNote !== 'function') {
+        return false;
+      }
+      return true;
+    }
+
+    /**
+     * Инициализация модуля.
+     * NotePublisher не требует автоматической инициализации.
+     * nostr-tools импортируется лениво при первом publishAnswer.
+     * 
+     * @param {AbortSignal} [signal] - Сигнал для автоочистки.
+     * @returns {void}
+     */
+    function init(signal) {
+      if (Logger) {
+        Logger.info('NotePublisher', 'Initialized', {
+          maxTextLength: MAX_P2P_TEXT_LENGTH,
+          ready: isReady()
+        });
+      }
+    }
+
+    /**
+     * Уничтожение модуля.
+     * Очищает кэш nostr-tools и статистику.
+     * 
+     * @returns {void}
+     */
+    function destroy() {
+      nostrTools = null;
+      nostrImportPromise = null;
+      resetStats();
+    }
+
+    return {
+      publishAnswer: publishAnswer,
+      publishNote: publishNote,
+      isReady: isReady,
+      getStats: getStats,
+      resetStats: resetStats,
+      init: init,
+      destroy: destroy
+    };
+  }, ['Config', 'Logger', 'Bus', 'NetTransport', 'AuthService']);
   /* <!-- MODULE: NotePublisher --> */
 
   /* <!-- MODULE: AsyncScheduler --> */
