@@ -22764,14 +22764,1177 @@ kbd {
    */
   /* <!-- MODULE: App.Boot --> */
 
+  /* <!-- MODULE: I18n.Dicts --> */
+  /**
+   * @module I18n.Dicts
+   * @description Заполнение словарей локализации (I18n).
+   * 
+   * Зона ответственности:
+   * - Регистрация всех переводов для русского и английского языков
+   * - Включает ключи для всех UI-компонентов, модалок, тостов
+   * - Специфичные ключи для Focus Mode, Live Stream, Parent/Child связей
+   * 
+   * Архитектурные принципы:
+   * - Это НЕ DI-модуль, а блок инициализации в Bootstrap слое
+   * - Выполняется один раз при загрузке приложения
+   * - Использует I18n.addDict() для регистрации словарей
+   * - Полные словари для двух языков (ru и en)
+   * 
+   * Категории ключей:
+   * - app.* — общие (имя приложения)
+   * - st.* — статусы (сеть, AI)
+   * - ed.* — редактор (placeholder, счётчик)
+   * - btn.* — кнопки (private, public, send, save, cancel, и т.д.)
+   * - seg.* — сегменты (local, world, seren)
+   * - tab.* — вкладки (stream, base)
+   * - empty.* — пустые состояния
+   * - base.* — вкладка "База"
+   * - toast.* — уведомления
+   * - menu.* — меню настроек
+   * - set.* — настройки
+   * - help.* — справка
+   * - offline.* — офлайн-бар
+   * - auth.* — авторизация
+   * - note.* — заметки (parent, children)
+   * - progress.* — прогресс-бар
+   * 
+   * @namespace I18n.Dicts
+   */
+
+  /**
+   * Резолвит I18n для добавления словарей.
+   */
+  var DICT_I18n = DI.resolve('I18n');
+
+  /**
+   * Русский словарь переводов.
+   * @type {Object<string, string>}
+   */
+  var DICT_RU = {
+    // Общие
+    'app.name': 'NOOmium',
+
+    // Статусы
+    'st.net': 'сеть',
+    'st.ai.loading': 'модель',
+    'st.ai.ready': 'ии',
+    'st.ai.demo': 'ии/хеш',
+    'st.net.online': 'онлайн',
+    'st.net.listen': 'слушаю',
+    'st.net.connecting': 'соединение',
+    'st.net.reconnecting': 'пересоединение',
+    'st.net.failed': 'нет сети',
+
+    // Редактор
+    'ed.placeholder': 'О чём думаешь?',
+    'ed.chars': 'симв.',
+
+    // Кнопки
+    'btn.private': 'Личное',
+    'btn.public': 'Мир',
+    'btn.send': 'Послать',
+    'btn.sending': 'Отправка...',
+    'btn.save': 'Сохранить',
+    'btn.cancel': 'Отмена',
+    'btn.close': 'Закрыть',
+    'btn.edit': 'Развить',
+    'btn.del': 'Удалить',
+    'btn.copy': 'Копия',
+    'btn.toggle.priv': 'Скрыть',
+    'btn.toggle.pub': 'Открыть',
+    'btn.back': 'Назад',
+    'btn.gotit': 'Понятно',
+    'btn.forgot': 'Забыли пароль?',
+    'btn.reset_storage': 'Сброс хранилища',
+    'btn.prev': 'Предыдущая',
+    'btn.next': 'Следующая',
+    'btn.focus': 'Фокус',
+    'btn.unfocus': 'Снять фокус',
+    'btn.clear_cache': 'Сбросить кеш',
+
+    // Подтверждения
+    'reset_storage.confirm': 'Все данные будут удалены безвозвратно. Продолжить?',
+    'del.confirm': 'Удалить эту мысль навсегда?',
+    'nv.delete.confirm': 'Удалить эту заметку навсегда?',
+    'base.wipe.confirm': 'Удалить все ваши мысли навсегда?',
+
+    // Сходство
+    'sim.score': 'похожа на',
+
+    // Сегменты
+    'seg.local': 'Моё',
+    'seg.world': 'Мир',
+    'seg.seren': 'Озарения',
+
+    // Вкладки
+    'tab.stream': 'Поток',
+    'tab.base': 'База',
+
+    // Пустые состояния
+    'empty.local.t': 'Пока нет мыслей',
+    'empty.local.d': 'Начните печатать в поле выше',
+    'empty.world.t': 'Никто не думает так же',
+    'empty.world.d': 'Ждём открытые мысли других',
+    'empty.seren.t': 'Озарений нет',
+    'empty.seren.d': 'Попробуйте другую формулировку',
+    'empty.base.t': 'База пуста',
+    'empty.base.d': 'Запишите первую мысль',
+    'empty.base.empty': 'Под фильтр ничего не подошло',
+
+    // База
+    'base.stat.total': 'всего',
+    'base.stat.open': 'открыто',
+    'base.stat.priv': 'лично',
+    'base.search': 'поиск...',
+    'base.sort.new': 'новые',
+    'base.sort.old': 'старые',
+    'base.sort.az': 'а-я',
+    'base.tag.private': 'лично',
+    'base.tag.shared': 'открыто',
+    'base.wipe': 'Стереть базу',
+
+    // Онбординг
+    'onb.dontshow': 'Больше не показывать',
+
+    // Тосты
+    'toast.saved.private': 'сохранено лично',
+    'toast.saved.public': 'опубликовано',
+    'toast.copied': 'скопировано',
+    'toast.deleted': 'удалено',
+    'toast.copy.fail': 'не удалось',
+    'toast.empty': 'напишите что-нибудь',
+    'toast.ai.notready': 'ии не готов',
+    'toast.net.restart': 'перезапуск сети...',
+    'toast.base.wiped': 'база стёрта',
+    'toast.edit.saved': 'сохранено',
+    'toast.sending': 'отправка...',
+    'toast.network.err': 'нет соединения',
+    'toast.cache_cleared': 'Кеш сброшен',
+
+    // Меню
+    'menu.settings': 'Настройки',
+    'menu.help': 'Как это работает',
+    'menu.theme': 'Тема',
+    'menu.lang': 'Язык',
+    'menu.theme.dark': 'Тёмная',
+    'menu.theme.light': 'Светлая',
+    'menu.export': 'Экспорт',
+    'menu.import': 'Импорт',
+
+    // Настройки
+    'set.title': 'Настройки',
+    'set.room': 'Комната',
+    'set.room.hint': 'Nostr-топик группы',
+    'set.threshold': 'Порог',
+    'set.threshold.hint': 'выше = строже',
+    'set.seren': 'Дельта озарений',
+    'set.seren.hint': 'ширина поиска',
+    'set.relays': 'Релеи',
+    'set.relays.hint': 'один wss:// на строку',
+    'set.advanced': 'Расширенные',
+    'set.data': 'Данные',
+    'set.danger': 'Опасная зона',
+
+    // Справка
+    'help.title': 'Как это работает',
+    'help.intro': 'NOOmium превращает мысли в смысловые векторы и ищет созвучие в вашей базе и среди открытых мыслей.',
+    'help.local': 'Сильные совпадения в вашей базе',
+    'help.world': 'Открытые мысли других людей',
+    'help.seren': 'Близкие, но неожиданные — источник вдохновения',
+    'help.philosophy': 'Чужие мысли нельзя сохранить. Их можно прочитать, понять и написать своё.',
+    'help.keys': 'Горячие клавиши',
+    'help.k1': 'Ctrl+Enter — отправить',
+    'help.k2': '/ — фокус на поле ввода',
+    'help.gestures': 'Свайпы влево/вправо по карточкам. Переключатель «Мир/Личное» выбирает, куда послать мысль.',
+
+    // Офлайн-бар
+    'offline.bar': 'Офлайн-очередь',
+    'offline.disconnected': 'Нет сети',
+    'offline.queue': 'Ожидают: {count}',
+
+    // Прогресс-бар
+    'progress.title': 'Загружаем модель ИИ',
+    'progress.description': 'Чтобы искать мысли по смыслу, нужна небольшая модель. Это произойдёт один раз.',
+
+    // Live Stream
+    'stream.live': 'Прямой эфир',
+
+    // Заметки
+    'note.parent': 'В ответ на',
+    'note.children': 'Ответы',
+    'note.parent.notfound': 'Родительская заметка недоступна',
+    'focus.you': 'вы',
+
+    // Авторизация
+    'auth.reset_title': 'Ошибка доступа',
+    'auth.reset_body': 'Превышено количество попыток. Необходимо сбросить данные.',
+    'auth.reset_btn': 'Сбросить данные',
+    'auth.new_password_title': 'Защита данных',
+    'auth.new_password_label1': 'Придумайте пароль',
+    'auth.new_password_label2': 'Подтвердите пароль',
+    'auth.new_password_empty': 'Пароль не может быть пустым',
+    'auth.new_password_mismatch': 'Пароли не совпадают',
+    'auth.new_password_save': 'Сохранить',
+    'auth.existing_password_title': 'Доступ к данным',
+    'auth.existing_password_label': 'Введите пароль',
+    'auth.existing_password_btn': 'Войти',
+    'auth.existing_password_empty': 'Введите пароль',
+    'auth.wrong_password': 'Неверный пароль'
+  };
+
+  /**
+   * Английский словарь переводов.
+   * @type {Object<string, string>}
+   */
+  var DICT_EN = {
+    // Общие
+    'app.name': 'NOOmium',
+
+    // Статусы
+    'st.net': 'net',
+    'st.ai.loading': 'model',
+    'st.ai.ready': 'ai',
+    'st.ai.demo': 'ai/hash',
+    'st.net.online': 'online',
+    'st.net.listen': 'listening',
+    'st.net.connecting': 'connecting',
+    'st.net.reconnecting': 'reconnecting',
+    'st.net.failed': 'offline',
+
+    // Редактор
+    'ed.placeholder': 'What are you thinking?',
+    'ed.chars': 'chars',
+
+    // Кнопки
+    'btn.private': 'Private',
+    'btn.public': 'World',
+    'btn.send': 'Send',
+    'btn.sending': 'Sending...',
+    'btn.save': 'Save',
+    'btn.cancel': 'Cancel',
+    'btn.close': 'Close',
+    'btn.edit': 'Develop',
+    'btn.del': 'Delete',
+    'btn.copy': 'Copy',
+    'btn.toggle.priv': 'Hide',
+    'btn.toggle.pub': 'Share',
+    'btn.back': 'Back',
+    'btn.gotit': 'Got it',
+    'btn.forgot': 'Forgot password?',
+    'btn.reset_storage': 'Reset Storage',
+    'btn.prev': 'Previous',
+    'btn.next': 'Next',
+    'btn.focus': 'Focus',
+    'btn.unfocus': 'Unfocus',
+    'btn.clear_cache': 'Clear cache',
+
+    // Подтверждения
+    'reset_storage.confirm': 'All data will be permanently deleted. Continue?',
+    'del.confirm': 'Delete this thought forever?',
+    'nv.delete.confirm': 'Delete this note forever?',
+    'base.wipe.confirm': 'Delete all thoughts forever?',
+
+    // Сходство
+    'sim.score': 'similarity',
+
+    // Сегменты
+    'seg.local': 'Mine',
+    'seg.world': 'World',
+    'seg.seren': 'Insights',
+
+    // Вкладки
+    'tab.stream': 'Stream',
+    'tab.base': 'Base',
+
+    // Пустые состояния
+    'empty.local.t': 'No thoughts yet',
+    'empty.local.d': 'Start typing above',
+    'empty.world.t': 'Nobody thinks alike',
+    'empty.world.d': 'Waiting for open thoughts',
+    'empty.seren.t': 'No insights',
+    'empty.seren.d': 'Try different wording',
+    'empty.base.t': 'Base is empty',
+    'empty.base.d': 'Write your first thought',
+    'empty.base.empty': 'Nothing matches',
+
+    // База
+    'base.stat.total': 'total',
+    'base.stat.open': 'open',
+    'base.stat.priv': 'private',
+    'base.search': 'search...',
+    'base.sort.new': 'newest',
+    'base.sort.old': 'oldest',
+    'base.sort.az': 'a-z',
+    'base.tag.private': 'private',
+    'base.tag.shared': 'open',
+    'base.wipe': 'Wipe base',
+
+    // Онбординг
+    'onb.dontshow': "Don't show again",
+
+    // Тосты
+    'toast.saved.private': 'saved privately',
+    'toast.saved.public': 'shared',
+    'toast.copied': 'copied',
+    'toast.deleted': 'deleted',
+    'toast.copy.fail': 'copy failed',
+    'toast.empty': 'write something',
+    'toast.ai.notready': 'ai not ready',
+    'toast.net.restart': 'restarting net...',
+    'toast.base.wiped': 'base wiped',
+    'toast.edit.saved': 'saved',
+    'toast.sending': 'sending...',
+    'toast.network.err': 'no connection',
+    'toast.cache_cleared': 'Cache cleared',
+
+    // Меню
+    'menu.settings': 'Settings',
+    'menu.help': 'How it works',
+    'menu.theme': 'Theme',
+    'menu.lang': 'Language',
+    'menu.theme.dark': 'Dark',
+    'menu.theme.light': 'Light',
+    'menu.export': 'Export',
+    'menu.import': 'Import',
+
+    // Настройки
+    'set.title': 'Settings',
+    'set.room': 'Room',
+    'set.room.hint': 'Nostr group topic',
+    'set.threshold': 'Threshold',
+    'set.threshold.hint': 'higher = stricter',
+    'set.seren': 'Insights delta',
+    'set.seren.hint': 'search width',
+    'set.relays': 'Relays',
+    'set.relays.hint': 'one wss:// per line',
+    'set.advanced': 'Advanced',
+    'set.data': 'Data',
+    'set.danger': 'Danger zone',
+
+    // Справка
+    'help.title': 'How it works',
+    'help.intro': 'NOOmium turns thoughts into semantic vectors and finds resonance in your base and among others.',
+    'help.local': 'Strong matches in your base',
+    'help.world': 'Open thoughts from others',
+    'help.seren': 'Close but unexpected — source of inspiration',
+    'help.philosophy': "Others' thoughts cannot be saved. Read, understand, write your own.",
+    'help.keys': 'Hotkeys',
+    'help.k1': 'Ctrl+Enter — send',
+    'help.k2': '/ — focus editor',
+    'help.gestures': 'Swipe cards left/right. Toggle World/Private chooses destination.',
+
+    // Офлайн-бар
+    'offline.bar': 'Offline queue',
+    'offline.disconnected': 'Offline',
+    'offline.queue': 'Pending: {count}',
+
+    // Прогресс-бар
+    'progress.title': 'Loading AI model',
+    'progress.description': 'To search thoughts by meaning, a small model is needed. This happens once.',
+
+    // Live Stream
+    'stream.live': 'Live stream',
+
+    // Заметки
+    'note.parent': 'Reply to',
+    'note.children': 'Replies',
+    'note.parent.notfound': 'Parent note unavailable',
+    'focus.you': 'you',
+
+    // Авторизация
+    'auth.reset_title': 'Access Error',
+    'auth.reset_body': 'Maximum attempts exceeded. Data must be reset.',
+    'auth.reset_btn': 'Reset Data',
+    'auth.new_password_title': 'Data Protection',
+    'auth.new_password_label1': 'Create a password',
+    'auth.new_password_label2': 'Confirm password',
+    'auth.new_password_empty': 'Password cannot be empty',
+    'auth.new_password_mismatch': 'Passwords do not match',
+    'auth.new_password_save': 'Save',
+    'auth.existing_password_title': 'Data Access',
+    'auth.existing_password_label': 'Enter password',
+    'auth.existing_password_btn': 'Login',
+    'auth.existing_password_empty': 'Enter password',
+    'auth.wrong_password': 'Incorrect password'
+  };
+
+  // Регистрация словарей в I18n
+  if (DICT_I18n && DICT_I18n.addDict) {
+    DICT_I18n.addDict('ru', DICT_RU);
+    DICT_I18n.addDict('en', DICT_EN);
+  }
+  /* <!-- MODULE: I18n.Dicts --> */
+
+
+  /* <!-- MODULE: App --> */
+  /**
+   * @module App
+   * @description Корневой DI-модуль приложения NOOmium.
+   * 
+   * Зона ответственности:
+   * - Регистрация последним в DI-контейнере
+   * - При резолве триггерит создание всех Singleton-сервисов
+   * - Применяет сохранённую цветовую тему при старте
+   * - Возвращает публичный метод mount() для запуска приложения
+   * 
+   * Архитектурные принципы:
+   * - Зависимости включают все основные сервисы для гарантии их инициализации
+   * - Это "маркерный" модуль — его резолв запускает всю цепочку инициализации
+   * - Применяет тему ДО первого рендера UI
+   * - Делегирует фактическое монтирование в App.Boot.mountApp()
+   * 
+   * Порядок инициализации при DI.resolve('App'):
+   * 1. Резолвятся все зависимости (Logger, Bus, ..., Progress)
+   * 2. Каждый зависимый модуль создаётся как Singleton
+   * 3. Вызывается factory App модуля
+   * 4. Применяется тема из Config
+   * 5. Возвращается {mount: mountApp}
+   * 
+   * Используется модулями:
+   * - Bootstrap → DI.resolve('App') для запуска приложения
+   * 
+   * @namespace App
+   */
+  DI.register('App', function(
+    Logger, Bus, Store, Config, Utils, DB, AI, Net, I18n, Modal, Toast, Progress
+  ) {
+    /**
+     * Применяет сохранённую цветовую тему из Config.
+     * Вызывается при резолве App модуля, до первого рендера UI.
+     * 
+     * @returns {void}
+     */
+    function applyInitialTheme() {
+      var theme = Config ? Config.get('theme', 'dark') : 'dark';
+      
+      if (typeof document !== 'undefined' && document.body) {
+        document.body.setAttribute('data-theme', theme);
+      }
+      
+      if (typeof document !== 'undefined') {
+        var metaTheme = document.querySelector('meta[name="theme-color"]');
+        if (metaTheme) {
+          metaTheme.setAttribute('content', theme === 'light' ? '#fafafa' : '#0b0b10');
+        }
+      }
+      
+      if (Logger) {
+        Logger.info('App', 'Initial theme applied', { theme: theme });
+      }
+    }
+
+    // Применение темы при резолве модуля
+    applyInitialTheme();
+
+    return {
+      /**
+       * Публичный метод запуска приложения.
+       * Вызывается из Bootstrap после успешного резолва.
+       * Делегирует выполнение в функцию mountApp из App.Boot.
+       * 
+       * @returns {void}
+       */
+      mount: function() {
+        // mountApp определена в App.Boot (замыкание Bootstrap слоя)
+        if (typeof mountApp === 'function') {
+          mountApp();
+        } else if (Logger) {
+          Logger.error('App', 'mountApp function not available');
+        }
+      }
+    };
+  }, ['Logger', 'Bus', 'Store', 'Config', 'Utils', 'DB', 'AI', 'Net', 'I18n', 'Modal', 'Toast', 'Progress']);
+  /* <!-- MODULE: App --> */
+
+
   /* <!-- MODULE: Bootstrap --> */
-  старт
-  энд
+  /**
+   * @module Bootstrap
+   * @description Точка входа приложения NOOmium.
+   * 
+   * Зона ответственности:
+   * - Резолв корневого модуля App через DI-контейнер
+   * - Вызов mount() для инициализации UI и запуска цепочки загрузки
+   * - Инициализация Service Worker (опционально, с graceful degradation)
+   * - Отображение fallback-экрана при критических ошибках старта
+   * - Обработка document.readyState для корректного запуска
+   * 
+   * Архитектурные принципы:
+   * - Функция bootstrap() — это глобальная функция, не DI-модуль
+   * - Запускается один раз при загрузке страницы
+   * - SW инициализация изолирована в try/catch для graceful degradation
+   * - Fallback UI позволяет пользователю перезагрузить страницу при ошибке
+   * - Проверка document.readyState для работы с defer/async скриптами
+   * 
+   * Последовательность запуска:
+   * 
+   * 1. **Проверка document.readyState:**
+   *    - 'loading' → ждём DOMContentLoaded
+   *    - 'interactive' или 'complete' → запускаем немедленно
+   * 
+   * 2. **Резолв App модуля:**
+   *    - DI.resolve('App') → триггерит создание всех Singletons
+   *    - Применяется тема из Config
+   *    - Возвращается {mount: mountApp}
+   * 
+   * 3. **Вызов mount():**
+   *    - Генерация HTML-разметки через UI.Layout
+   *    - Вставка в #app-root
+   *    - Привязка window listeners и Bus events
+   *    - Инициализация всех UI компонентов
+   *    - Запуск bootApp() (цепочка AI → Auth → Net)
+   * 
+   * 4. **Инициализация Service Worker (опционально):**
+   *    - DI.resolve('SW') → SW.init()
+   *    - В try/catch, чтобы сбой SW не ломал запуск приложения
+   * 
+   * 5. **Fallback UI при критической ошибке:**
+   *    - Создаётся error-wrapper с описанием ошибки
+   *    - Кнопка Reload для восстановления работоспособности
+   * 
+   * Использует модули:
+   * - `App` — корневой DI-модуль
+   * - `SW` — Service Worker клиент (опционально)
+   * 
+   * Эмитит события: нет (только резолв и вызовы)
+   * 
+   * Обработка ошибок:
+   * - Критическая ошибка в bootstrap → fallback UI
+   * - Ошибка в SW.init() → логирование, приложение продолжает работу
+   * - Все ошибки логируются через console.error
+   * 
+   * @namespace Bootstrap
+   */
+
+  /**
+   * Главная функция запуска приложения.
+   * 
+   * Алгоритм:
+   * 1. Резолв App модуля (триггерит создание всех Singletons)
+   * 2. Вызов app.mount() для монтирования UI
+   * 3. Инициализация Service Worker (опционально, в try/catch)
+   * 4. При критической ошибке → fallback UI с кнопкой Reload
+   * 
+   * @returns {void}
+   */
+  function bootstrap() {
+    try {
+      // Резолвим корневой модуль App, что триггерит создание всех Singleton-сервисов
+      var app = DI.resolve('App');
+      
+      // Вызов mount() для монтирования UI
+      if (app && typeof app.mount === 'function') {
+        app.mount();
+      } else {
+        throw new Error('App module did not return mount function');
+      }
+      
+      // Инициализация Service Worker (клиентская часть: регистрация и управление жизненным циклом).
+      // Вызов изолирован в try/catch, чтобы сбой SW не ломал запуск всего приложения:
+      // SW — опциональный компонент, приложение должно работать и без него (fallback).
+      try {
+        var sw = DI.resolve('SW');
+        if (sw && typeof sw.init === 'function') {
+          sw.init();
+        }
+      } catch (swErr) {
+        // Логируем, но не прерываем работу приложения
+        if (typeof console !== 'undefined' && console.warn) {
+          console.warn('[Bootstrap] SW init failed:', swErr);
+        }
+      }
+    } catch (err) {
+      // Критическая ошибка: не удалось смонтировать приложение
+      if (typeof console !== 'undefined' && console.error) {
+        console.error('[Bootstrap] Startup failed:', err);
+      }
+
+      // Fallback UI: показываем экран с описанием ошибки и кнопкой перезагрузки,
+      // чтобы пользователь мог восстановить работоспособность (например, после
+      // повреждения localStorage или несовместимости браузера).
+      var root = document.getElementById('app-root');
+      if (!root) {
+        root = document.createElement('div');
+        root.id = 'app-root';
+        document.body.appendChild(root);
+      }
+
+      root.textContent = '';
+
+      var wrapper = document.createElement('div');
+      wrapper.className = 'startup-wrapper';
+
+      var heading = document.createElement('h2');
+      heading.textContent = 'Startup failed';
+
+      var message = document.createElement('p');
+      message.className = 'startup-message';
+      message.textContent = String(err && err.message || err);
+
+      var reloadBtn = document.createElement('button');
+      reloadBtn.className = 'startup-reload';
+      reloadBtn.textContent = 'Reload';
+      reloadBtn.onclick = function() { location.reload(); };
+
+      wrapper.appendChild(heading);
+      wrapper.appendChild(message);
+      wrapper.appendChild(reloadBtn);
+      root.appendChild(wrapper);
+
+      document.body.classList.add('show-app');
+    }
+  }
+
+  /**
+   * Запуск bootstrap в зависимости от состояния готовности DOM.
+   * 
+   * - Если DOM ещё загружается ('loading') — ждём события DOMContentLoaded.
+   * - Если DOM уже готов ('interactive' или 'complete') — запускаем немедленно.
+   * 
+   * Это обеспечивает корректную работу как при размещении скрипта в <head> с defer,
+   * так и в конце <body>, а также при динамической подгрузке.
+   * 
+   * Проверка document.readyState:
+   * - 'loading' → HTML ещё парсится, DOM не готов
+   * - 'interactive' → HTML распарсен, DOM готов, но ресурсы (изображения) ещё грузятся
+   * - 'complete' → всё загружено, страница полностью готова
+   * 
+   * Для нашего приложения достаточно 'interactive', так как мы не зависим от изображений.
+   */
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', bootstrap);
+  } else {
+    bootstrap();
+  }
   /* <!-- MODULE: Bootstrap --> */
 
   /* <!-- MODULE: SW --> */
-  старт
-  энд
+  /**
+   * @typedef {Object} SWRegistrationPayload
+   * @description Payload события sw:registered.
+   * @property {string} version - Версия приложения.
+   * @property {string} scope - Область действия SW.
+   * @property {boolean} firstInstall - Флаг первой установки.
+   */
+
+  /**
+   * @module SW
+   * @description Клиентский модуль управления жизненным циклом Service Worker.
+   *
+   * Зона ответственности:
+   * - Регистрация SW с динамическим scope и updateViaCache: 'none'
+   * - Отслеживание фаз обновления с гарантированным снятием listener'ов
+   * - Координация немедленной активации через SKIP_WAITING
+   * - Приём сообщений от SW (sw:message)
+   * - Безопасная перезагрузка с учётом состояния приложения
+   *
+   * Архитектурные принципы:
+   * - Graceful degradation: работает без Config/Logger/Bus через console fallback
+   * - Защита от множественных listener'ов при повторных вызовах init()
+   * - Fallback на meta-тег app-version (без обращения к Config)
+   * - Safe postMessage с обработкой InvalidStateError
+   * - Динамический scope для поддержки деплоя в подпапки
+   *
+   * События Bus:
+   * - `sw:registered` — успешная регистрация
+   *   payload: {version: string, scope: string, firstInstall: boolean}
+   * - `sw:updatefound` — обнаружена новая версия
+   *   payload: {reason: string}
+   * - `sw:updated` — активация завершена, imminent reload
+   *   payload: {timestamp: number}
+   * - `sw:message` — сообщение от Service Worker
+   *   payload: Object
+   * - `sw:error` — ошибка регистрации (опционально)
+   *   payload: {message: string, timestamp: number}
+   *
+   * Используется модулями:
+   * - Bootstrap → sw.init() при старте приложения
+   *
+   * @namespace SW
+   */
+  DI.register('SW', function(Config, Logger, Bus) {
+    
+    /**
+     * Флаг, предотвращающий множественные перезагрузки страницы.
+     * Устанавливается в true при первом срабатывании controllerchange.
+     * @type {boolean}
+     */
+    var refreshing = false;
+
+    /**
+     * Флаг, защищающий от повторной установки глобальных обработчиков.
+     * Предотвращает утечки при повторных вызовах init() (например, после refreshUI).
+     * @type {boolean}
+     */
+    var globalListenersAttached = false;
+
+    /**
+     * Ссылка на активный ServiceWorkerRegistration для возможности
+     * ручного вызова update() из других модулей (future-proof).
+     * @type {ServiceWorkerRegistration | null}
+     */
+    var registration = null;
+
+    /**
+     * Счётчик операций (для статистики).
+     * @type {{registered: number, updated: number, errors: number}}
+     */
+    var stats = {
+      registered: 0,
+      updated: 0,
+      errors: 0
+    };
+
+    /**
+     * Безопасный wrapper над Logger с fallback на console.
+     * Обеспечивает единый формат логов с префиксом [SW].
+     * 
+     * @param {'info'|'warn'|'error'} level - Уровень лога.
+     * @param {string} msg - Сообщение.
+     * @param {*} [data] - Дополнительные данные.
+     * @returns {void}
+     */
+    function log(level, msg, data) {
+      var prefix = '[SW] ';
+      var fullMsg = prefix + msg;
+      
+      if (Logger && typeof Logger[level] === 'function') {
+        try {
+          Logger[level](fullMsg, data);
+          return;
+        } catch (e) {
+          // fallback на console при ошибке Logger
+        }
+      }
+      
+      var fn = console[level] || console.log;
+      if (data !== undefined) {
+        fn(fullMsg, data);
+      } else {
+        fn(fullMsg);
+      }
+    }
+
+    /**
+     * Публикует событие в Bus с защитой от ошибок.
+     * 
+     * @param {string} event - Имя события.
+     * @param {*} [payload] - Данные события.
+     * @returns {void}
+     */
+    function emit(event, payload) {
+      if (!Bus || typeof Bus.emit !== 'function') return;
+      
+      try {
+        Bus.emit(event, payload);
+      } catch (err) {
+        log('warn', 'Failed to emit ' + event, err);
+      }
+    }
+
+    /**
+     * Безопасно отправляет сообщение Service Worker'у.
+     * Оборачивает postMessage в try/catch для обработки случая,
+     * когда SW уже terminated или находится в некорректном состоянии.
+     * 
+     * @param {ServiceWorker} worker - Целевой worker.
+     * @param {Object} message - Сообщение для отправки.
+     * @returns {boolean} true если сообщение успешно отправлено.
+     */
+    function safePostMessage(worker, message) {
+      if (!worker) return false;
+      
+      try {
+        worker.postMessage(message);
+        return true;
+      } catch (err) {
+        log('warn', 'postMessage failed', err);
+        return false;
+      }
+    }
+
+    /**
+     * Извлекает версию приложения напрямую из meta-тега.
+     * Избегаем обращения к Config, так как версии там нет в defaults.
+     * 
+     * @returns {string} Версия приложения.
+     */
+    function resolveAppVersion() {
+      try {
+        var meta = document.querySelector('meta[name="app-version"]');
+        if (meta && meta.getAttribute) {
+          var metaVersion = meta.getAttribute('content');
+          if (metaVersion) return metaVersion;
+        }
+      } catch (e) {
+        // Игнорируем ошибки
+      }
+      return '1.0.0';
+    }
+
+    /**
+     * Отправляет команду немедленной активации ожидающему Service Worker'у.
+     * 
+     * Вызывается в двух сценариях:
+     * 1. При старте, если reg.waiting существует (возврат на страницу)
+     * 2. При обнаружении новой версии через updatefound → installed
+     * 
+     * @param {ServiceWorker} worker - Ожидающий активации worker.
+     * @param {string} reason - Причина вызова (для логирования).
+     * @returns {void}
+     */
+    function requestSkipWaiting(worker, reason) {
+      if (!worker) return;
+      
+      log('info', 'Requesting SKIP_WAITING (' + reason + ')', {
+        state: worker.state
+      });
+      
+      safePostMessage(worker, { type: 'SKIP_WAITING' });
+      emit('sw:updatefound', { reason: reason });
+    }
+
+    /**
+     * Обработчик изменения состояния устанавливающегося Service Worker'а.
+     * Отслеживает переход в 'installed' и инициирует немедленную активацию,
+     * если уже есть активный контроллер (значит это обновление, а не первая установка).
+     * 
+     * КРИТИЧНО: Снимает сам себя после достижения фазы 'installed' для предотвращения
+     * утечек памяти и спама в лог при последующих переходах (activating → activated).
+     * 
+     * @param {ServiceWorker} installing - Worker в фазе установки.
+     * @returns {function(Event): void} Обработчик statechange.
+     */
+    function createInstallingStateHandler(installing) {
+      var handler = function onStateChange() {
+        if (!installing) return;
+        
+        log('info', 'Worker state changed', { state: installing.state });
+        
+        if (installing.state === 'installed') {
+          // Снимаем listener, чтобы не спамить при activating/activated
+          installing.removeEventListener('statechange', handler);
+          
+          // Если есть активный контроллер — это обновление, а не первая установка
+          if (navigator.serviceWorker.controller) {
+            requestSkipWaiting(installing, 'update-installed');
+          } else {
+            log('info', 'First install completed, no skip needed');
+            emit('sw:registered', {
+              version: resolveAppVersion(),
+              firstInstall: true
+            });
+          }
+        }
+      };
+      
+      return handler;
+    }
+
+    /**
+     * Обработчик события updatefound на регистрации SW.
+     * Подписывается на statechange нового worker'а (reg.installing).
+     * 
+     * @param {ServiceWorkerRegistration} reg - Активная регистрация.
+     * @returns {function(): void} Обработчик updatefound.
+     */
+    function createUpdateFoundHandler(reg) {
+      return function onUpdateFound() {
+        var installing = reg.installing;
+        
+        if (!installing) {
+          log('warn', 'updatefound fired but reg.installing is null');
+          return;
+        }
+        
+        log('info', 'New SW detected, state: ' + installing.state);
+        installing.addEventListener('statechange', createInstallingStateHandler(installing));
+      };
+    }
+
+    /**
+     * Глобальный обработчик смены контроллера Service Worker.
+     * Срабатывает, когда новый SW берёт контроль над клиентом.
+     * Использует флаг refreshing для предотвращения цикла перезагрузок.
+     * 
+     * @returns {void}
+     */
+    function onControllerChange() {
+      if (refreshing) {
+        log('warn', 'controllerchange ignored (already refreshing)');
+        return;
+      }
+      
+      refreshing = true;
+      stats.updated++;
+      
+      log('info', 'Controller changed, initiating reload sequence');
+      emit('sw:updated', { timestamp: Date.now() });
+      
+      // Задержка 100мс, чтобы Bus успел доставить событие подписчикам
+      // (например, Toast-уведомлению об обновлении) до beforeunload
+      setTimeout(function() {
+        window.location.reload();
+      }, 100);
+    }
+
+    /**
+     * Обработчик входящих сообщений от Service Worker.
+     * Позволяет SW push'ить данные в UI (например, статус фоновой синхронизации).
+     * 
+     * @param {MessageEvent} event - Событие сообщения.
+     * @returns {void}
+     */
+    function onServiceWorkerMessage(event) {
+      if (!event.data) return;
+      
+      log('info', 'Message from SW', event.data);
+      emit('sw:message', event.data);
+    }
+
+    /**
+     * Устанавливает глобальные обработчики controllerchange и message.
+     * Защищён от повторной регистрации через флаг globalListenersAttached.
+     * 
+     * @returns {void}
+     */
+    function attachGlobalListeners() {
+      if (globalListenersAttached) {
+        log('info', 'Global SW listeners already attached');
+        return;
+      }
+      
+      if (!navigator.serviceWorker || typeof navigator.serviceWorker.addEventListener !== 'function') {
+        log('warn', 'navigator.serviceWorker.addEventListener not available');
+        return;
+      }
+      
+      try {
+        navigator.serviceWorker.addEventListener('controllerchange', onControllerChange);
+        navigator.serviceWorker.addEventListener('message', onServiceWorkerMessage);
+        globalListenersAttached = true;
+        log('info', 'Global SW listeners attached');
+      } catch (err) {
+        log('error', 'Failed to attach global SW listeners', err);
+      }
+    }
+
+    /**
+     * Обрабатывает успешную регистрацию Service Worker'а.
+     * Проверяет наличие ожидающего worker'а, подписывается на обновления.
+     * 
+     * @param {ServiceWorkerRegistration} reg - Объект регистрации.
+     * @param {string} appVersion - Версия приложения.
+     * @returns {void}
+     */
+    function handleRegistrationSuccess(reg, appVersion) {
+      registration = reg;
+      stats.registered++;
+      
+      log('info', 'Registered successfully', {
+        version: appVersion,
+        scope: reg.scope,
+        updateViaCache: reg.updateViaCache
+      });
+      
+      emit('sw:registered', {
+        version: appVersion,
+        scope: reg.scope,
+        firstInstall: false
+      });
+      
+      // Сценарий 1: Возврат на страницу, где уже есть ожидающий SW
+      // (например, пользователь открыл новую вкладку)
+      if (reg.waiting) {
+        log('info', 'Found waiting SW on startup, requesting activation');
+        requestSkipWaiting(reg.waiting, 'waiting-on-startup');
+      }
+      
+      // Сценарий 2: Активный SW уже существует — ничего не делаем
+      if (reg.active && !reg.waiting && !reg.installing) {
+        log('info', 'Active SW is up-to-date');
+      }
+      
+      // Подписываемся на обнаружение новых версий
+      reg.addEventListener('updatefound', createUpdateFoundHandler(reg));
+      log('info', 'updatefound listener attached');
+    }
+
+    /**
+     * Обрабатывает ошибку регистрации Service Worker'а.
+     * Не прерывает работу приложения — SW является опциональным компонентом.
+     * 
+     * @param {Error} err - Объект ошибки.
+     * @returns {void}
+     */
+    function handleRegistrationError(err) {
+      stats.errors++;
+      
+      log('error', 'Registration failed', err && err.message ? err.message : err);
+      
+      emit('sw:error', {
+        message: err && err.message ? err.message : String(err),
+        timestamp: Date.now()
+      });
+    }
+
+    /**
+     * Главная точка входа модуля.
+     * Инициирует регистрацию Service Worker'а с динамическим scope
+     * и настраивает обработчики жизненного цикла. Безопасна для повторных вызовов.
+     *
+     * Алгоритм:
+     * 1. Проверка поддержки Service Worker API
+     * 2. Проверка безопасности (HTTPS или localhost)
+     * 3. Установка глобальных listener'ов
+     * 4. Формирование URL с версией для cache-busting
+     * 5. Вычисление scope динамически
+     * 6. Регистрация с updateViaCache: 'none'
+     * 7. Обработка success/error
+     *
+     * @returns {void}
+     */
+    function init() {
+      // Проверка поддержки Service Worker
+      if (!('serviceWorker' in navigator)) {
+        log('warn', 'Service Worker API not supported by browser');
+        return;
+      }
+      
+      // Проверка безопасности: SW работает только в secure context
+      if (window.location.protocol !== 'https:' &&
+          window.location.hostname !== 'localhost' &&
+          window.location.hostname !== '127.0.0.1') {
+        log('warn', 'Service Worker requires HTTPS (current: ' + window.location.protocol + ')');
+        return;
+      }
+      
+      var appVersion = resolveAppVersion();
+      log('info', 'Initializing SW registration', { version: appVersion });
+      
+      // Устанавливаем глобальные listener'ы до регистрации,
+      // чтобы не пропустить событие, если SW активируется мгновенно
+      attachGlobalListeners();
+      
+      // Формируем URL с версией для cache-busting самого sw.js
+      var swUrl = './sw.js?v=' + encodeURIComponent(appVersion);
+      
+      // Вычисляем scope динамически для поддержки деплоя в подпапки
+      // (например, github.io/noomium/ или domain.com/app/)
+      var scopeUrl;
+      try {
+        scopeUrl = new URL('./', window.location.href).pathname;
+      } catch (e) {
+        scopeUrl = './';
+      }
+      
+      // Регистрируем SW с updateViaCache: 'none' для предотвращения
+      // кеширования браузером файла sw.js (иначе обновления могут
+      // задерживаться до 24 часов согласно спецификации SW)
+      navigator.serviceWorker.register(swUrl, {
+        updateViaCache: 'none',
+        scope: scopeUrl
+      })
+        .then(function(reg) {
+          handleRegistrationSuccess(reg, appVersion);
+        })
+        .catch(handleRegistrationError);
+    }
+
+    /**
+     * Публичный метод для принудительной проверки обновлений SW.
+     * Может быть вызван из UI (например, кнопка "Проверить обновления").
+     * 
+     * @returns {Promise<boolean>} true если проверка инициирована.
+     */
+    function checkForUpdates() {
+      if (!registration) {
+        log('warn', 'Cannot check updates: no active registration');
+        return Promise.resolve(false);
+      }
+      
+      log('info', 'Manual update check requested');
+      
+      return registration.update()
+        .then(function() {
+          log('info', 'Manual update check completed');
+          return true;
+        })
+        .catch(function(err) {
+          log('warn', 'Manual update check failed', err);
+          return false;
+        });
+    }
+
+    /**
+     * Возвращает текущую версию приложения (для UI).
+     * 
+     * @returns {string}
+     */
+    function getVersion() {
+      return resolveAppVersion();
+    }
+
+    /**
+     * Возвращает текущее состояние флага refreshing.
+     * Полезно для отладки и UI-индикаторов.
+     * 
+     * @returns {boolean}
+     */
+    function isRefreshing() {
+      return refreshing;
+    }
+
+    /**
+     * Возвращает статистику компонента.
+     * 
+     * @returns {{registered: number, updated: number, errors: number}}
+     */
+    function getStats() {
+      return {
+        registered: stats.registered,
+        updated: stats.updated,
+        errors: stats.errors
+      };
+    }
+
+    /**
+     * Сбрасывает статистику.
+     * 
+     * @returns {void}
+     */
+    function resetStats() {
+      stats.registered = 0;
+      stats.updated = 0;
+      stats.errors = 0;
+    }
+
+    /**
+     * Уничтожение модуля.
+     * SW не может быть "отменён" после регистрации, но мы можем очистить статистику.
+     * 
+     * @returns {void}
+     */
+    function destroy() {
+      resetStats();
+      log('info', 'SW module destroyed (registration persists)');
+    }
+
+    return {
+      // Публичный API
+      init: init,
+      checkForUpdates: checkForUpdates,
+      getVersion: getVersion,
+      isRefreshing: isRefreshing,
+      
+      // Статистика
+      getStats: getStats,
+      resetStats: resetStats,
+      
+      // Lifecycle
+      destroy: destroy
+    };
+  }, ['Config', 'Logger', 'Bus']);
   /* <!-- MODULE: SW --> */
 
 })();
