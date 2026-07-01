@@ -11103,7 +11103,7 @@ DI.register('Utils', function() {
    * 
    * Архитектурные принципы:
    * - НЕ знает о поиске, UI, фокусе, стратегии
-   * - Делегирует транспортные операции в NetTransport (для publishNote)
+   * - Делегирует транспортные операции в NetTransport
    * - Сам строит Kind 21001 для ответов (publishAnswer) — это специфичная логика
    * - Динамический импорт nostr-tools (через import())
    * - Получение приватного ключа через AuthService
@@ -11117,6 +11117,7 @@ DI.register('Utils', function() {
    *    - Content: {text, vector, score, z_score}
    *    - Строит событие сам через nostr-tools
    *    - Подписывает через AuthService.getKey()
+   *    - Делегирует в NetTransport.publishRaw() (исправлено v2.0.1)
    * 
    * 2. **publishNote(note, parentId)** — публикация shared-заметки
    *    - Используется EditorComponent после сохранения в БД
@@ -11132,9 +11133,10 @@ DI.register('Utils', function() {
    * - `publish:error` — ошибка публикации
    *   payload: {type: 'answer'|'note', id: string, error: string}
    * 
-   * Используется модулями:
-   * - QueryHandler → publishAnswer для ответов на входящие запросы
-   * - SearchService → publishNote для публикации shared-заметок
+   * ИСПРАВЛЕНИЕ v2.0.1:
+   * - Удалён workaround с фейковым publishNote
+   * - Теперь напрямую использует NetTransport.publishRaw() для ответов
+   * - Исправлено двойное инкрементирование stats.errors
    * 
    * @namespace NotePublisher
    */
@@ -11391,22 +11393,18 @@ DI.register('Utils', function() {
      * 4. Импорт nostr-tools
      * 5. Построение Nostr-события Kind 21001
      * 6. Подпись через nostr.finalizeEvent
-     * 7. Публикация через NetTransport (безопасно с circuit breaker)
+     * 7. Публикация через NetTransport.publishRaw()
      * 8. Эмиссия publish:success или publish:error
+     * 
+     * ИСПРАВЛЕНИЕ v2.0.1:
+     * - Удалён workaround с фейковым publishNote
+     * - Теперь требует NetTransport.publishRaw (добавлен в патче NetTransport)
+     * - Исправлено двойное инкрементирование stats.errors
      * 
      * @param {string} queryId - ID запроса, на который отвечаем.
      * @param {AnswerCandidate} answer - Кандидат на ответ.
      * @param {string} peerPubkey - Публичный ключ пира-запросчика (для логирования).
      * @returns {Promise<boolean>} Promise: true если успешно опубликовано.
-     * 
-     * @example
-     * NotePublisher.publishAnswer(queryId, {
-     *   id: 'note123',
-     *   text: 'Медитация помогает...',
-     *   vector: [...],
-     *   score: 0.87,
-     *   z_score: 1.5
-     * }, 'a3f2c1...');
      */
     function publishAnswer(queryId, answer, peerPubkey) {
       stats.answers++;
@@ -11439,6 +11437,15 @@ DI.register('Utils', function() {
         var err2 = 'private key not available';
         if (Logger) Logger.warn('NotePublisher', 'publishAnswer: ' + err2);
         emit('publish:error', { type: 'answer', id: answer.id, error: err2 });
+        return Promise.resolve(false);
+      }
+
+      // Проверка доступности NetTransport.publishRaw
+      if (!NetTransport || typeof NetTransport.publishRaw !== 'function') {
+        stats.errors++;
+        var err3 = 'NetTransport.publishRaw not available';
+        if (Logger) Logger.error('NotePublisher', 'publishAnswer: ' + err3);
+        emit('publish:error', { type: 'answer', id: answer.id, error: err3 });
         return Promise.resolve(false);
       }
 
@@ -11487,19 +11494,7 @@ DI.register('Utils', function() {
           return false;
         }
 
-        // Делегирование публикации в NetTransport
-        if (!NetTransport || typeof NetTransport.publishRaw !== 'function') {
-          // Fallback: если NetTransport не имеет publishRaw, используем publishNote-подобный путь
-          // Но это не совсем корректно, поэтому лучше добавить publishRaw в NetTransport
-          // Для обратной совместимости — пробуем через существующий API
-          if (Logger) Logger.warn('NotePublisher', 'NetTransport.publishRaw not available, using workaround');
-          
-          // Workaround: вызываем publishNote с фейковым note
-          // Это не идеально, но позволяет работать без модификации NetTransport
-          emit('publish:success', { type: 'answer', id: answer.id, eventId: event.id });
-          return true;
-        }
-
+        // Делегирование публикации в NetTransport.publishRaw
         return NetTransport.publishRaw(event).then(function(success) {
           if (success) {
             if (Logger) {
@@ -11513,7 +11508,7 @@ DI.register('Utils', function() {
             return true;
           } else {
             stats.errors++;
-            emit('publish:error', { type: 'answer', id: answer.id, error: 'publish failed' });
+            emit('publish:error', { type: 'answer', id: answer.id, error: 'publishRaw returned false' });
             return false;
           }
         }).catch(function(err) {
@@ -11549,14 +11544,6 @@ DI.register('Utils', function() {
      * @param {NoteToPublish} note - Заметка для публикации.
      * @param {string} [parentId] - ID родительской заметки (опционально).
      * @returns {Promise<boolean>} Promise: true если успешно опубликовано.
-     * 
-     * @example
-     * NotePublisher.publishNote({
-     *   id: 'note123',
-     *   text: 'Медитация помогает...',
-     *   vector: [...],
-     *   shared: true
-     * }, 'parent456');
      */
     function publishNote(note, parentId) {
       stats.notes++;
