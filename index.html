@@ -17931,13 +17931,762 @@ kbd {
   /* <!-- MODULE: BaseViewComponent --> */
 
   /* <!-- MODULE: HeaderStatusComponent --> */
-  старт
-  энд
+  /**
+   * @typedef {Object} NetStatusPayload
+   * @description Payload события net:status.
+   * @property {'disconnected'|'connecting'|'connected'|'reconnecting'|'failed'} status - Статус сети.
+   */
+
+  /**
+   * @typedef {Object} NetPeersPayload
+   * @description Payload события net:peers.
+   * @property {number} count - Количество активных пиров.
+   */
+
+  /**
+   * @typedef {Object} AIStatusPayload
+   * @description Payload события ai:status.
+   * @property {AIMode} mode - Текущий режим AI ('loading'|'model'|'demo').
+   * @property {number} [percent] - Процент загрузки (только для mode='loading').
+   */
+
+  /**
+   * @module HeaderStatusComponent
+   * @description Компонент индикаторов статуса в хедере приложения.
+   * 
+   * Зона ответственности:
+   * - Отображение двух ключевых индикаторов: сеть и AI
+   * - Индикатор сети: статус подключения и количество активных пиров
+   * - Индикатор AI: статус ML-модели (загрузка / готова / demo-режим)
+   * - Локализованные тексты статусов через I18n
+   * - Динамическое обновление при смене языка
+   * 
+   * Архитектурные принципы:
+   * - НЕ читает DOM при инициализации (DOM может быть пересобран при refreshUI)
+   * - DOM-запросы через getElementById при каждом обновлении
+   * - Это защищает от устаревших ссылок после refreshUI(), который полностью
+   *   пересобирает DOM при смене языка
+   * - Кэш ссылок был бы ошибкой в данном контексте
+   * - AbortSignal для автоматической отписки при destroy
+   * - Whitelist валидация CSS-классов (защита от injection)
+   * - textContent для всех текстовых вставок (XSS-safe)
+   * - Race condition protection: проверка signal.aborted перед DOM-операциями
+   * 
+   * CSS-классы индикаторов:
+   * - `hdr-st-dot ok` — зелёная точка (сеть подключена, AI готов)
+   * - `hdr-st-dot warn` — жёлтая точка (reconnecting, demo mode)
+   * - `hdr-st-dot err` — красная точка (failed)
+   * - `hdr-st-dot load` — синяя точка с pulse-анимацией (загрузка)
+   * 
+   * Слушает события:
+   * - `net:status` — изменение статуса сети (connected, reconnecting, failed)
+   *   payload: {status: NetStatus}
+   * - `net:peers` — изменение количества активных пиров
+   *   payload: {count: number}
+   * - `ai:status` — изменение статуса AI модели
+   *   payload: {mode: AIMode, percent?: number}
+   * - `i18n:change` — смена языка (перерисовка статусов с новыми переводами)
+   * 
+   * Использует сервисы:
+   * - `Net.getStatus()` — для начального состояния сети
+   * - `Net.peerCount()` — для начального количества пиров
+   * - `AI.ready()` — для проверки готовности AI
+   * - `AI.getMode()` — для начального режима AI
+   * - `I18n.t()` — для локализованных текстов
+   * - `Utils.word()` — для склонения "узлов/peers"
+   * 
+   * @namespace HeaderStatusComponent
+   */
+  DI.register('HeaderStatusComponent', function(
+    Config, Logger, Bus, I18n, Net, AI, Utils
+  ) {
+    
+    /**
+     * Контроллер для автоматической отписки всех listeners при destroy().
+     * @type {AbortController | null}
+     */
+    var abortController = null;
+
+    /**
+     * Whitelist валидных CSS-классов для индикаторов.
+     * Используется для защиты от injection через внешние данные.
+     * Только эти классы могут быть применены к точкам индикаторов.
+     * @type {Set<string>}
+     */
+    var VALID_STATUS_CLASSES = new Set(['ok', 'warn', 'err', 'load']);
+
+    /**
+     * Счётчик обновлений (для статистики).
+     * @type {{net: number, ai: number, i18n: number}}
+     */
+    var stats = {
+      net: 0,
+      ai: 0,
+      i18n: 0
+    };
+
+    /**
+     * Валидирует CSS-класс через whitelist.
+     * Возвращает класс только если он в списке разрешённых.
+     * 
+     * @param {string} cls - CSS-класс для проверки.
+     * @returns {string} Валидный класс или пустая строка.
+     */
+    function validateClass(cls) {
+      return VALID_STATUS_CLASSES.has(cls) ? cls : '';
+    }
+
+    /**
+     * Обновляет индикатор сети в хедере.
+     * 
+     * DOM-элементы берутся каждый раз заново для корректной работы после refreshUI().
+     * Кэш ссылок привёл бы к утечкам и некорректной работе после смены языка.
+     * 
+     * @param {string} cls - CSS-класс для точки (валидируется через whitelist).
+     * @param {string} text - Текст статуса (вставляется через textContent).
+     * @returns {void}
+     */
+    function updateNet(cls, text) {
+      if (typeof document === 'undefined') return;
+      
+      var dot = document.getElementById('st-net-dot');
+      var txt = document.getElementById('st-net-txt');
+      
+      if (dot) {
+        var safeClass = validateClass(cls);
+        dot.className = 'hdr-st-dot ' + safeClass;
+      }
+      
+      if (txt) {
+        txt.textContent = text || '';
+      }
+    }
+
+    /**
+     * Обновляет индикатор AI в хедере.
+     * 
+     * DOM-элементы берутся каждый раз заново для защиты от устаревших ссылок.
+     * 
+     * @param {string} cls - CSS-класс для точки (валидируется через whitelist).
+     * @param {string} text - Текст статуса (вставляется через textContent).
+     * @returns {void}
+     */
+    function updateAi(cls, text) {
+      if (typeof document === 'undefined') return;
+      
+      var dot = document.getElementById('st-ai-dot');
+      var txt = document.getElementById('st-ai-txt');
+      
+      if (dot) {
+        var safeClass = validateClass(cls);
+        dot.className = 'hdr-st-dot ' + safeClass;
+      }
+      
+      if (txt) {
+        txt.textContent = text || '';
+      }
+    }
+
+    /**
+     * Формирует локализованный текст статуса сети.
+     * 
+     * @param {string} status - Статус сети ('connected', 'connecting', 'reconnecting', 'failed', 'disconnected').
+     * @param {number} peerCount - Количество активных пиров.
+     * @returns {{cls: string, text: string}} CSS-класс и текст.
+     */
+    function formatNetStatus(status, peerCount) {
+      var cls = 'load';
+      var text = '';
+      var lang = I18n ? I18n.getLang() : 'ru';
+
+      if (status === 'connected') {
+        if (peerCount > 0) {
+          text = (I18n ? I18n.t('st.net.online') : 'онлайн') + ' · ' +
+                 Utils.word('peers', peerCount, lang);
+        } else {
+          text = I18n ? I18n.t('st.net.listen') : 'слушаю';
+        }
+        cls = peerCount > 0 ? 'ok' : 'load';
+      } else if (status === 'connecting') {
+        text = I18n ? I18n.t('st.net.connecting') : 'соединение';
+        cls = 'load';
+      } else if (status === 'reconnecting') {
+        text = I18n ? I18n.t('st.net.reconnecting') : 'пересоединение';
+        cls = 'warn';
+      } else if (status === 'failed') {
+        text = I18n ? I18n.t('st.net.failed') : 'нет сети';
+        cls = 'err';
+      } else {
+        text = I18n ? I18n.t('st.net') : 'сеть';
+        cls = 'load';
+      }
+
+      return { cls: cls, text: text };
+    }
+
+    /**
+     * Формирует локализованный текст статуса AI.
+     * 
+     * @param {AIMode} mode - Режим AI ('loading', 'model', 'demo').
+     * @param {number} [percent] - Процент загрузки.
+     * @returns {{cls: string, text: string}} CSS-класс и текст.
+     */
+    function formatAiStatus(mode, percent) {
+      var cls = 'load';
+      var text = '';
+
+      if (mode === 'loading') {
+        var pct = typeof percent === 'number' ? Math.round(percent) : 0;
+        text = (I18n ? I18n.t('st.ai.loading') : 'модель') + ' ' + pct + '%';
+        cls = 'load';
+      } else if (mode === 'model') {
+        text = I18n ? I18n.t('st.ai.ready') : 'ии';
+        cls = 'ok';
+      } else if (mode === 'demo') {
+        text = I18n ? I18n.t('st.ai.demo') : 'ии/хеш';
+        cls = 'warn';
+      } else {
+        text = I18n ? I18n.t('st.ai.loading') : 'модель';
+        cls = 'load';
+      }
+
+      return { cls: cls, text: text };
+    }
+
+    /**
+     * Обработчик изменения статуса сети (connected, reconnecting, failed и т.д.).
+     * 
+     * @param {NetStatusPayload} payload - Данные события.
+     * @returns {void}
+     */
+    function handleNetStatus(payload) {
+      stats.net++;
+      
+      // Защита от race condition: если компонент уже уничтожен, не трогаем DOM
+      if (abortController && abortController.signal.aborted) return;
+      
+      var status = payload && payload.status ? payload.status : 'disconnected';
+      var peerCount = Net && Net.peerCount ? Net.peerCount() : 0;
+      
+      var formatted = formatNetStatus(status, peerCount);
+      updateNet(formatted.cls, formatted.text);
+      
+      if (Logger) {
+        Logger.debug('HeaderStatusComponent', 'Net status updated', {
+          status: status,
+          peers: peerCount,
+          cls: formatted.cls
+        });
+      }
+    }
+
+    /**
+     * Обработчик изменения количества активных пиров.
+     * Обновляет текст индикатора сети с новым количеством пиров.
+     * 
+     * @param {NetPeersPayload} payload - Данные события.
+     * @returns {void}
+     */
+    function handleNetPeers(payload) {
+      stats.net++;
+      
+      if (abortController && abortController.signal.aborted) return;
+      
+      var count = payload && typeof payload.count === 'number' ? payload.count : 0;
+      var netStatus = Net && Net.getStatus ? Net.getStatus() : 'disconnected';
+      
+      var formatted = formatNetStatus(netStatus, count);
+      updateNet(formatted.cls, formatted.text);
+    }
+
+    /**
+     * Обработчик изменения статуса AI модели (loading, model, demo).
+     * Отображает процент загрузки в режиме loading.
+     * 
+     * @param {AIStatusPayload} payload - Данные события.
+     * @returns {void}
+     */
+    function handleAiStatus(payload) {
+      stats.ai++;
+      
+      if (abortController && abortController.signal.aborted) return;
+      if (!payload) return;
+      
+      var mode = payload.mode || 'loading';
+      var percent = payload.percent || 0;
+      
+      var formatted = formatAiStatus(mode, percent);
+      updateAi(formatted.cls, formatted.text);
+      
+      if (Logger) {
+        Logger.debug('HeaderStatusComponent', 'AI status updated', {
+          mode: mode,
+          percent: percent,
+          cls: formatted.cls
+        });
+      }
+    }
+
+    /**
+     * Обработчик смены языка.
+     * Перерисовывает текущие статусы с новыми переводами.
+     * Делегирует работу существующим handlers, сохраняя единую логику форматирования.
+     * 
+     * @returns {void}
+     */
+    function handleI18nChange() {
+      stats.i18n++;
+      
+      if (abortController && abortController.signal.aborted) return;
+      
+      // Обновляем сеть с текущим статусом
+      if (Net) {
+        var currentNetStatus = Net.getStatus ? Net.getStatus() : 'disconnected';
+        var currentPeerCount = Net.peerCount ? Net.peerCount() : 0;
+        handleNetStatus({ status: currentNetStatus });
+      } else {
+        updateNet('load', I18n ? I18n.t('st.net.connecting') : 'соединение');
+      }
+      
+      // Обновляем AI с текущим статусом
+      if (AI) {
+        var ready = AI.ready ? AI.ready() : false;
+        var mode = AI.getMode ? AI.getMode() : 'loading';
+        handleAiStatus({ mode: ready ? mode : 'loading' });
+      } else {
+        updateAi('load', I18n ? I18n.t('st.ai.loading') : 'модель');
+      }
+      
+      if (Logger) {
+        Logger.debug('HeaderStatusComponent', 'I18n change processed', {
+          lang: I18n ? I18n.getLang() : 'unknown'
+        });
+      }
+    }
+
+    /**
+     * Первичная отрисовка текущего состояния при инициализации.
+     * 
+     * @returns {void}
+     */
+    function renderInitialState() {
+      // Сеть
+      if (Net) {
+        var netStatus = Net.getStatus ? Net.getStatus() : 'disconnected';
+        var peerCount = Net.peerCount ? Net.peerCount() : 0;
+        var netFormatted = formatNetStatus(netStatus, peerCount);
+        updateNet(netFormatted.cls, netFormatted.text);
+      } else {
+        updateNet('load', I18n ? I18n.t('st.net.connecting') : 'соединение');
+      }
+
+      // AI
+      if (AI) {
+        var aiReady = AI.ready ? AI.ready() : false;
+        var aiMode = AI.getMode ? AI.getMode() : 'loading';
+        var aiFormatted = formatAiStatus(aiReady ? aiMode : 'loading');
+        updateAi(aiFormatted.cls, aiFormatted.text);
+      } else {
+        updateAi('load', I18n ? I18n.t('st.ai.loading') : 'модель');
+      }
+    }
+
+    /**
+     * Возвращает статистику компонента.
+     * 
+     * @returns {{net: number, ai: number, i18n: number}}
+     */
+    function getStats() {
+      return {
+        net: stats.net,
+        ai: stats.ai,
+        i18n: stats.i18n
+      };
+    }
+
+    /**
+     * Сбрасывает статистику.
+     * 
+     * @returns {void}
+     */
+    function resetStats() {
+      stats.net = 0;
+      stats.ai = 0;
+      stats.i18n = 0;
+    }
+
+    /**
+     * Инициализация модуля.
+     * Подписывается на события сети, AI и смены языка.
+     * Отображает текущее состояние сервисов при старте.
+     * 
+     * Все подписки регистрируются через Bus.subscribe с привязкой к AbortSignal.
+     * Это гарантирует автоматическую очистку при вызове destroy().
+     * 
+     * @param {AbortSignal} [signal] - Сигнал для автоочистки.
+     * @returns {void}
+     */
+    function init(signal) {
+      if (abortController) {
+        abortController.abort();
+      }
+
+      abortController = new AbortController();
+      var internalSignal = abortController.signal;
+
+      // Регистрация подписок с привязкой к AbortSignal
+      // При вызове abortController.abort() все они автоматически удалятся
+      if (Bus && typeof Bus.subscribe === 'function') {
+        Bus.subscribe('net:status', handleNetStatus, internalSignal);
+        Bus.subscribe('net:peers', handleNetPeers, internalSignal);
+        Bus.subscribe('ai:status', handleAiStatus, internalSignal);
+        Bus.subscribe('i18n:change', handleI18nChange, internalSignal);
+      }
+
+      // Первичная отрисовка текущего состояния
+      renderInitialState();
+
+      if (Logger) {
+        Logger.info('HeaderStatusComponent', 'Initialized');
+      }
+    }
+
+    /**
+     * Уничтожение модуля.
+     * Отписывается от всех событий через AbortController.
+     * 
+     * Один вызов abort() автоматически:
+     * - Удаляет все Bus-подписки (через механизм abortHandler в Bus)
+     * - Снимает все DOM-listeners (если бы они были привязаны к signal)
+     * - Защищает handlers от выполнения через проверку signal.aborted
+     * 
+     * После abort обнуляем ссылку на контроллер для освобождения памяти.
+     * 
+     * @returns {void}
+     */
+    function destroy() {
+      if (abortController) {
+        abortController.abort();
+        abortController = null;
+      }
+      
+      resetStats();
+    }
+
+    return {
+      // Lifecycle
+      init: init,
+      destroy: destroy,
+
+      // Статистика
+      getStats: getStats,
+      resetStats: resetStats
+    };
+  }, ['Config', 'Logger', 'Bus', 'I18n', 'Net', 'AI', 'Utils']);
   /* <!-- MODULE: HeaderStatusComponent --> */
 
   /* <!-- MODULE: OfflineBarComponent --> */
-  старт
-  энд
+  /**
+   * @typedef {Object} NetStatusPayload
+   * @description Payload события net:status.
+   * @property {'disconnected'|'connecting'|'connected'|'reconnecting'|'failed'} status - Статус сети.
+   */
+
+  /**
+   * @typedef {Object} NetOutboxPayload
+   * @description Payload события net:outbox.
+   * @property {number} count - Количество событий в очереди.
+   */
+
+  /**
+   * @module OfflineBarComponent
+   * @description Компонент офлайн-бара — индикатор очереди отправки Nostr-событий.
+   * 
+   * Зона ответственности:
+   * - Отображение информации о состоянии офлайн-очереди
+   * - Показ "Офлайн-очередь (N)" при наличии pending-событий в connected состоянии
+   * - Показ "Нет сети" при статусе reconnecting/failed
+   * - Скрытие бара при отсутствии pending-событий в connected состоянии
+   * - Локализованные тексты через I18n с параметрами
+   * 
+   * Архитектурные принципы:
+   * - НЕ читает DOM при инициализации (DOM может быть пересобран при refreshUI)
+   * - DOM-запросы через getElementById при каждом обновлении
+   * - Это защищает от устаревших ссылок после refreshUI(), который полностью
+   *   пересобирает DOM при смене языка
+   * - Whitelist валидация CSS display значений (защита от injection)
+   * - textContent для всех текстовых вставок (XSS-safe)
+   * - Race condition protection: проверка signal.aborted перед DOM-операциями
+   * - AbortSignal для автоматической отписки при destroy
+   * 
+   * Матрица отображения:
+   * ┌─────────────────────┬─────────────┬──────────────────────────────────┐
+   * │ Статус сети         │ Outbox      │ Поведение                        │
+   * ├─────────────────────┼─────────────┼──────────────────────────────────┤
+   * │ disconnected        │ любой       │ Скрыт (нет смысла показывать)    │
+   * │ connected           │ count > 0   │ "Офлайн-очередь (N)"             │
+   * │ connected           │ count = 0   │ Скрыт                            │
+   * │ connecting          │ count > 0   │ "Нет сети" + "(N)"               │
+   * │ connecting          │ count = 0   │ "Нет сети"                       │
+   * │ reconnecting        │ count > 0   │ "Нет сети" + "(N)"               │
+   * │ reconnecting        │ count = 0   │ "Нет сети"                       │
+   * │ failed              │ count > 0   │ "Нет сети" + "(N)"               │
+   * │ failed              │ count = 0   │ "Нет сети"                       │
+   * └─────────────────────┴─────────────┴──────────────────────────────────┘
+   * 
+   * Слушает события:
+   * - `net:status` — изменение статуса сети
+   *   payload: {status: NetStatus}
+   * - `net:outbox` — изменение размера очереди отправки
+   *   payload: {count: number}
+   * - `i18n:change` — смена языка (перерисовка с новыми переводами)
+   * 
+   * Использует сервисы:
+   * - `Net.getStatus()` — для начального состояния
+   * - `Net.getOutboxLength()` — для начального размера очереди
+   * - `I18n.t()` — для локализованных текстов
+   * 
+   * Элементы DOM:
+   * - `#offline-bar` — корневой контейнер бара
+   * - `#offline-text` — основной текст ("Офлайн-очередь" или "Нет сети")
+   * - `#offline-queue` — счётчик pending-событий "(N)"
+   * 
+   * @namespace OfflineBarComponent
+   */
+  DI.register('OfflineBarComponent', function(
+    Config, Logger, Bus, I18n, Net
+  ) {
+    
+    /**
+     * Контроллер для автоматической отписки всех listeners при destroy().
+     * @type {AbortController | null}
+     */
+    var abortController = null;
+
+    /**
+     * Whitelist валидных значений CSS-свойства display.
+     * Используется для защиты от injection через внешние данные.
+     * @type {Set<string>}
+     */
+    var VALID_DISPLAY_VALUES = new Set(['none', 'block', 'inline', 'flex', '']);
+
+    /**
+     * Счётчик обновлений (для статистики).
+     * @type {{status: number, outbox: number, i18n: number}}
+     */
+    var stats = {
+      status: 0,
+      outbox: 0,
+      i18n: 0
+    };
+
+    /**
+     * Безопасно устанавливает CSS-свойство display с валидацией через whitelist.
+     * 
+     * @param {HTMLElement} element - Целевой DOM-элемент.
+     * @param {string} value - Значение display (валидируется).
+     * @returns {void}
+     */
+    function setDisplay(element, value) {
+      if (!element) return;
+      var safeValue = VALID_DISPLAY_VALUES.has(value) ? value : '';
+      element.style.display = safeValue;
+    }
+
+    /**
+     * Обновляет видимость и текст офлайн-бара с учётом состояния сети и outbox.
+     * 
+     * Алгоритм:
+     * 1. Получение текущего статуса сети через Net.getStatus()
+     * 2. Получение размера очереди через Net.getOutboxLength()
+     * 3. Применение матрицы отображения
+     * 4. Установка display и textContent для элементов
+     * 
+     * DOM-элементы берутся при каждом вызове для корректной работы после refreshUI.
+     * 
+     * @returns {void}
+     */
+    function update() {
+      // Защита от race condition: если компонент уже уничтожен, не трогаем DOM
+      if (abortController && abortController.signal.aborted) return;
+      
+      if (typeof document === 'undefined') return;
+      
+      var bar = document.getElementById('offline-bar');
+      var textEl = document.getElementById('offline-text');
+      var queueEl = document.getElementById('offline-queue');
+
+      if (!bar || !textEl || !queueEl) return;
+
+      var status = Net && Net.getStatus ? Net.getStatus() : 'disconnected';
+      var outboxLength = Net && Net.getOutboxLength ? Net.getOutboxLength() : 0;
+
+      if (Logger) {
+        Logger.debug('OfflineBarComponent', 'Updating', {
+          status: status,
+          outboxLength: outboxLength
+        });
+      }
+
+      // disconnected — полностью скрываем плашку
+      if (status === 'disconnected') {
+        setDisplay(bar, 'none');
+        return;
+      }
+
+      // connected — показываем только при наличии очереди
+      if (status === 'connected') {
+        if (outboxLength > 0) {
+          setDisplay(bar, 'block');
+          textEl.textContent = I18n ? I18n.t('offline.bar') : 'Офлайн-очередь';
+          setDisplay(queueEl, 'inline');
+          queueEl.textContent = '(' + (I18n
+            ? I18n.t('offline.queue', { count: outboxLength })
+            : 'Ожидают: ' + outboxLength) + ')';
+        } else {
+          setDisplay(bar, 'none');
+        }
+        return;
+      }
+
+      // Остальные статусы (connecting, reconnecting, failed) — нет сети
+      setDisplay(bar, 'block');
+      textEl.textContent = I18n ? I18n.t('offline.disconnected') : 'Нет сети';
+      
+      if (outboxLength > 0) {
+        setDisplay(queueEl, 'inline');
+        queueEl.textContent = '(' + (I18n
+          ? I18n.t('offline.queue', { count: outboxLength })
+          : 'Ожидают: ' + outboxLength) + ')';
+      } else {
+        setDisplay(queueEl, 'none');
+      }
+    }
+
+    /**
+     * Обработчик изменения статуса сети.
+     * Делегирует работу в update(), сохраняя единую логику отображения.
+     * 
+     * @param {NetStatusPayload} payload - Данные события.
+     * @returns {void}
+     */
+    function handleNetStatus(payload) {
+      stats.status++;
+      update();
+    }
+
+    /**
+     * Обработчик изменения размера очереди outbox.
+     * Делегирует работу в update(), сохраняя единую логику отображения.
+     * 
+     * @param {NetOutboxPayload} payload - Данные события.
+     * @returns {void}
+     */
+    function handleNetOutbox(payload) {
+      stats.outbox++;
+      update();
+    }
+
+    /**
+     * Обработчик смены языка.
+     * Перерисовывает бар с новыми переводами.
+     * Делегирует работу в update(), сохраняя единую логику отображения.
+     * 
+     * @returns {void}
+     */
+    function handleI18nChange() {
+      stats.i18n++;
+      update();
+    }
+
+    /**
+     * Возвращает статистику компонента.
+     * 
+     * @returns {{status: number, outbox: number, i18n: number}}
+     */
+    function getStats() {
+      return {
+        status: stats.status,
+        outbox: stats.outbox,
+        i18n: stats.i18n
+      };
+    }
+
+    /**
+     * Сбрасывает статистику.
+     * 
+     * @returns {void}
+     */
+    function resetStats() {
+      stats.status = 0;
+      stats.outbox = 0;
+      stats.i18n = 0;
+    }
+
+    /**
+     * Инициализация модуля.
+     * Подписывается на события сети и смены языка.
+     * Отображает начальное состояние.
+     * 
+     * Все подписки регистрируются через Bus.subscribe с привязкой к AbortSignal.
+     * Это гарантирует автоматическую очистку при вызове destroy().
+     * 
+     * @param {AbortSignal} [signal] - Сигнал для автоочистки.
+     * @returns {void}
+     */
+    function init(signal) {
+      if (abortController) {
+        abortController.abort();
+      }
+
+      abortController = new AbortController();
+      var internalSignal = abortController.signal;
+
+      // Регистрация подписок с привязкой к AbortSignal
+      // При вызове abortController.abort() все они автоматически удалятся
+      if (Bus && typeof Bus.subscribe === 'function') {
+        Bus.subscribe('net:status', handleNetStatus, internalSignal);
+        Bus.subscribe('net:outbox', handleNetOutbox, internalSignal);
+        Bus.subscribe('i18n:change', handleI18nChange, internalSignal);
+      }
+
+      // Первичная отрисовка текущего состояния
+      update();
+
+      if (Logger) {
+        Logger.info('OfflineBarComponent', 'Initialized');
+      }
+    }
+
+    /**
+     * Уничтожение модуля.
+     * Отписывается от всех событий через AbortController.
+     * 
+     * Один вызов abort() автоматически удаляет все Bus-подписки через механизм
+     * abortHandler в Bus. После abort обнуляем ссылку на контроллер для
+     * освобождения памяти.
+     * 
+     * @returns {void}
+     */
+    function destroy() {
+      if (abortController) {
+        abortController.abort();
+        abortController = null;
+      }
+      
+      resetStats();
+    }
+
+    return {
+      // Lifecycle
+      init: init,
+      destroy: destroy,
+
+      // Статистика
+      getStats: getStats,
+      resetStats: resetStats
+    };
+  }, ['Config', 'Logger', 'Bus', 'I18n', 'Net']);
   /* <!-- MODULE: OfflineBarComponent --> */
 
   /* <!-- MODULE: Modal --> */
