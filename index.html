@@ -7338,8 +7338,502 @@ kbd {
   /* <!-- MODULE: EventRouter --> */
 
   /* <!-- MODULE: AuthService --> */
-  старт
-  энд
+  /**
+   * @module AuthService
+   * @description Управление приватным ключом Nostr и паролем пользователя.
+   * 
+   * Зона ответственности:
+   * - Создание нового приватного ключа при первом запуске
+   * - Шифрование/расшифровка ключа через Crypto (AES-GCM + PBKDF2)
+   * - Управление счётчиком неудачных попыток ввода пароля
+   * - Полный сброс хранилища при превышении лимита или ручном reset
+   * - Миграция ключа из сырого hex-формата в зашифрованный (legacy поддержка)
+   * 
+   * Архитектурные принципы:
+   * - Делегирует криптографию в модуль Crypto (не дублирует PBKDF2/AES-GCM)
+   * - Делегирует персистентность в Store (не прямой localStorage)
+   * - Эмитит события Bus для координации с другими модулями
+   * - Не генерирует ключ сам — ждёт NetTransport (nostr-tools)
+   * 
+   * Формат хранения ключа в Store:
+   * - Первый запуск: отсутствует
+   * - Legacy (v1): hex-строка 64 символа (без шифрования)
+   * - Актуально: Base64(salt[16] + iv[12] + ciphertext[N])
+   * 
+   * События Bus:
+   * - `auth:unlocked` — успешная разблокировка ключа
+   *   payload: {pubkey: string}
+   * - `auth:created` — создан новый ключ
+   *   payload: {pubkey: string}
+   * - `auth:locked` — превышен лимит попыток ввода пароля
+   *   payload: {attempts: number, maxAttempts: number}
+   * - `auth:wrong-password` — неверный пароль
+   *   payload: {attempts: number, maxAttempts: number}
+   * - `auth:reset` — выполнен полный сброс хранилища
+   *   payload: {}
+   * 
+   * @namespace AuthService
+   */
+  DI.register('AuthService', function(Config, Logger, Bus, DB, Crypto, Store) {
+    
+    /**
+     * Ключ для хранения приватного ключа в Store.
+     * Store автоматически добавит префикс 'noomium:'.
+     * @type {string}
+     */
+    var SK_KEY = 'sk';
+
+    /**
+     * Ключ для хранения версии приложения в Store.
+     * Используется для миграций между версиями.
+     * @type {string}
+     */
+    var VER_KEY = 'appVersion';
+
+    /**
+     * Ключ для хранения выбранного языка в Store.
+     * Очищается при reset.
+     * @type {string}
+     */
+    var LANG_KEY = 'lang';
+
+    /**
+     * Ключ для хранения конфигурации в Store.
+     * Очищается при reset.
+     * @type {string}
+     */
+    var CFG_KEY = 'cfg';
+
+    /**
+     * Текущий счётчик неудачных попыток ввода пароля.
+     * Сбрасывается при успешной разблокировке или reset.
+     * @type {number}
+     */
+    var currentAttempts = 0;
+
+    /**
+     * Кэш расшифрованного приватного ключа в памяти.
+     * Хранится как hex-строка (64 символа).
+     * null — если ключ не разблокирован.
+     * @type {string | null}
+     */
+    var cachedKey = null;
+
+    /**
+     * Кэш публичного ключа в памяти.
+     * null — если ключ не разблокирован.
+     * @type {string | null}
+     */
+    var cachedPubkey = null;
+
+    /**
+     * Regex для валидации hex-формата приватного ключа.
+     * 64 hex-символа (256 бит).
+     * @type {RegExp}
+     */
+    var HEX_REGEX = /^[0-9a-f]{64}$/i;
+
+    /**
+     * Проверяет, является ли значение в Store сырым hex-ключом (legacy формат).
+     * 
+     * @param {string} stored - Значение из Store.
+     * @returns {boolean} true если это hex-ключ (не зашифрован).
+     */
+    function isRawHex(stored) {
+      return typeof stored === 'string' && HEX_REGEX.test(stored);
+    }
+
+    /**
+     * Читает сырое значение приватного ключа из Store.
+     * Может быть:
+     * - null (первый запуск)
+     * - hex-строка 64 символа (legacy, не зашифрован)
+     * - Base64-строка (зашифрован через AES-GCM)
+     * 
+     * @returns {string | null}
+     */
+    function getStoredKey() {
+      if (!Store) return null;
+      try {
+        return Store.get(SK_KEY, null);
+      } catch (e) {
+        if (Logger) Logger.warn('AuthService', 'getStoredKey failed', e);
+        return null;
+      }
+    }
+
+    /**
+     * Проверяет, существует ли ключ и зашифрован ли он.
+     * 
+     * @returns {boolean} true если ключ существует и зашифрован (не hex).
+     */
+    function hasEncryptedKey() {
+      var stored = getStoredKey();
+      return !!(stored && !isRawHex(stored));
+    }
+
+    /**
+     * Проверяет, отсутствует ли ключ вообще (первый запуск приложения).
+     * 
+     * @returns {boolean} true если ключа нет в Store.
+     */
+    function needsNewKey() {
+      return !getStoredKey();
+    }
+
+    /**
+     * Сбрасывает счётчик неудачных попыток ввода пароля.
+     * Вызывается после успешной разблокировки или reset.
+     * 
+     * @returns {void}
+     */
+    function resetAttempts() {
+      currentAttempts = 0;
+    }
+
+    /**
+     * Возвращает текущее количество неудачных попыток ввода пароля.
+     * 
+     * @returns {number}
+     */
+    function getAttempts() {
+      return currentAttempts;
+    }
+
+    /**
+     * Возвращает максимальное допустимое количество попыток.
+     * 
+     * @returns {number}
+     */
+    function getMaxAttempts() {
+      return Config ? Config.get('maxPasswordAttempts', 3) : 3;
+    }
+
+    /**
+     * Получает публичный ключ из приватного через nostr-tools.
+     * 
+     * @param {string} hexKey - Приватный ключ в hex-формате.
+     * @returns {string | null} Публичный ключ или null при ошибке.
+     */
+    function getPubkeyFromHex(hexKey) {
+      try {
+        var NetTransport = DI.resolve('NetTransport');
+        if (!NetTransport) return null;
+        
+        var nostr = null;
+        try {
+          var mod = NetTransport;
+          if (mod && mod._nostr) nostr = mod._nostr;
+        } catch (e) { /* ignore */ }
+        
+        if (!nostr || typeof nostr.getPublicKey !== 'function') {
+          return null;
+        }
+        
+        var skBytes = new Uint8Array(hexKey.match(/.{1,2}/g).map(function(b) {
+          return parseInt(b, 16);
+        }));
+        
+        return nostr.getPublicKey(skBytes);
+      } catch (e) {
+        if (Logger) Logger.warn('AuthService', 'getPubkeyFromHex failed', e);
+        return null;
+      }
+    }
+
+    /**
+     * Эмитит событие Bus с защитой от ошибок.
+     * 
+     * @param {string} event - Имя события.
+     * @param {*} payload - Данные события.
+     * @returns {void}
+     */
+    function emit(event, payload) {
+      if (Bus && Bus.emit) {
+        try {
+          Bus.emit(event, payload);
+        } catch (e) {
+          if (Logger) Logger.error('AuthService', 'Bus.emit failed for ' + event, e);
+        }
+      }
+    }
+
+    /**
+     * Пытается расшифровать существующий ключ с помощью введённого пароля.
+     * 
+     * Алгоритм:
+     * 1. Проверка наличия ключа в Store
+     * 2. Если ключ в hex-формате (legacy):
+     *    - Шифрует его паролем (миграция)
+     *    - Успех: сбрасывает attempts, вызывает onSuccess
+     * 3. Если ключ зашифрован:
+     *    - Пытается расшифровать через Crypto.decryptKey
+     *    - Успех: кэширует ключ, сбрасывает attempts, вызывает onSuccess
+     *    - Неудача: инкрементирует attempts
+     *      - Если attempts >= max: вызывает onMaxAttempts + эмитит auth:locked
+     *      - Иначе: вызывает onWrongPassword + эмитит auth:wrong-password
+     * 
+     * @param {string} password - Введённый пароль.
+     * @param {function(string): void} onSuccess - Вызывается с hex-ключом при успехе.
+     * @param {function(Error): void} [onWrongPassword] - При неверном пароле (пока есть попытки).
+     * @param {function(): void} [onMaxAttempts] - При превышении лимита попыток.
+     * @returns {void}
+     */
+    function unlock(password, onSuccess, onWrongPassword, onMaxAttempts) {
+      if (typeof password !== 'string' || !password) {
+        if (typeof onWrongPassword === 'function') {
+          onWrongPassword(new Error('Password required'));
+        }
+        return;
+      }
+
+      var stored = getStoredKey();
+      if (!stored) {
+        if (typeof onWrongPassword === 'function') {
+          onWrongPassword(new Error('NO_KEY'));
+        }
+        return;
+      }
+
+      if (!Crypto || !Crypto.decryptKey || !Crypto.encryptKey) {
+        if (Logger) Logger.error('AuthService', 'Crypto module not available');
+        if (typeof onWrongPassword === 'function') {
+          onWrongPassword(new Error('Crypto unavailable'));
+        }
+        return;
+      }
+
+      // Legacy миграция: ключ в сыром hex-формате
+      if (isRawHex(stored)) {
+        resetAttempts();
+        cachedKey = stored;
+        cachedPubkey = getPubkeyFromHex(stored);
+        
+        Crypto.encryptKey(stored, password).then(function(encrypted) {
+          if (Store) Store.set(SK_KEY, encrypted);
+          if (Logger) Logger.info('AuthService', 'Migrated raw hex key to encrypted');
+        }).catch(function(err) {
+          if (Logger) Logger.warn('AuthService', 'Migration failed', err);
+        });
+        
+        emit('auth:unlocked', { pubkey: cachedPubkey });
+        if (typeof onSuccess === 'function') onSuccess(stored);
+        return;
+      }
+
+      // Расшифровка зашифрованного ключа
+      Crypto.decryptKey(stored, password).then(function(hexKey) {
+        if (!isRawHex(hexKey)) {
+          throw new Error('Decrypted key is not valid hex');
+        }
+        
+        resetAttempts();
+        cachedKey = hexKey;
+        cachedPubkey = getPubkeyFromHex(hexKey);
+        
+        emit('auth:unlocked', { pubkey: cachedPubkey });
+        if (typeof onSuccess === 'function') onSuccess(hexKey);
+      }).catch(function(err) {
+        currentAttempts++;
+        var maxAttempts = getMaxAttempts();
+        
+        if (Logger) {
+          Logger.warn('AuthService', 'Wrong password attempt ' + currentAttempts + '/' + maxAttempts);
+        }
+        
+        if (currentAttempts >= maxAttempts) {
+          emit('auth:locked', {
+            attempts: currentAttempts,
+            maxAttempts: maxAttempts
+          });
+          if (typeof onMaxAttempts === 'function') onMaxAttempts();
+        } else {
+          emit('auth:wrong-password', {
+            attempts: currentAttempts,
+            maxAttempts: maxAttempts
+          });
+          if (typeof onWrongPassword === 'function') onWrongPassword(err);
+        }
+      });
+    }
+
+    /**
+     * Генерирует новый приватный ключ и сохраняет его в зашифрованном виде.
+     * 
+     * Для генерации использует crypto.getRandomValues (32 байта = 256 бит).
+     * Шифрует через Crypto.encryptKey и сохраняет в Store.
+     * 
+     * @param {string} password - Пароль для шифрования.
+     * @param {function(string): void} [onSuccess] - Вызывается с hex-ключом после сохранения.
+     * @returns {void}
+     */
+    function createNew(password, onSuccess) {
+      if (typeof password !== 'string' || !password) {
+        if (Logger) Logger.error('AuthService', 'createNew: password required');
+        return;
+      }
+
+      if (!Crypto || !Crypto.encryptKey) {
+        if (Logger) Logger.error('AuthService', 'Crypto module not available');
+        return;
+      }
+
+      var raw;
+      try {
+        if (typeof crypto === 'undefined' || !crypto.getRandomValues) {
+          throw new Error('crypto.getRandomValues not available');
+        }
+        raw = crypto.getRandomValues(new Uint8Array(32));
+      } catch (e) {
+        if (Logger) Logger.error('AuthService', 'Failed to generate random bytes', e);
+        return;
+      }
+
+      var keyHex = Array.from(raw).map(function(b) {
+        return b.toString(16).padStart(2, '0');
+      }).join('');
+
+      Crypto.encryptKey(keyHex, password).then(function(encrypted) {
+        if (Store) {
+          Store.set(SK_KEY, encrypted);
+        }
+        
+        resetAttempts();
+        cachedKey = keyHex;
+        cachedPubkey = getPubkeyFromHex(keyHex);
+        
+        emit('auth:created', { pubkey: cachedPubkey });
+        if (Logger) Logger.info('AuthService', 'New key created and encrypted');
+        
+        if (typeof onSuccess === 'function') onSuccess(keyHex);
+      }).catch(function(err) {
+        if (Logger) Logger.error('AuthService', 'createNew failed', err);
+      });
+    }
+
+    /**
+     * Возвращает расшифрованный приватный ключ из кэша.
+     * null — если ключ не разблокирован.
+     * 
+     * @returns {string | null} Hex-строка ключа или null.
+     */
+    function getKey() {
+      return cachedKey;
+    }
+
+    /**
+     * Возвращает публичный ключ из кэша.
+     * null — если ключ не разблокирован.
+     * 
+     * @returns {string | null} Hex-строка pubkey или null.
+     */
+    function getPubkey() {
+      return cachedPubkey;
+    }
+
+    /**
+     * Проверяет, разблокирован ли ключ.
+     * 
+     * @returns {boolean} true если ключ доступен в памяти.
+     */
+    function isUnlocked() {
+      return cachedKey !== null;
+    }
+
+    /**
+     * Полностью сбрасывает хранилище пользователя.
+     * 
+     * Удаляет из Store:
+     * - Приватный ключ (sk)
+     * - Конфигурацию (cfg)
+     * - Версию приложения (appVersion)
+     * - Выбранный язык (lang)
+     * 
+     * Очищает IndexedDB через DB.reset().
+     * Сбрасывает счётчик попыток и кэш ключей.
+     * Эмитит событие auth:reset.
+     * 
+     * @returns {Promise<void>} Promise, разрешающийся после полного сброса.
+     */
+    function resetStorage() {
+      if (Logger) Logger.info('AuthService', 'Resetting storage');
+      
+      if (Store) {
+        try { Store.remove(SK_KEY); } catch (e) { /* ignore */ }
+        try { Store.remove(CFG_KEY); } catch (e) { /* ignore */ }
+        try { Store.remove(VER_KEY); } catch (e) { /* ignore */ }
+        try { Store.remove(LANG_KEY); } catch (e) { /* ignore */ }
+      }
+      
+      resetAttempts();
+      cachedKey = null;
+      cachedPubkey = null;
+      
+      var dbReset = (DB && DB.reset) ? DB.reset() : Promise.resolve();
+      
+      return dbReset.catch(function(err) {
+        if (Logger) Logger.warn('AuthService', 'DB reset failed', err);
+      }).then(function() {
+        emit('auth:reset', {});
+        if (Logger) Logger.info('AuthService', 'Storage reset complete');
+      });
+    }
+
+    /**
+     * Очищает кэш ключей в памяти (без удаления из Store).
+     * Вызывается при logout или destroy.
+     * 
+     * @returns {void}
+     */
+    function lock() {
+      cachedKey = null;
+      cachedPubkey = null;
+    }
+
+    /**
+     * Инициализация модуля (вызывается DI.initAll).
+     * AuthService не требует автоматической инициализации —
+     * unlock/createNew вызываются явно из App.Boot.
+     * 
+     * @param {AbortSignal} [signal] - Сигнал для автоочистки.
+     * @returns {void}
+     */
+    function init(signal) {
+      if (Logger) {
+        Logger.debug('AuthService', 'Initialized', {
+          hasKey: !!getStoredKey(),
+          isEncrypted: hasEncryptedKey()
+        });
+      }
+    }
+
+    /**
+     * Уничтожение модуля (вызывается DI.destroyAll).
+     * Очищает кэш ключей в памяти.
+     * 
+     * @returns {void}
+     */
+    function destroy() {
+      lock();
+      resetAttempts();
+    }
+
+    return {
+      needsNewKey: needsNewKey,
+      hasEncryptedKey: hasEncryptedKey,
+      unlock: unlock,
+      createNew: createNew,
+      resetStorage: resetStorage,
+      getAttempts: getAttempts,
+      getMaxAttempts: getMaxAttempts,
+      getKey: getKey,
+      getPubkey: getPubkey,
+      isUnlocked: isUnlocked,
+      lock: lock,
+      init: init,
+      destroy: destroy
+    };
+  }, ['Config', 'Logger', 'Bus', 'DB', 'Crypto', 'Store']);
   /* <!-- MODULE: AuthService --> */
 
   // ═══════════════════════════════════════════════════
