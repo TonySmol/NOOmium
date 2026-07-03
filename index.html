@@ -1,7 +1,7 @@
 <!doctype html>
 <html lang="ru">
 <head>
-<meta name="app-version" content="1.3.11">
+<meta name="app-version" content="1.3.9">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,maximum-scale=1">
 <meta name="mobile-web-app-capable" content="yes">
@@ -7031,21 +7031,11 @@ DI.register('BaseViewComponent', function(Bus, I18n, Utils, StateManager, Config
    * @returns {void}
    */
   function bootstrap() {
-  try {
-    const app = DI.resolve('App');
-    app.mount();
-    
-    // Инициализация Service Worker (после монтирования приложения).
-    // Вызов изолирован в try/catch, чтобы сбой SW не ломал запуск всего приложения:
-    // SW — опциональный компонент, приложение должно работать и без него (fallback).
     try {
-      const sw = DI.resolve('SW');
-      sw.init();
-    } catch (swErr) {
-      console.warn('[Bootstrap] SW init failed:', swErr);
-    }
-  } catch (err) {
-    console.error('Bootstrap failed:', err);
+      const app = DI.resolve('App');
+      app.mount();
+    } catch (err) {
+      console.error('Bootstrap failed:', err);
 
       let root = document.getElementById('app-root');
       if (!root) {
@@ -7089,407 +7079,66 @@ DI.register('BaseViewComponent', function(Bus, I18n, Utils, StateManager, Config
 
 <!-- NOOMIUM_MODULE_START SW -->
   /**
-   * @typedef {Object} SWRegistrationPayload
-   * @description Payload события sw:registered.
-   * @property {string} version - Версия приложения.
-   * @property {string} cacheName - Имя кеша SW.
+   * @typedef {Object} SWMessage
+   * @description Сообщение, отправляемое Service Worker'у для управления его жизненным циклом.
+   * @property {'SKIP_WAITING'} type - Тип команды.
    */
 
   /**
-   * Клиентский модуль управления жизненным циклом Service Worker.
+   * Логика управления Service Worker'ом для PWA-обновлений.
    *
-   * Отвечает за:
-   * - Регистрацию SW с правильными параметрами (updateViaCache: 'none')
-   * - Отслеживание фаз обновления (installing → installed → activating → activated)
-   * - Координацию немедленной активации через SKIP_WAITING
-   * - Контролируемую перезагрузку страницы при смене контроллера
-   * - Интеграцию с шиной событий для UI-уведомлений
+   * **Жизненный цикл обновления:**
+   * 1. При загрузке страницы регистрируется SW с версией из meta-тега `app-version`
+   *    (кеш-бастинг для форсирования обновления при смене версии).
+   * 2. Если уже есть ожидающий SW (от предыдущей сессии) — ему отправляется
+   *    команда SKIP_WAITING для немедленной активации.
+   * 3. При обнаружении новой версии SW (updatefound):
+   *    - Дожидаемся его установки (state === 'installed')
+   *    - Если есть активный контроллер, отправляем SKIP_WAITING
+   *    - Перезагружаем страницу для применения новой версии
+   * 4. Обработчик `controllerchange` перезагружает страницу, когда новый SW
+   *    берёт контроль над клиентом (защита от работы со старой версией кеша).
    *
-   * Архитектурные решения:
-   * - Graceful degradation: работает без Config/Logger/Bus через console fallback
-   * - Защита от множественных listener'ов при повторных вызовах init()
-   * - Fallback на meta-тег app-version, если Config не содержит версию
-   * - Safe postMessage с обработкой InvalidStateError
+   * Регистрация SW может не сработать в приватном режиме или при открытии
+   * через `file://` — это не критично, приложение продолжает работать.
    *
-   * События Bus:
-   * - 'sw:registered' - успешная регистрация
-   * - 'sw:updatefound' - обнаружена новая версия
-   * - 'sw:updated' - активация завершена, imminent reload
-   * - 'sw:error' - ошибка регистрации (опционально)
+   * @returns {void}
    */
-  DI.register('SW', function(Config, Logger, Bus) {
+  (function() {
+    if (!('serviceWorker' in navigator)) return;
 
-    /**
-     * Флаг, предотвращающий множественные перезагрузки страницы.
-     * Устанавливается в true при первом срабатывании controllerchange.
-     * @type {boolean}
-     */
-    var refreshing = false;
+    var appVersionMeta = document.querySelector('meta[name="app-version"]');
+    var appVersion = appVersionMeta ? appVersionMeta.getAttribute('content') : '0';
 
-    /**
-     * Флаг, защищающий от повторной установки глобального обработчика
-     * controllerchange при повторных вызовах init() (например, после refreshUI).
-     * @type {boolean}
-     */
-    var controllerListenerAttached = false;
-
-    /**
-     * Ссылка на активный ServiceWorkerRegistration для возможности
-     * ручного вызова update() из других модулей (future-proof).
-     * @type {ServiceWorkerRegistration | null}
-     */
-    var registration = null;
-
-    /**
-     * Безопасный wrapper над Logger с fallback на console.
-     * Обеспечивает единый формат логов с префиксом [SW].
-     * @param {'info'|'warn'|'error'} level - Уровень лога.
-     * @param {string} msg - Сообщение.
-     * @param {*} [data] - Дополнительные данные.
-     * @returns {void}
-     */
-    function log(level, msg, data) {
-      var prefix = '[SW] ';
-      var fullMsg = prefix + msg;
-      if (Logger && typeof Logger[level] === 'function') {
-        try {
-          Logger[level](fullMsg, data);
-          return;
-        } catch (_) {
-          /* fallback на console при ошибке Logger */
+    navigator.serviceWorker.register('/sw.js?v=' + encodeURIComponent(appVersion))
+      .then(function(reg) {
+        if (reg.waiting) {
+          reg.waiting.postMessage({ type: 'SKIP_WAITING' });
         }
-      }
-      var fn = console[level] || console.log;
-      if (data !== undefined) {
-        fn(fullMsg, data);
-      } else {
-        fn(fullMsg);
-      }
-    }
 
-    /**
-     * Публикует событие в Bus с защитой от ошибок.
-     * @param {string} event - Имя события.
-     * @param {*} [payload] - Данные события.
-     * @returns {void}
-     */
-    function emit(event, payload) {
-      if (!Bus || typeof Bus.emit !== 'function') return;
-      try {
-        Bus.emit(event, payload);
-      } catch (err) {
-        log('warn', 'Failed to emit ' + event, err);
-      }
-    }
-
-    /**
-     * Безопасно отправляет сообщение Service Worker'у.
-     * Оборачивает postMessage в try/catch для обработки случая,
-     * когда SW уже terminated или находится в некорректном состоянии.
-     * @param {ServiceWorker} worker - Целевой worker.
-     * @param {Object} message - Сообщение для отправки.
-     * @returns {boolean} true если сообщение успешно отправлено.
-     */
-    function safePostMessage(worker, message) {
-      if (!worker) return false;
-      try {
-        worker.postMessage(message);
-        return true;
-      } catch (err) {
-        log('warn', 'postMessage failed', err);
-        return false;
-      }
-    }
-
-    /**
-     * Извлекает версию приложения из Config с fallback на meta-тег.
-     * Это обеспечивает robustness: если Config ещё не инициализирован
-     * или не содержит appVersion, используется значение из <meta>.
-     * @returns {string} Версия приложения.
-     */
-    function resolveAppVersion() {
-      var version = '1.0.0';
-      
-      // Приоритет 1: Config
-      if (Config && typeof Config.get === 'function') {
-        try {
-          var cfgVersion = Config.get('appVersion', null);
-          if (cfgVersion && typeof cfgVersion === 'string') {
-            version = cfgVersion;
+        reg.addEventListener('updatefound', function() {
+          var installing = reg.installing;
+          if (installing) {
+            installing.addEventListener('statechange', function() {
+              if (installing.state === 'installed' && navigator.serviceWorker.controller) {
+                installing.postMessage({ type: 'SKIP_WAITING' });
+                window.location.reload();
+              }
+            });
           }
-        } catch (_) {
-          /* ignore, use fallback */
-        }
-      }
-      
-      // Приоритет 2: meta-тег (если Config не дал результат)
-      if (version === '1.0.0') {
-        try {
-          var meta = document.querySelector('meta[name="app-version"]');
-          if (meta && meta.getAttribute) {
-            var metaVersion = meta.getAttribute('content');
-            if (metaVersion) version = metaVersion;
-          }
-        } catch (_) {
-          /* ignore */
-        }
-      }
-      
-      return version;
-    }
-
-    /**
-     * Отправляет команду немедленной активации ожидающему Service Worker'у.
-     * Вызывается в двух сценариях:
-     * 1. При старте, если reg.waiting существует (возврат на страницу).
-     * 2. При обнаружении новой версии через updatefound → installed.
-     * @param {ServiceWorker} worker - Ожидающий активации worker.
-     * @param {string} reason - Причина вызова (для логирования).
-     * @returns {void}
-     */
-    function requestSkipWaiting(worker, reason) {
-      if (!worker) return;
-      log('info', 'Requesting SKIP_WAITING (' + reason + ')', {
-        state: worker.state
-      });
-      safePostMessage(worker, { type: 'SKIP_WAITING' });
-      emit('sw:updatefound', { reason: reason });
-    }
-
-    /**
-     * Обработчик изменения состояния устанавливающегося Service Worker'а.
-     * Отслеживает переход в 'installed' и инициирует немедленную активацию,
-     * если уже есть активный контроллер (значит это обновление, а не первая установка).
-     * @param {ServiceWorker} installing - Worker в фазе установки.
-     * @returns {function(Event): void} Обработчик statechange.
-     */
-    function createInstallingStateHandler(installing) {
-      return function onStateChange() {
-        if (!installing) return;
-        
-        log('info', 'Worker state changed', { state: installing.state });
-        
-        if (installing.state === 'installed') {
-          // Если есть активный контроллер — это обновление, а не первая установка
-          if (navigator.serviceWorker.controller) {
-            requestSkipWaiting(installing, 'update-installed');
-          } else {
-            log('info', 'First install completed, no skip needed');
-            emit('sw:registered', { version: resolveAppVersion(), firstInstall: true });
-          }
-        }
-      };
-    }
-
-    /**
-     * Обработчик события updatefound на регистрации SW.
-     * Подписывается на statechange нового worker'а (reg.installing).
-     * @param {ServiceWorkerRegistration} reg - Активная регистрация.
-     * @returns {function(): void} Обработчик updatefound.
-     */
-    function createUpdateFoundHandler(reg) {
-      return function onUpdateFound() {
-        var installing = reg.installing;
-        if (!installing) {
-          log('warn', 'updatefound fired but reg.installing is null');
-          return;
-        }
-        
-        log('info', 'New SW detected, state: ' + installing.state);
-        installing.addEventListener('statechange', createInstallingStateHandler(installing));
-      };
-    }
-
-    /**
-     * Глобальный обработчик смены контроллера Service Worker.
-     * Срабатывает, когда новый SW берёт контроль над клиентом.
-     * Использует флаг refreshing для предотвращения цикла перезагрузок.
-     * @returns {function(): void}
-     */
-    function onControllerChange() {
-      if (refreshing) {
-        log('warn', 'controllerchange ignored (already refreshing)');
-        return;
-      }
-      
-      refreshing = true;
-      log('info', 'Controller changed, initiating reload');
-      emit('sw:updated', { timestamp: Date.now() });
-      
-      // Небольшая задержка, чтобы Bus успел доставить событие подписчикам
-      // (например, Toast-уведомлению об обновлении)
-      setTimeout(function() {
-        window.location.reload();
-      }, 50);
-    }
-
-    /**
-     * Устанавливает глобальный обработчик controllerchange.
-     * Защищён от повторной регистрации через флаг controllerListenerAttached.
-     * @returns {void}
-     */
-    function attachControllerChangeListener() {
-      if (controllerListenerAttached) {
-        log('info', 'controllerchange listener already attached');
-        return;
-      }
-      
-      if (!navigator.serviceWorker || typeof navigator.serviceWorker.addEventListener !== 'function') {
-        log('warn', 'navigator.serviceWorker.addEventListener not available');
-        return;
-      }
-      
-      try {
-        navigator.serviceWorker.addEventListener('controllerchange', onControllerChange);
-        controllerListenerAttached = true;
-        log('info', 'controllerchange listener attached');
-      } catch (err) {
-        log('error', 'Failed to attach controllerchange listener', err);
-      }
-    }
-
-    /**
-     * Обрабатывает успешную регистрацию Service Worker'а.
-     * Проверяет наличие ожидающего worker'а, подписывается на обновления.
-     * @param {ServiceWorkerRegistration} reg - Объект регистрации.
-     * @param {string} appVersion - Версия приложения.
-     * @returns {void}
-     */
-    function handleRegistrationSuccess(reg, appVersion) {
-      registration = reg;
-      log('info', 'Registered successfully', {
-        version: appVersion,
-        scope: reg.scope,
-        updateViaCache: reg.updateViaCache
-      });
-      
-      emit('sw:registered', {
-        version: appVersion,
-        scope: reg.scope,
-        firstInstall: false
-      });
-      
-      // Сценарий 1: Возврат на страницу, где уже есть ожидающий SW
-      // (например, пользователь открыл новую вкладку)
-      if (reg.waiting) {
-        log('info', 'Found waiting SW on startup, requesting activation');
-        requestSkipWaiting(reg.waiting, 'waiting-on-startup');
-      }
-      
-      // Сценарий 2: Активный SW уже существует — ничего не делаем
-      if (reg.active && !reg.waiting && !reg.installing) {
-        log('info', 'Active SW is up-to-date');
-      }
-      
-      // Подписываемся на обнаружение новых версий
-      reg.addEventListener('updatefound', createUpdateFoundHandler(reg));
-      log('info', 'updatefound listener attached');
-    }
-
-    /**
-     * Обрабатывает ошибку регистрации Service Worker'а.
-     * Не прерывает работу приложения — SW является опциональным компонентом.
-     * @param {Error} err - Объект ошибки.
-     * @returns {void}
-     */
-    function handleRegistrationError(err) {
-      log('error', 'Registration failed', err && err.message ? err.message : err);
-      emit('sw:error', {
-        message: err && err.message ? err.message : String(err),
-        timestamp: Date.now()
-      });
-    }
-
-    /**
-     * Главная точка входа модуля.
-     * Инициирует регистрацию Service Worker'а и настраивает обработчики
-     * жизненного цикла. Безопасна для повторных вызовов.
-     *
-     * @returns {void}
-     */
-    function init() {
-      // Проверка поддержки Service Worker
-      if (!('serviceWorker' in navigator)) {
-        log('warn', 'Service Worker API not supported by browser');
-        return;
-      }
-      
-      // Проверка безопасности: SW работает только в secure context
-      if (window.location.protocol !== 'https:' && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
-        log('warn', 'Service Worker requires HTTPS (current: ' + window.location.protocol + ')');
-        return;
-      }
-      
-      var appVersion = resolveAppVersion();
-      log('info', 'Initializing SW registration', { version: appVersion });
-      
-      // Устанавливаем controllerchange listener до регистрации,
-      // чтобы не пропустить событие, если SW активируется мгновенно
-      attachControllerChangeListener();
-      
-      // Формируем URL с версией для cache-busting самого sw.js
-      var swUrl = '/sw.js?v=' + encodeURIComponent(appVersion);
-      
-      // Регистрируем SW с updateViaCache: 'none' для предотвращения
-      // кеширования браузером файла sw.js (иначе обновления могут
-      // задерживаться до 24 часов согласно спецификации SW)
-      navigator.serviceWorker.register(swUrl, {
-        updateViaCache: 'none',
-        scope: '/'
-      })
-        .then(function(reg) {
-          handleRegistrationSuccess(reg, appVersion);
-        })
-        .catch(handleRegistrationError);
-    }
-
-    /**
-     * Публичный метод для принудительной проверки обновлений SW.
-     * Может быть вызван из UI (например, кнопка "Проверить обновления").
-     * @returns {Promise<boolean>} true если проверка инициирована.
-     */
-    function checkForUpdates() {
-      if (!registration) {
-        log('warn', 'Cannot check updates: no active registration');
-        return Promise.resolve(false);
-      }
-      
-      log('info', 'Manual update check requested');
-      return registration.update()
-        .then(function() {
-          log('info', 'Manual update check completed');
-          return true;
-        })
-        .catch(function(err) {
-          log('warn', 'Manual update check failed', err);
-          return false;
         });
-    }
+      })
+      .catch(function(err) {
+        console.warn('SW registration failed:', err);
+      });
 
-    /**
-     * Возвращает текущую версию приложения (для UI).
-     * @returns {string}
-     */
-    function getVersion() {
-      return resolveAppVersion();
-    }
-
-    /**
-     * Возвращает текущее состояние флага refreshing.
-     * Полезно для отладки и UI-индикаторов.
-     * @returns {boolean}
-     */
-    function isRefreshing() {
-      return refreshing;
-    }
-
-    return {
-      init: init,
-      checkForUpdates: checkForUpdates,
-      getVersion: getVersion,
-      isRefreshing: isRefreshing
-    };
-  }, ['Config', 'Logger', 'Bus']);
+    var refreshing = false;
+    navigator.serviceWorker.addEventListener('controllerchange', function() {
+      if (refreshing) return;
+      refreshing = true;
+      window.location.reload();
+    });
+  })();
 <!-- NOOMIUM_MODULE_END SW -->
 })();
 </script>
