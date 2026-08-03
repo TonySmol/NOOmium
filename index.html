@@ -3246,10 +3246,10 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, P
  * Клик по заметке открывает NoteView (просмотр/правка/удаление).
  * Обновляется по db:change / смене вида / языка.
  * Поиск дебаунсится (baseSearchDebounce из Config).
- * @deps Store, DB, I18n, Utils, EventBus
+ * @deps Store, DB, I18n, Utils, Config, EventBus
  * @exports BaseView
  */
-DI.register('BaseView', function (Store, DB, I18n, Utils, bus) {
+DI.register('BaseView', function (Store, DB, I18n, Utils, Config, bus) {
   let listEl, statsTotal, statsOpen, statsPriv, qEl, sortEl;
   let unsubs = [];
   let rafPending = false;
@@ -3352,7 +3352,7 @@ DI.register('BaseView', function (Store, DB, I18n, Utils, bus) {
   }
 
   return { init, destroy, render };
-}, ['Store', 'DB', 'I18n', 'Utils', 'EventBus']);
+}, ['Store', 'DB', 'I18n', 'Utils', 'Config', 'EventBus']);
 // ─── UI/BaseView ─── END ─────────────────────────────────────
 
 // ─── UI/NoteView ─── START ───────────────────────────────────
