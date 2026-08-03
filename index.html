@@ -2903,8 +2903,7 @@ DI.register('Composer', function (Context, Notes, DB, Store, I18n, bus, Toast, U
  *  - ввод без пина: бар сегментов виден, лента = Store.lists[seg].
  *  - пин: бар скрыт, баннер виден, лента = единый список похожего
  *    (Моё+Мир+Озарения, по схожести, сама закреплённая исключена).
- * Клик по заметке с вектором — пин / повторный — снять.
- * Клик по карточке открывает NoteView; кнопка ✎ на своих — правка в Composer.
+ * Жесты: клик по карточке = пин/отпин; карандаш на своих = открыть NoteView.
  * Перерисовка коалесцируется через requestAnimationFrame, карточки — каскадом.
  * @deps Store, Context, I18n, Utils, EventBus
  * @exports FeedView
@@ -2938,6 +2937,13 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus) {
   function isPinned(n) {
     const ctx = Store.get('context');
     return ctx.source === 'pin' && ctx.noteId === n.id;
+  }
+
+  /** Клик по карточке: пин, а повторный клик по закреплённой — снять. @param {Object} n */
+  function onNoteClick(n) {
+    const ctx = Store.get('context');
+    if (ctx.source === 'pin' && ctx.noteId === n.id) { Context.clearPin(); return; }
+    if (n.vector) Context.setPin(n);
   }
 
   /** Карточка заметки. @param {Object} n @param {boolean} isRanked @param {number} i */
@@ -2978,24 +2984,22 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus) {
 
     el.appendChild(meta);
 
-    // кнопка правки на своих заметках
+    // карандаш на своих: открывает заметку (NoteView) со всеми действиями
     if (n.own) {
-      const editBtn = document.createElement('button');
-      editBtn.className = 'na';
-      editBtn.style.cssText = 'position:absolute;top:10px;right:10px;font-size:12px;opacity:.7;';
-      editBtn.textContent = '✎';
-      editBtn.title = I18n.t('btn.edit');
-      editBtn.addEventListener('click', e => {
+      const openBtn = document.createElement('button');
+      openBtn.className = 'na';
+      openBtn.style.cssText = 'position:absolute;top:10px;right:10px;font-size:12px;opacity:.7;';
+      openBtn.textContent = '✎';
+      openBtn.title = I18n.t('btn.edit');
+      openBtn.addEventListener('click', e => {
         e.stopPropagation();
-        try { bus.emit('note:edit-request', { id: n.id }); } catch (_) {}
+        try { bus.emit('note:open', { id: n.id }); } catch (_) {}
       });
-      el.appendChild(editBtn);
+      el.appendChild(openBtn);
     }
 
-    // клик по карточке — открыть NoteView; клик по тексту с вектором — пин
-    el.addEventListener('click', () => {
-      try { bus.emit('note:open', { id: n.id }); } catch (_) {}
-    });
+    // клик по карточке — пин (ядро семантики)
+    el.addEventListener('click', () => onNoteClick(n));
 
     return el;
   }
