@@ -2578,6 +2578,8 @@ DI.register('Provenance', function (DB) {
  * авторам-потомкам (Sybil-resistant: один человек не накрутит себе много).
  * Свои заметки (authorPubkey=null) считаются одним автором «я».
  * Карта parentId→авторы строится асинхронно по db:change/db:cache.
+ * После перестроения эмитит 'influence:updated', чтобы FeedView перерисовался
+ * с актуальными данными (без гонки).
  * @deps DB, EventBus, Logger
  * @exports Influence
  */
@@ -2600,6 +2602,8 @@ DI.register('Influence', function (DB, bus, Logger) {
       });
       resonanceMap.clear();
       map.forEach((v, k) => resonanceMap.set(k, v));
+      // сообщаем ленте, что данные свежие — пусть перерисуется
+      try { bus.emit('influence:updated'); } catch (_) {}
     }).catch(e => Logger.warn('Influence: ошибка rebuild', String(e)));
   }
 
@@ -3130,6 +3134,8 @@ DI.register('Composer', function (Context, Notes, DB, Store, I18n, bus, Toast, U
  *  - pin: баннер, единый список похожего.
  * Жесты: клик по карточке = пин/отпин; ✎ на своих = NoteView;
  * «↳ по мотивам» = источник; «◆ N» = потомки; «Загрузить ещё» = история сети.
+ * Резонанс = сумма уникальных авторов по локальному id и по eventId
+ * (свои дети ссылаются на id, чужие — на eventId; множества не пересекаются).
  * @deps Store, Context, I18n, Utils, EventBus, Influence, Provenance, Modal, NetService
  * @exports FeedView
  */
@@ -3256,7 +3262,8 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, P
       meta.appendChild(sim);
     }
 
-    const res = Influence.resonance(n.id) || Influence.resonance(n.eventId);
+    // резонанс: свои дети ссылаются на id, чужие — на eventId; складываем
+    const res = Influence.resonance(n.id) + Influence.resonance(n.eventId);
     if (res > 0) {
       const r = document.createElement('button');
       r.className = 'note-sim';
@@ -3350,6 +3357,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, P
     unsubs.push(bus.on('i18n:change', scheduleRender));
     unsubs.push(bus.on('db:change', scheduleRender));
     unsubs.push(bus.on('db:cache', scheduleRender));
+    unsubs.push(bus.on('influence:updated', scheduleRender));
     // история сети
     if (histBtn) {
       histBtn.addEventListener('click', () => NetService.loadHistory());
