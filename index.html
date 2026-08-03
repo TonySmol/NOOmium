@@ -233,7 +233,7 @@ body.ready #app{display:flex}
 // ВЕРСИЯ ПРИЛОЖЕНИЯ
 // Поднимается при каждом релизе. Отображается в меню (MenuView).
 // ═══════════════════════════════════════════════════════════════
-const APP_VERSION = '0.2.0';
+const APP_VERSION = '0.2.1';
 
 // ═══════════════════════════════════════════════════════════════
 // CORE/DI — ПРЕАМБУЛА (не модуль). Выполняется первой.
@@ -2021,9 +2021,9 @@ DI.register('Nostr', function (Config, bus, Logger) {
  *  - На чужой запрос: центроидный префильтр → ранжирование → top-N ответов.
  *  - На пин шлёт запрос и собирает ответы в кеш.
  *  - loadHistory: расширяет окно подписки (история сети).
- *  - forgetNote: при удалении расшаренной заметки шлёт kind 5 (NIP-09),
+ *  - forgetNote: при удалении/снятии публикации шлёт kind 5 (NIP-09),
  *    прося релеи удалить событие; другие участники, получив kind 5,
- *    вычищают заметку из кэша (DB.cacheDel) — метка резонанса гаснет.
+ *    вычищают заметку из кэша (DB.cacheDel).
  *
  * Переподключение защищено «эпохой» подписки (subEpoch): намеренное
  * закрытие подписки (например, в loadHistory) не ложится в статус reconnecting.
@@ -2031,6 +2031,8 @@ DI.register('Nostr', function (Config, bus, Logger) {
  * Дедупликация: seen по ev.id + contentSeen по (автор+текст).
  * Нагрузочная устойчивость: rate-limit ответов, префильтр, лимит ответов,
  * ступенчатая отправка, переподключение.
+ * Защита от race condition: в handleIncomingNote проверяем createdAt,
+ * чтобы старая версия не переписала новую.
  *
  * @deps Nostr, Protocol, DB, Ranker, Vec, Store, Config, Logger, EventBus
  * @exports NetService
@@ -2049,10 +2051,8 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   const peers = new Map();
   const peerQueryTimes = new Map();
 
-  // окно подписки и история
   let currentWindow = Config.get('subWindow', 300);
   let historyLoading = false;
-  // «эпоха» подписки: отличает намеренное переподключение от обрыва
   let subEpoch = 0;
 
   const kNote = () => Config.get('kNote', 1);
@@ -2084,7 +2084,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     return false;
   }
 
-  // ── центроидный префильтр ──
   function rebuildCentroids() {
     DB.all().then(notes => {
       const vecs = notes.filter(n => n.shared && n.vector).map(n => n.vector);
@@ -2099,12 +2098,11 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     return false;
   }
 
-  // ── входящие события ──
   function onEvent(ev) {
     if (!ev || seen.has(ev.id)) return;
     seen.add(ev.id);
     trimSeen();
-    if (ev.pubkey === Nostr.getPubkey()) return;   // своё не обрабатываем
+    if (ev.pubkey === Nostr.getPubkey()) return;
 
     if (ev.kind === kNote()) handleIncomingNote(ev);
     else if (ev.kind === kQuery()) handleIncomingQuery(ev);
@@ -2116,9 +2114,15 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     const note = Protocol.decodeNote(ev);
     if (!note) return;
     if (isContentDuplicate(note.authorPubkey, note.text)) return;
-    peers.set(note.authorPubkey, Date.now());
-    DB.cachePut(note);
-    notifyPeers();
+    // Защита от race condition: если пришла версия с более старым createdAt — не обновлять
+    DB.cacheGet(note.id).then(existing => {
+      if (existing && existing.createdAt && note.createdAt && existing.createdAt > note.createdAt) {
+        return;
+      }
+      peers.set(note.authorPubkey, Date.now());
+      DB.cachePut(note);
+      notifyPeers();
+    });
   }
 
   function handleIncomingQuery(ev) {
@@ -2126,7 +2130,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     if (!q) return;
     const now = Date.now();
     const last = peerQueryTimes.get(ev.pubkey) || 0;
-    if (now - last < Config.get('queryRateLimit', 3000)) return;   // rate-limit на пира
+    if (now - last < Config.get('queryRateLimit', 3000)) return;
     peerQueryTimes.set(ev.pubkey, now);
     if (!passesPrefilter(q.vector)) return;
 
@@ -2154,7 +2158,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   function handleIncomingAnswer(ev) {
     const a = Protocol.decodeAnswer(ev);
     if (!a) return;
-    if (a.queryId !== activeQueryId) return;   // ответ не на наш запрос
+    if (a.queryId !== activeQueryId) return;
     if (isContentDuplicate(a.authorPubkey, a.text)) return;
     peers.set(a.authorPubkey, Date.now());
     DB.cachePut({
@@ -2169,11 +2173,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     notifyPeers();
   }
 
-  /**
-   * Входящее удаление (NIP-09): вычищаем указанные заметки из кэша.
-   * DB.cacheDel эмитит db:cache → Feed/Influence/Provenance пересчитаются,
-   * метка резонанса на родителе гаснет.
-   */
   function handleIncomingDelete(ev) {
     const del = Protocol.decodeDelete(ev);
     if (!del) return;
@@ -2184,7 +2183,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     notifyPeers();
   }
 
-  // ── анонс наших открытых заметок ──
   function announceNote(note) {
     if (!note || !note.shared || !note.vector) return;
     Nostr.publish(Protocol.noteEvent(note, room()))
@@ -2202,11 +2200,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
       .catch(e => Logger.warn('NetService: не анонсировать', String(e)));
   }
 
-  /**
-   * Просит релеи удалить событие заметки (kind 5, NIP-09). Best-effort:
-   * поддерживают не все релеи, но это стандартный способ удаления.
-   * @param {Object} note - заметка с eventId.
-   */
   function forgetNote(note) {
     if (!note || !note.eventId) return;
     const ev = Protocol.deleteEvent(note.eventId, room());
@@ -2216,7 +2209,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
       .catch(e => Logger.warn('NetService: не удалить с рэлеев', String(e)));
   }
 
-  // ── запрос при пине ──
   function maybeSendQuery() {
     const ctx = Store.get('context');
     if ((ctx.source !== 'pin' && ctx.source !== 'drift') || !ctx.vector) { lastQueryVec = null; return; }
@@ -2229,12 +2221,11 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     Nostr.publish(tpl)
       .then(ev => { activeQueryId = ev.id; Logger.info('NetService: запрос ' + ev.id.slice(0, 8) + '…'); })
       .catch(e => {
-        lastQueryVec = null; lastQueryTime = 0;   // даём повторить
+        lastQueryVec = null; lastQueryTime = 0;
         Logger.warn('NetService: не отправить запрос', String(e));
       });
   }
 
-  // ── подписка на комнату (с «эпохой» от ложных reconnect) ──
   function subscribeToRoom() {
     const since = Math.floor(Date.now() / 1000) - currentWindow;
     const filters = [{ kinds: [kNote(), kQuery(), kAnswer(), kDelete()], '#t': [room()], since }];
@@ -2243,7 +2234,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     subscription = Nostr.subscribe(filters, {
       onevent: onEvent,
       onclose: () => {
-        // устаревшая подписка (уже переподключились намеренно) — не дёргаем статус
         if (myEpoch !== subEpoch) return;
         setStatus('reconnecting');
         setTimeout(() => { if (started && myEpoch === subEpoch) subscribeToRoom(); }, Config.get('reconnectBaseDelay', 1000));
@@ -2251,13 +2241,9 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     });
   }
 
-  /**
-   * Расширяет окно подписки, чтобы подтянуть старые заметки с рэлеев.
-   * Каждый вызов увеличивает окно (×4), вплоть до historyMaxWindow.
-   */
   function loadHistory() {
     if (!started || historyLoading) return;
-    const maxWindow = Config.get('historyMaxWindow', 2592000); // 30 дней по умолчанию
+    const maxWindow = Config.get('historyMaxWindow', 2592000);
     if (currentWindow >= maxWindow) { emitHistory(false, currentWindow); return; }
     historyLoading = true;
     emitHistory(true, currentWindow);
@@ -2270,7 +2256,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     }
   }
 
-  // ── heartbeat ──
   function startHeartbeat() {
     if (hbTimer) clearInterval(hbTimer);
     hbTimer = setInterval(() => {
@@ -2283,7 +2268,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     }, Config.get('heartbeat', 30000));
   }
 
-  // ── lifecycle ──
   function start() {
     if (started) return Promise.resolve();
     return Nostr.init().then(() => {
@@ -2291,6 +2275,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
       subscribeToRoom();
       bus.on('note:created', note => { if (note && note.shared) announceNote(note); });
       bus.on('note:shared', note => { if (note && note.shared) announceNote(note); });
+      bus.on('note:unshared', note => { if (note && !note.shared && note.eventId) forgetNote(note); });
       bus.on('note:deleted', note => { if (note && note.shared && note.eventId) forgetNote(note); });
       bus.on('db:change', () => rebuildCentroids());
       contextUnsub = Store.subscribe(s => s.context, () => maybeSendQuery());
@@ -2829,15 +2814,11 @@ DI.register('NoteActions', function (Notes, Modal, Toast, I18n) {
  *  - showHelp(): открывает гайд из меню; чекбокс «больше не показывать»
  *    доступен только в онбординге первого запуска.
  * Текст берётся из единого словаря I18n (ключи onb.*).
+ * Добавлена секция «Удаление» с честным объяснением best-effort удаления.
  * @deps Config, Modal, I18n
  * @exports Onboarding
  */
 DI.register('Onboarding', function (Config, Modal, I18n) {
-  /**
-   * Собирает тело гайда из секций.
-   * @param {boolean} firstRun - онбординг первого запуска (показывает чекбокс).
-   * @returns {{el:HTMLElement, checkbox:HTMLInputElement|null}}
-   */
   function buildBody(firstRun) {
     const el = document.createElement('div');
     el.style.cssText = 'display:flex;flex-direction:column;gap:14px;';
@@ -2849,6 +2830,7 @@ DI.register('Onboarding', function (Config, Modal, I18n) {
       ['∿ ' + I18n.t('onb.drift.t'), I18n.t('onb.drift.d')],
       ['⌘ ' + I18n.t('onb.modes.t'), I18n.t('onb.modes.d')],
       ['◆ ' + I18n.t('onb.resonance.t'), I18n.t('onb.resonance.d')],
+      ['🗑 ' + I18n.t('onb.delete.t'), I18n.t('onb.delete.d')],
       ['⌨ ' + I18n.t('onb.keys.t'), I18n.t('onb.keys.d')],
     ];
 
@@ -2881,10 +2863,6 @@ DI.register('Onboarding', function (Config, Modal, I18n) {
     return { el, checkbox };
   }
 
-  /**
-   * Открывает гайд.
-   * @param {boolean} firstRun - первый запуск (чекбокс + сохранение onboarded).
-   */
   function showHelp(firstRun) {
     const { el, checkbox } = buildBody(!!firstRun);
     Modal.open({
@@ -2903,10 +2881,17 @@ DI.register('Onboarding', function (Config, Modal, I18n) {
     });
   }
 
-  /** Первый запуск: показать гайд, если ещё не проходили. */
   function init() {
     if (Config.get('onboarded', false)) return;
     showHelp(true);
+    I18n.addDict('ru', {
+      'onb.delete.t': 'Удаление',
+      'onb.delete.d': 'Удаление в Nostr — это просьба к релеям удалить заметку. Большинство рэлеев её выполнят, но те, кто уже увидел заметку, могут её сохранить. Полное удаление возможно только на своём релее.',
+    });
+    I18n.addDict('en', {
+      'onb.delete.t': 'Deletion',
+      'onb.delete.d': 'Deletion in Nostr is a request to relays to delete a note. Most relays will honor it, but those who already saw the note may keep it. Full deletion is only possible on your own relay.',
+    });
   }
 
   return { init, showHelp };
@@ -3327,8 +3312,8 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
  *  - input / drift (режим автора): бар виден, лента = Store.lists[seg].
  *  - pin: баннер, единый список похожего (закреплённая исключена).
  * Жесты: клик по карточке = пин/отпин; ✎ на своих = NoteView;
- * «↳ по мотивам» = линейка предков; «◆ N» = потомки;
- * «Загрузить ещё» = история сети.
+ * «↳ по мотивам» = линейка предков (если родитель удалён — не кликабельна);
+ * «◆ N» = потомки; «Загрузить ещё» = история сети.
  * Резонанс = сумма уникальных авторов по локальному id и по eventId.
  * @deps Store, Context, I18n, Utils, EventBus, Influence, Provenance, Modal, NetService
  * @exports FeedView
@@ -3477,10 +3462,21 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, P
       link.style.cssText = 'background:none;border:none;padding:0;cursor:pointer;font:inherit;color:var(--teal);';
       link.textContent = '↳ ' + I18n.t('inf.bymotif');
       link.title = I18n.t('inf.lineage');
-      link.addEventListener('click', e => {
-        e.stopPropagation();
-        showAncestors(n);
-      });
+      // Проверяем, существует ли родитель (асинхронно)
+      Provenance.ancestors(n.id).then(chain => {
+        if (!chain.length) {
+          // Родитель удалён — не кликабельна
+          link.style.cursor = 'default';
+          link.style.opacity = '0.5';
+          link.textContent = '↳ ' + I18n.t('inf.orphan');
+          link.title = I18n.t('inf.orphan.hint');
+        } else {
+          link.addEventListener('click', e => {
+            e.stopPropagation();
+            showAncestors(n);
+          });
+        }
+      }).catch(() => {});
       meta.appendChild(link);
     }
 
@@ -3578,9 +3574,18 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, P
   function init() {
     bind();
     if (!feedEl) return;
-    // ключи линейки предков, отсутствующие в базовом словаре
-    I18n.addDict('ru', { 'inf.lineage': 'Линейка «по мотивам»', 'inf.noancestors': 'Это корень — предков нет' });
-    I18n.addDict('en', { 'inf.lineage': '“Inspired by” lineage', 'inf.noancestors': 'This is the root — no ancestors' });
+    I18n.addDict('ru', {
+      'inf.lineage': 'Линейка «по мотивам»',
+      'inf.noancestors': 'Это корень — предков нет',
+      'inf.orphan': 'родитель удалён',
+      'inf.orphan.hint': 'Родитель этой заметки был удалён',
+    });
+    I18n.addDict('en', {
+      'inf.lineage': '"Inspired by" lineage',
+      'inf.noancestors': 'This is the root — no ancestors',
+      'inf.orphan': 'parent deleted',
+      'inf.orphan.hint': 'The parent of this note was deleted',
+    });
 
     unsubs.push(Store.subscribe(s => s.context, scheduleRender, Store.shallowEqual));
     unsubs.push(Store.subscribe(s => s.lists, scheduleRender));
@@ -3590,7 +3595,6 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, P
     unsubs.push(bus.on('db:change', scheduleRender));
     unsubs.push(bus.on('db:cache', scheduleRender));
     unsubs.push(bus.on('influence:updated', scheduleRender));
-    // история сети
     if (histBtn) {
       histBtn.addEventListener('click', () => NetService.loadHistory());
       unsubs.push(bus.on('net:history', e => {
@@ -3740,8 +3744,7 @@ DI.register('BaseView', function (Store, DB, I18n, Utils, bus) {
  * удалить / переключить видимость / копировать / править.
  * Открывается по событию 'note:open' {id} (из BaseView и FeedView).
  * Закрытие — по клику на фон или Escape.
- * Зависимости очищены: действия идут через NoteActions, Modal не используется
- * (рендер напрямую в #noteview).
+ * Публичные (shared) заметки нельзя редактировать — показываем подсказку.
  * @deps DB, NoteActions, I18n, Utils, EventBus
  * @exports NoteView
  */
@@ -3755,7 +3758,6 @@ DI.register('NoteView', function (DB, NoteActions, I18n, Utils, bus) {
     return root;
   }
 
-  /** Закрывает оверлей и чистит обработчик Escape. */
   function close() {
     const r = ensureRoot();
     if (r) { r.classList.remove('on'); r.innerHTML = ''; }
@@ -3763,19 +3765,16 @@ DI.register('NoteView', function (DB, NoteActions, I18n, Utils, bus) {
     currentId = null;
   }
 
-  /** Открывает заметку по id. @param {string} id */
   function open(id) {
     if (!id) return;
     DB.get(id).then(note => {
       if (!note) {
-        // локальной нет — ищем в сетевом кэше
         return DB.cacheGet(id).then(cached => { if (cached) render(cached); });
       }
       render(note);
     }).catch(() => {});
   }
 
-  /** Строит DOM оверлея для заметки. @param {Object} note */
   function render(note) {
     const r = ensureRoot();
     if (!r) return;
@@ -3783,9 +3782,8 @@ DI.register('NoteView', function (DB, NoteActions, I18n, Utils, bus) {
     r.innerHTML = '';
     r.classList.add('on');
 
-    const isOwn = !!(note.id && !note.authorPubkey);   // у своих authorPubkey не ставим
+    const isOwn = !!(note.id && !note.authorPubkey);
 
-    // ── верхняя панель действий ──
     const top = document.createElement('div');
     top.className = 'nv-f';
 
@@ -3809,7 +3807,8 @@ DI.register('NoteView', function (DB, NoteActions, I18n, Utils, bus) {
     copy.addEventListener('click', () => NoteActions.copy(note.text));
     top.appendChild(copy);
 
-    if (isOwn) {
+    // Кнопка «Развить» — только для локальных (private) заметок
+    if (isOwn && !note.shared) {
       const edit = document.createElement('button');
       edit.className = 'nv-act';
       edit.textContent = I18n.t('btn.edit');
@@ -3818,11 +3817,16 @@ DI.register('NoteView', function (DB, NoteActions, I18n, Utils, bus) {
         try { bus.emit('note:edit-request', { id: note.id }); } catch (_) {}
       });
       top.appendChild(edit);
+    } else if (isOwn && note.shared) {
+      // Публичные заметки нельзя редактировать
+      const hint = document.createElement('span');
+      hint.style.cssText = 'font-size:12px;color:var(--text-3);align-self:center;';
+      hint.textContent = I18n.t('note.public.noedit');
+      top.appendChild(hint);
     }
 
     r.appendChild(top);
 
-    // ── тело: метаданные + текст ──
     const body = document.createElement('div');
     body.className = 'nv-b';
 
@@ -3854,7 +3858,6 @@ DI.register('NoteView', function (DB, NoteActions, I18n, Utils, bus) {
 
     r.appendChild(body);
 
-    // ── нижняя панель: закрыть ──
     const bottom = document.createElement('div');
     bottom.className = 'nv-f-bottom';
     const closeBtn = document.createElement('button');
@@ -3864,10 +3867,8 @@ DI.register('NoteView', function (DB, NoteActions, I18n, Utils, bus) {
     bottom.appendChild(closeBtn);
     r.appendChild(bottom);
 
-    // ── фон: клик мимо контента закрывает ──
     r.addEventListener('click', e => { if (e.target === r) close(); });
 
-    // ── Escape ──
     if (escHandler) document.removeEventListener('keydown', escHandler);
     escHandler = e => { if (e.key === 'Escape') close(); };
     document.addEventListener('keydown', escHandler);
@@ -3876,6 +3877,8 @@ DI.register('NoteView', function (DB, NoteActions, I18n, Utils, bus) {
   function init() {
     ensureRoot();
     bus.on('note:open', p => { if (p && p.id) open(p.id); });
+    I18n.addDict('ru', { 'note.public.noedit': 'Публичные заметки нельзя редактировать' });
+    I18n.addDict('en', { 'note.public.noedit': 'Public notes cannot be edited' });
   }
 
   function destroy() { close(); }
