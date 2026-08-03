@@ -73,7 +73,7 @@ body.ready #app{display:flex}
 /* FEED — всегда видим */
 #feed-wrap{flex:1;position:relative;overflow:hidden;min-height:0}
 #feed{position:absolute;inset:0;overflow-y:auto;padding:10px 14px 12px;-webkit-overflow-scrolling:touch}
-.note{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:14px;margin-bottom:10px;cursor:pointer;transition:border-color .15s var(--ease),transform .15s var(--ease);animation:noteIn .25s var(--ease) both}
+.note{position:relative;background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:14px;margin-bottom:10px;cursor:pointer;transition:border-color .15s var(--ease),transform .15s var(--ease);animation:noteIn .25s var(--ease) both}
 .note:hover{border-color:var(--line-2)}.note.pinned{border-color:var(--amber);box-shadow:0 0 0 1px var(--amber-glow)}
 @keyframes noteIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
 .note-txt{font-size:15px;white-space:pre-wrap;word-break:break-word;margin-bottom:10px}
@@ -84,6 +84,11 @@ body.ready #app{display:flex}
 .note-sim{color:var(--amber);font-weight:600}.note-parent{color:var(--teal)}
 #feed-empty{position:absolute;inset:0;display:none;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:32px;color:var(--text-3)}
 #feed-empty.on{display:flex}#feed-empty .ic{font:700 30px var(--display);opacity:.5;margin-bottom:12px}
+
+/* HISTORY — кнопка загрузки истории сети */
+.hist-btn{align-self:center;margin:2px 0 10px;padding:8px 16px;border-radius:999px;background:var(--surface-2);border:1px solid var(--line);color:var(--text-2);font-size:12px;cursor:pointer;transition:all .15s var(--ease)}
+.hist-btn:hover{border-color:var(--amber);color:var(--text)}
+.hist-btn:disabled{opacity:.5;cursor:default}
 
 /* COMPOSER — всегда видим */
 #composer{margin:0 14px 12px;padding:10px 12px;background:var(--surface);border:1px solid var(--line);border-radius:var(--r);flex-shrink:0;transition:border-color .15s var(--ease)}
@@ -140,12 +145,6 @@ body.ready #app{display:flex}
 .prog-bar{height:4px;background:var(--surface-3);border-radius:2px;overflow:hidden;margin:14px 0 8px}.prog-fill{height:100%;width:0;background:var(--amber);transition:width .3s var(--ease)}
 #noteview{position:fixed;inset:0;background:var(--bg);z-index:900;display:none;flex-direction:column}#noteview.on{display:flex}
 
-@media (prefers-reduced-motion:reduce){*{animation-duration:.01ms!important;transition-duration:.01ms!important}}
-@media (max-width:480px){.logo{font-size:17px}#hdr-status .st .lbl{display:none}}
-
-/* карточка: контекст для кнопки ✎ */
-.note{position:relative}
-
 /* NOTEVIEW: раскладка и кнопки действий */
 .nv-f{display:flex;justify-content:center;gap:8px;padding:10px 14px;padding-top:calc(10px + var(--safe-top));background:var(--surface);border-bottom:1px solid var(--line);flex-wrap:wrap;flex-shrink:0}
 .nv-b{flex:1;display:flex;flex-direction:column;overflow:hidden;padding:16px;min-height:0}
@@ -154,6 +153,9 @@ body.ready #app{display:flex}
 .nv-act:active{background:var(--surface-2)}
 .nv-act.danger{color:var(--rose);border-color:var(--rose-glow)}
 .nv-act.danger:active{background:var(--rose-glow)}
+
+@media (prefers-reduced-motion:reduce){*{animation-duration:.01ms!important;transition-duration:.01ms!important}}
+@media (max-width:480px){.logo{font-size:17px}#hdr-status .st .lbl{display:none}}
 </style>
 </head>
 <body data-theme="dark">
@@ -189,6 +191,9 @@ body.ready #app{display:flex}
       <div id="feed"></div>
       <div id="feed-empty"><div class="ic">◇</div><div id="feed-empty-t"></div></div>
     </div>
+
+    <!-- История сети -->
+    <button id="btn-history" class="hist-btn">Загрузить ещё</button>
 
     <!-- Поле ввода (всегда) -->
     <div id="composer">
@@ -1892,14 +1897,13 @@ DI.register('Nostr', function (Config, Logger, bus) {
  * Оркестратор децентрализованного обмена.
  *
  *  - Подписка на комнату: заметки (kind 1), запросы (21000), ответы (21001).
- *  - Анонсирует открытые заметки пользователя (по 'note:created'/'note:shared');
- *    после успешного анонса сохраняет Nostr eventId заметки (нужен для связей
- *    «по мотивам» между разными людьми).
- *  - На чужой запрос: центроидный префильтр → ранжирование своих открытых → top-N ответов.
- *  - На пин шлёт запрос и собирает ответы в кеш (Feed подхватывает).
+ *  - Анонсирует открытые заметки пользователя; после анонса сохраняет eventId.
+ *  - На чужой запрос: префильтр → ранжирование → top-N ответов.
+ *  - На пин шлёт запрос и собирает ответы в кеш.
+ *  - loadHistory: расширяет окно подписки, чтобы подтянуть старые заметки с рэлеев.
  *
  * Дедупликация: seen по ev.id + contentSeen по (автор+текст).
- * Нагрузочная устойчивость: rate-limit ответов пиру, префильтр, лимит ответов,
+ * Нагрузочная устойчивость: rate-limit ответов, префильтр, лимит ответов,
  * ступенчатая отправка, переподключение.
  *
  * @deps Nostr, Protocol, DB, Ranker, Vec, Store, Config, Logger, EventBus
@@ -1919,6 +1923,10 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   const peers = new Map();
   const peerQueryTimes = new Map();
 
+  // окно подписки и история
+  let currentWindow = Config.get('subWindow', 300);
+  let historyLoading = false;
+
   const kNote = () => Config.get('kNote', 1);
   const kQuery = () => Config.get('kQuery', 21000);
   const kAnswer = () => Config.get('kAnswer', 21001);
@@ -1926,6 +1934,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
 
   function setStatus(s) { try { bus.emit('net:status', { status: s }); } catch (_) {} }
   function notifyPeers() { try { bus.emit('net:peers', { count: peers.size }); } catch (_) {} }
+  function emitHistory(loading, windowSec) { try { bus.emit('net:history', { loading: loading, window: windowSec }); } catch (_) {} }
 
   function trimSeen() {
     const max = Config.get('seenMaxSize', 1000);
@@ -1935,11 +1944,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     for (let i = arr.length - Math.floor(max / 2); i < arr.length; i++) seen.add(arr[i]);
   }
 
-  /**
-   * Контентная дедупликация: тот же автор + тот же текст уже встречались?
-   * @param {string} pubkey @param {string} text
-   * @returns {boolean}
-   */
   function isContentDuplicate(pubkey, text) {
     const key = pubkey + '::' + String(text || '').trim();
     if (contentSeen.has(key)) return true;
@@ -2036,12 +2040,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   }
 
   // ── анонс наших открытых заметок ──
-  /**
-   * Публикует заметку в комнату и сохраняет её Nostr eventId.
-   * eventId нужен, чтобы чужие «потомки» могли сослаться на эту заметку
-   * и резонанс сошёлся у автора.
-   * @param {Object} note
-   */
   function announceNote(note) {
     if (!note || !note.shared || !note.vector) return;
     Nostr.publish(Protocol.noteEvent(note, room()))
@@ -2051,7 +2049,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
           DB.get(note.id).then(cur => {
             if (cur && cur.eventId !== ev.id) {
               cur.eventId = ev.id;
-              DB.put(cur);   // тихо сохраняем eventId (db:change обновит ленту)
+              DB.put(cur);
             }
           });
         }
@@ -2062,7 +2060,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   // ── запрос при пине ──
   function maybeSendQuery() {
     const ctx = Store.get('context');
-    if (ctx.source !== 'pin' || !ctx.vector) { lastQueryVec = null; return; }
+    if ((ctx.source !== 'pin' && ctx.source !== 'drift') || !ctx.vector) { lastQueryVec = null; return; }
     const now = Date.now();
     if (now - lastQueryTime < Config.get('queryRateLimit', 3000)) return;
     if (lastQueryVec && Ranker.isSimilar(lastQueryVec, ctx.vector)) return;
@@ -2079,7 +2077,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
 
   // ── подписка на комнату ──
   function subscribeToRoom() {
-    const since = Math.floor(Date.now() / 1000) - Config.get('subWindow', 300);
+    const since = Math.floor(Date.now() / 1000) - currentWindow;
     const filters = [{ kinds: [kNote(), kQuery(), kAnswer()], '#t': [room()], since }];
     if (subscription && typeof subscription.close === 'function') { try { subscription.close(); } catch (_) {} }
     subscription = Nostr.subscribe(filters, {
@@ -2089,6 +2087,25 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
         setTimeout(() => { if (started) subscribeToRoom(); }, Config.get('reconnectBaseDelay', 1000));
       },
     });
+  }
+
+  /**
+   * Расширяет окно подписки, чтобы подтянуть старые заметки с рэлеев.
+   * Каждый вызов увеличивает окно (×4), вплоть до historyMaxWindow.
+   */
+  function loadHistory() {
+    if (!started || historyLoading) return;
+    const maxWindow = Config.get('historyMaxWindow', 2592000); // 30 дней по умолчанию
+    if (currentWindow >= maxWindow) { emitHistory(false, currentWindow); return; }
+    historyLoading = true;
+    emitHistory(true, currentWindow);
+    currentWindow = Math.min(maxWindow, Math.max(currentWindow * 4, 86400));
+    try {
+      subscribeToRoom();
+      Logger.info('NetService: окно истории → ' + currentWindow + 's');
+    } finally {
+      setTimeout(() => { historyLoading = false; emitHistory(false, currentWindow); }, 1200);
+    }
   }
 
   // ── heartbeat ──
@@ -2136,7 +2153,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     setStatus('disconnected');
   }
 
-  return { start, stop };
+  return { start, stop, loadHistory };
 }, ['Nostr', 'Protocol', 'DB', 'Ranker', 'Vec', 'Store', 'Config', 'Logger', 'EventBus']);
 // ─── МОДУЛЬ 13: NET/NetService ─── END ───────────────────────
 
@@ -3110,18 +3127,17 @@ DI.register('Composer', function (Context, Notes, DB, Store, I18n, bus, Toast, U
 // ─── МОДУЛЬ 25: UI/FeedView ─── START ────────────────────────
 /**
  * Рендер ленты и хром режимов.
- *  - просмотр (нет контекста): хронология из Store.feed, хром скрыт.
- *  - input (ввод без пина): бар сегментов, лента = Store.lists[seg].
- *  - drift (пин + ввод): бар сегментов + баннер-якорь; лента следует за вводом.
- *  - pin: баннер, единый список похожего (закреплённая исключена).
- * Жесты: клик по карточке = пин/отпин; карандаш на своих = открыть NoteView;
- * клик по «↳ по мотивам» = открыть заметку-источник; клик по «◆ N» = потомки.
- * @deps Store, Context, I18n, Utils, EventBus, Influence, Provenance, Modal
+ *  - просмотр: хронология Store.feed; бар скрыт.
+ *  - input / drift (режим автора): бар виден, лента = Store.lists[seg].
+ *  - pin: баннер, единый список похожего.
+ * Жесты: клик по карточке = пин/отпин; ✎ на своих = NoteView;
+ * «↳ по мотивам» = источник; «◆ N» = потомки; «Загрузить ещё» = история сети.
+ * @deps Store, Context, I18n, Utils, EventBus, Influence, Provenance, Modal, NetService
  * @exports FeedView
  */
-DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, Provenance, Modal) {
+DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, Provenance, Modal, NetService) {
   let feedEl, emptyEl, emptyT, segBar, ctxBanner, ctxSrc, ctxTxt, ctxX;
-  let cLocal, cWorld, cSeren;
+  let cLocal, cWorld, cSeren, histBtn;
   let unsubs = [];
   let rafPending = false;
 
@@ -3137,6 +3153,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, P
     cLocal = document.getElementById('c-local');
     cWorld = document.getElementById('c-world');
     cSeren = document.getElementById('c-seren');
+    histBtn = document.getElementById('btn-history');
   }
 
   function scheduleRender() {
@@ -3150,14 +3167,12 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, P
     return ctx.source === 'pin' && ctx.noteId === n.id;
   }
 
-  /** Клик по карточке: пин, повторный по закреплённой — снять. @param {Object} n */
   function onNoteClick(n) {
     const ctx = Store.get('context');
     if ((ctx.source === 'pin' || ctx.source === 'drift') && ctx.noteId === n.id) { Context.clearPin(); return; }
     if (n.vector) Context.setPin(n);
   }
 
-  /** Модалка со списком потомков заметки. @param {Object[]} children */
   function renderChildrenModal(children) {
     const body = document.createElement('div');
     body.style.cssText = 'display:flex;flex-direction:column;gap:8px;';
@@ -3186,7 +3201,6 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, P
     });
   }
 
-  /** Собирает потомков (по id и eventId) и открывает модалку. @param {Object} note */
   function showChildren(note) {
     const ids = [note.id];
     if (note.eventId) ids.push(note.eventId);
@@ -3200,7 +3214,6 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, P
     }).catch(() => {});
   }
 
-  /** Карточка заметки. @param {Object} n @param {boolean} isRanked @param {number} i */
   function card(n, isRanked, i) {
     const el = document.createElement('div');
     el.className = 'note' + (isPinned(n) ? ' pinned' : '');
@@ -3225,7 +3238,6 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, P
     }
     meta.appendChild(tag);
 
-    // связь «по мотивам»: клик открывает заметку-источник
     if (n.parentId) {
       const link = document.createElement('button');
       link.className = 'note-parent';
@@ -3246,7 +3258,6 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, P
       meta.appendChild(sim);
     }
 
-    // резонанс: клик показывает потомков
     const res = Influence.resonance(n.id) || Influence.resonance(n.eventId);
     if (res > 0) {
       const r = document.createElement('button');
@@ -3267,7 +3278,6 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, P
 
     el.appendChild(meta);
 
-    // карандаш на своих: открыть NoteView
     if (n.own) {
       const openBtn = document.createElement('button');
       openBtn.className = 'na';
@@ -3281,9 +3291,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, P
       el.appendChild(openBtn);
     }
 
-    // клик по карточке — пин
     el.addEventListener('click', () => onNoteClick(n));
-
     return el;
   }
 
@@ -3296,7 +3304,6 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, P
     const isDrift = ctx.source === 'drift';
     const isRanked = isPinnedMode || isTyping || isDrift;
 
-    // хром: сегменты — при вводе/дрейфе; баннер-якорь — при пине/дрейфе
     segBar.classList.toggle('on', isTyping || isDrift);
     ctxBanner.classList.toggle('on', isPinnedMode || isDrift);
     if (isPinnedMode || isDrift) {
@@ -3345,6 +3352,20 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, P
     unsubs.push(bus.on('i18n:change', scheduleRender));
     unsubs.push(bus.on('db:change', scheduleRender));
     unsubs.push(bus.on('db:cache', scheduleRender));
+    // история сети
+    if (histBtn) {
+      histBtn.addEventListener('click', () => NetService.loadHistory());
+      unsubs.push(bus.on('net:history', e => {
+        if (!histBtn) return;
+        if (e && e.loading) {
+          histBtn.disabled = true;
+          histBtn.textContent = I18n.t('net.loading');
+        } else {
+          histBtn.disabled = false;
+          histBtn.textContent = I18n.t('net.loadmore');
+        }
+      }));
+    }
     document.querySelectorAll('.seg-b').forEach(b =>
       b.addEventListener('click', () => Store.setState({ seg: b.getAttribute('data-k') })));
     if (ctxX) ctxX.addEventListener('click', () => Context.clearPin());
@@ -3357,7 +3378,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, P
   }
 
   return { init, destroy, render };
-}, ['Store', 'Context', 'I18n', 'Utils', 'EventBus', 'Influence', 'Provenance', 'Modal']);
+}, ['Store', 'Context', 'I18n', 'Utils', 'EventBus', 'Influence', 'Provenance', 'Modal', 'NetService']);
 // ─── МОДУЛЬ 25: UI/FeedView ─── END ──────────────────────────
 
 // ─── МОДУЛЬ 26: UI/BaseView ─── START ────────────────────────
@@ -3823,7 +3844,7 @@ DI.register('Hotkeys', function (Context, Modal) {
  */
 // ─── МОДУЛЬ 31: BOOT ─── END ─────────────────────────────────
 
-// ─── ВРЕМЕННЫЙ BOOT (онбординг + справка + хоткеи) ─── START
+// ─── ВРЕМЕННЫЙ BOOT (история сети) ─── START
 (function tempBoot() {
   document.body.classList.add('ready');
   const I18n = DI.resolve('I18n');
@@ -3840,6 +3861,8 @@ DI.register('Hotkeys', function (Context, Modal) {
     'inf.children': 'Потомки',
     'inf.nochildren': 'Потомков пока нет',
     'ctx.drift': 'дрейф от',
+    'net.loadmore': 'Загрузить ещё',
+    'net.loading': 'Загружаю…',
     'onb.title': 'Как это работает',
     'onb.dontshow': 'Больше не показывать',
     'onb.gotit': 'Понятно',
@@ -3871,6 +3894,8 @@ DI.register('Hotkeys', function (Context, Modal) {
     'inf.children': 'Descendants',
     'inf.nochildren': 'No descendants yet',
     'ctx.drift': 'drift from',
+    'net.loadmore': 'Load more',
+    'net.loading': 'Loading…',
     'onb.title': 'How it works',
     'onb.dontshow': "Don't show again",
     'onb.gotit': 'Got it',
@@ -3919,7 +3944,7 @@ DI.register('Hotkeys', function (Context, Modal) {
   BaseView.init();
   MenuView.init();
   Hotkeys.init();
-  Onboarding.init();   // последним: показывает гайд первого запуска поверх всего
+  Onboarding.init();
 
   EventBus.on('wipe:request', () => {
     DB.reset().then(() => {
@@ -3931,7 +3956,7 @@ DI.register('Hotkeys', function (Context, Modal) {
   Embedder.load();
   NetService.start();
 
-  console.info('[NOOmium] онбординг + справка + хоткеи');
+  console.info('[NOOmium] история сети: «Загрузить ещё»');
 })();
 // ─── ВРЕМЕННЫЙ BOOT ─── END
 
