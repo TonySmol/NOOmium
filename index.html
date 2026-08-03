@@ -2611,6 +2611,96 @@ DI.register('Influence', function (DB, bus, Logger) {
 
 // ═══════════════════ UI ═══════════════════
 
+// ─── МОДУЛЬ: UI/Onboarding ─── START ─────────────────────────
+/**
+ * Онбординг и справка «Как это работает».
+ *  - init(): при первом запуске (Config.onboarded=false) показывает гайд.
+ *  - showHelp(): открывает гайд из меню; чекбокс «больше не показывать»
+ *    доступен только в онбординге первого запуска.
+ * @deps Config, Modal, I18n
+ * @exports Onboarding
+ */
+DI.register('Onboarding', function (Config, Modal, I18n) {
+  /**
+   * Собирает тело гайда из секций.
+   * @param {boolean} firstRun - онбординг первого запуска (показывает чекбокс).
+   * @returns {{el:HTMLElement, checkbox:HTMLInputElement|null}}
+   */
+  function buildBody(firstRun) {
+    const el = document.createElement('div');
+    el.style.cssText = 'display:flex;flex-direction:column;gap:14px;';
+
+    const sections = [
+      ['◇ ' + I18n.t('onb.what.t'), I18n.t('onb.what.d')],
+      ['▤ ' + I18n.t('onb.stream.t'), I18n.t('onb.stream.d')],
+      ['◈ ' + I18n.t('onb.pin.t'), I18n.t('onb.pin.d')],
+      ['∿ ' + I18n.t('onb.drift.t'), I18n.t('onb.drift.d')],
+      ['⌘ ' + I18n.t('onb.modes.t'), I18n.t('onb.modes.d')],
+      ['◆ ' + I18n.t('onb.resonance.t'), I18n.t('onb.resonance.d')],
+      ['⌨ ' + I18n.t('onb.keys.t'), I18n.t('onb.keys.d')],
+    ];
+
+    sections.forEach(([title, desc]) => {
+      const s = document.createElement('div');
+      const t = document.createElement('div');
+      t.style.cssText = 'font-weight:700;font-size:13px;margin-bottom:3px;';
+      t.textContent = title;
+      const d = document.createElement('div');
+      d.style.cssText = 'font-size:13px;color:var(--text-2);line-height:1.5;';
+      d.textContent = desc;
+      s.appendChild(t);
+      s.appendChild(d);
+      el.appendChild(s);
+    });
+
+    let checkbox = null;
+    if (firstRun) {
+      const label = document.createElement('label');
+      label.style.cssText = 'display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text-2);cursor:pointer;margin-top:4px;';
+      checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      label.appendChild(checkbox);
+      const span = document.createElement('span');
+      span.textContent = I18n.t('onb.dontshow');
+      label.appendChild(span);
+      el.appendChild(label);
+    }
+
+    return { el, checkbox };
+  }
+
+  /**
+   * Открывает гайд.
+   * @param {boolean} firstRun - первый запуск (чекбокс + авто-флаг onboarded).
+   */
+  function showHelp(firstRun) {
+    const { el, checkbox } = buildBody(!!firstRun);
+    Modal.open({
+      title: I18n.t('onb.title'),
+      body: el,
+      buttons: [{
+        text: I18n.t('onb.gotit'),
+        primary: true,
+        onClick: () => {
+          if (firstRun && checkbox && checkbox.checked) {
+            Config.set('onboarded', true);
+          }
+          Modal.close();
+        },
+      }],
+    });
+  }
+
+  /** Первый запуск: показать гайд, если ещё не проходили. */
+  function init() {
+    if (Config.get('onboarded', false)) return;
+    showHelp(true);
+  }
+
+  return { init, showHelp };
+}, ['Config', 'Modal', 'I18n']);
+// ─── МОДУЛЬ: UI/Onboarding ─── END ───────────────────────────
+
 // ─── МОДУЛЬ 20: UI/Modal ─── START ───────────────────────────
 /**
  * Модальное окно на готовой разметке (#overlay > #modal: #modal-h/-t/-x/-b/-f).
@@ -3536,14 +3626,13 @@ DI.register('NoteView', function (DB, Notes, NoteActions, Modal, Toast, I18n, Ut
 // ─── МОДУЛЬ 28: UI/MenuView ─── START ────────────────────────
 /**
  * Меню (кнопка #btn-menu) и переключение экранов Поток/База.
- *  - Модалка настроек: тема, язык, стереть данные.
- *  - setView показывает/прячет элементы потока и панель #base
- *    под реальную разметку (#main с детьми, #base).
+ *  - Модалка настроек: справка, тема, язык, навигация, стереть данные.
+ *  - setView показывает/прячет элементы потока и панель #base.
  * Тема применяется через data-theme на body.
- * @deps Store, Config, Modal, Toast, I18n, EventBus
+ * @deps Store, Config, Modal, Toast, I18n, EventBus, Onboarding
  * @exports MenuView
  */
-DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus) {
+DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboarding) {
   let unsubs = [];
 
   /** Применяет тему к DOM и сохраняет. @param {'dark'|'light'} theme */
@@ -3579,6 +3668,14 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus) {
     const body = document.createElement('div');
     body.style.cssText = 'display:flex;flex-direction:column;gap:12px;';
 
+    // справка
+    const helpBtn = document.createElement('button');
+    helpBtn.className = 'nv-act';
+    helpBtn.textContent = '? ' + I18n.t('menu.help');
+    helpBtn.addEventListener('click', () => { Modal.close(); Onboarding.showHelp(false); });
+    body.appendChild(helpBtn);
+
+    // тема
     const themeBtn = document.createElement('button');
     themeBtn.className = 'nv-act';
     themeBtn.textContent = I18n.t('menu.theme') + ': ' + (Config.get('theme', 'dark') === 'dark' ? '🌙' : '☀️');
@@ -3590,6 +3687,7 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus) {
     });
     body.appendChild(themeBtn);
 
+    // язык
     const langBtn = document.createElement('button');
     langBtn.className = 'nv-act';
     langBtn.textContent = I18n.t('menu.lang') + ': ' + I18n.getLang().toUpperCase();
@@ -3600,6 +3698,7 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus) {
     });
     body.appendChild(langBtn);
 
+    // навигация
     const goBase = document.createElement('button');
     goBase.className = 'nv-act';
     goBase.textContent = I18n.t('tab.base');
@@ -3612,6 +3711,7 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus) {
     goStream.addEventListener('click', () => { Modal.close(); setView('stream'); });
     body.appendChild(goStream);
 
+    // danger
     const wipe = document.createElement('button');
     wipe.className = 'nv-act danger';
     wipe.textContent = I18n.t('base.wipe');
@@ -3650,7 +3750,7 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus) {
   }
 
   return { init, destroy, setView, openMenu };
-}, ['Store', 'Config', 'Modal', 'Toast', 'I18n', 'EventBus']);
+}, ['Store', 'Config', 'Modal', 'Toast', 'I18n', 'EventBus', 'Onboarding']);
 // ─── МОДУЛЬ 28: UI/MenuView ─── END ──────────────────────────
 
 // ═══════════════════ AUTH ═══════════════════
@@ -3667,7 +3767,49 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus) {
 // ═══════════════════ INPUT ═══════════════════
 
 // ─── МОДУЛЬ 30: INPUT/Hotkeys ─── START ──────────────────────
-/** '/', Escape, Ctrl+Enter. Один обработчик, сохраняется для cleanup. @exports Hotkeys */
+/**
+ * Глобальные горячие клавиши:
+ *  - Escape: сначала закрывает открытую модалку; иначе снимает пин.
+ *  - '/': фокус на поле ввода (если не печатаешь уже).
+ *  - Ctrl/Cmd+Enter обрабатывает сам Composer.
+ * @deps Context, Modal
+ * @exports Hotkeys
+ */
+DI.register('Hotkeys', function (Context, Modal) {
+  let handler = null;
+
+  function init() {
+    if (handler) return;
+    handler = function (e) {
+      if (e.key === 'Escape') {
+        const overlay = document.getElementById('overlay');
+        if (overlay && overlay.classList.contains('on')) {
+          Modal.close();          // модалка важнее
+          e.stopPropagation();
+          return;
+        }
+        Context.clearPin();
+        return;
+      }
+      if (e.key === '/') {
+        const target = e.target;
+        const typing = target && (target.tagName === 'TEXTAREA' || target.tagName === 'INPUT');
+        if (!typing) {
+          const ta = document.getElementById('ed-ta');
+          if (ta) { e.preventDefault(); ta.focus(); }
+        }
+      }
+    };
+    // capture: перехватываем Escape до FeedView/NoteView
+    document.addEventListener('keydown', handler, true);
+  }
+
+  function destroy() {
+    if (handler) { document.removeEventListener('keydown', handler, true); handler = null; }
+  }
+
+  return { init, destroy };
+}, ['Context', 'Modal']);
 // ─── МОДУЛЬ 30: INPUT/Hotkeys ─── END ────────────────────────
 
 // ═══════════════════ BOOT ═══════════════════
@@ -3681,7 +3823,7 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus) {
  */
 // ─── МОДУЛЬ 31: BOOT ─── END ─────────────────────────────────
 
-// ─── ВРЕМЕННЫЙ BOOT (дрейф + навигация по связям) ─── START
+// ─── ВРЕМЕННЫЙ BOOT (онбординг + справка + хоткеи) ─── START
 (function tempBoot() {
   document.body.classList.add('ready');
   const I18n = DI.resolve('I18n');
@@ -3698,6 +3840,23 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus) {
     'inf.children': 'Потомки',
     'inf.nochildren': 'Потомков пока нет',
     'ctx.drift': 'дрейф от',
+    'onb.title': 'Как это работает',
+    'onb.dontshow': 'Больше не показывать',
+    'onb.gotit': 'Понятно',
+    'onb.what.t': 'NOOmium',
+    'onb.what.d': 'Соцсеть смыслов: мысли ищутся не по словам и не по лайкам, а по значению. Каждая мысль превращается в вектор — точку в пространстве смыслов.',
+    'onb.stream.t': 'Лента',
+    'onb.stream.d': 'Показывает свежие мысли — твои и из сети. Просто читай.',
+    'onb.pin.t': 'Пин',
+    'onb.pin.d': 'Кликни по мысли — она станет контекстом: лента покажет созвучное из твоей базы и из сети. Закреплённая мысль становится «мамой» для всего, что ты напишешь следом.',
+    'onb.drift.t': 'Дрейф',
+    'onb.drift.d': 'Начни печатать при пине — контекст плавно перейдёт к твоему тексту. Так можно органично уйти от исходной мысли к своей.',
+    'onb.modes.t': 'Личное и Мир',
+    'onb.modes.d': 'Личное остаётся только у тебя. Мир — делится мыслью с сетью, и другие смогут найти её по смыслу.',
+    'onb.resonance.t': 'Резонанс ◆',
+    'onb.resonance.d': 'Сколько чужих мыслей родила твоя. «↳ по мотивам» ведёт к заметке-источнику, клик по ◆ показывает потомков.',
+    'onb.keys.t': 'Клавиши',
+    'onb.keys.d': 'Ctrl/Cmd+Enter — отправить · / — фокус на поле · Esc — снять пин или закрыть окно.',
   });
   I18n.addDict('en', {
     'del.confirm': 'Delete this note forever?',
@@ -3712,6 +3871,23 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus) {
     'inf.children': 'Descendants',
     'inf.nochildren': 'No descendants yet',
     'ctx.drift': 'drift from',
+    'onb.title': 'How it works',
+    'onb.dontshow': "Don't show again",
+    'onb.gotit': 'Got it',
+    'onb.what.t': 'NOOmium',
+    'onb.what.d': 'A social network of meaning: thoughts are found not by words or likes, but by sense. Each thought becomes a vector — a point in meaning-space.',
+    'onb.stream.t': 'Feed',
+    'onb.stream.d': 'Shows fresh thoughts — yours and from the network. Just read.',
+    'onb.pin.t': 'Pin',
+    'onb.pin.d': 'Click a thought to make it the context: the feed shows what resonates, from your base and the network. The pinned thought becomes the "mother" of what you write next.',
+    'onb.drift.t': 'Drift',
+    'onb.drift.d': 'Start typing while pinned — the context shifts toward your text. A natural way to drift from the original thought to your own.',
+    'onb.modes.t': 'Private & World',
+    'onb.modes.d': 'Private stays with you. World shares the thought with the network so others can find it by meaning.',
+    'onb.resonance.t': 'Resonance ◆',
+    'onb.resonance.d': 'How many thoughts yours inspired. "↳ inspired by" leads to the source note; click ◆ to see descendants.',
+    'onb.keys.t': 'Keys',
+    'onb.keys.d': 'Ctrl/Cmd+Enter — send · / — focus editor · Esc — unpin or close.',
   });
 
   const Progress = DI.resolve('Progress');
@@ -3725,7 +3901,9 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus) {
   const NoteActions = DI.resolve('NoteActions');
   const BaseView = DI.resolve('BaseView');
   const NoteView = DI.resolve('NoteView');
+  const Onboarding = DI.resolve('Onboarding');
   const MenuView = DI.resolve('MenuView');
+  const Hotkeys = DI.resolve('Hotkeys');
   const Store = DI.resolve('Store');
   const EventBus = DI.resolve('EventBus');
   const DB = DI.resolve('DB');
@@ -3740,6 +3918,8 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus) {
   NoteView.init();
   BaseView.init();
   MenuView.init();
+  Hotkeys.init();
+  Onboarding.init();   // последним: показывает гайд первого запуска поверх всего
 
   EventBus.on('wipe:request', () => {
     DB.reset().then(() => {
@@ -3751,7 +3931,7 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus) {
   Embedder.load();
   NetService.start();
 
-  console.info('[NOOmium] дрейф от пина + навигация по связям');
+  console.info('[NOOmium] онбординг + справка + хоткеи');
 })();
 // ─── ВРЕМЕННЫЙ BOOT ─── END
 
