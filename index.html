@@ -166,7 +166,12 @@ input, textarea, select {
 ::-webkit-scrollbar-track { background: transparent; }
 
 /* Фокус-стили для accessibility */
+/* Убираем outline для input/textarea, оставляем для кнопок */
 :focus-visible {
+  outline: none;
+}
+
+button:focus-visible {
   outline: 2px solid var(--amber);
   outline-offset: 2px;
   border-radius: var(--r-xs);
@@ -478,7 +483,7 @@ body.ready #app {
 
 .note.pinned {
   border-color: var(--amber);
-  box-shadow: 0 0 0 1px var(--amber-glow), var(--shadow-sm);
+  box-shadow: var(--shadow-sm);
 }
 
 @keyframes noteIn {
@@ -611,7 +616,6 @@ body.ready #app {
 
 #composer:focus-within {
   border-color: var(--amber);
-  box-shadow: 0 0 0 3px var(--amber-glow);
 }
 
 #ed-ta {
@@ -622,6 +626,9 @@ body.ready #app {
   font: 15px / 1.55 var(--font);
   color: var(--text);
   letter-spacing: -0.005em;
+  border: none;
+  outline: none;
+  background: transparent;
 }
 
 #ed-ta::placeholder {
@@ -723,12 +730,13 @@ body.ready #app {
 #btn-send {
   height: 34px;
   min-width: 40px;
-  padding: 0 14px;
+  padding: 0 16px;
   border-radius: 999px;
   background: var(--amber);
   color: #1a1206;
   font-weight: 600;
-  font-size: 15px;
+  font-size: 16px;
+  line-height: 1;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -819,7 +827,6 @@ body.ready #app {
 
 #base-q:focus {
   border-color: var(--amber);
-  box-shadow: 0 0 0 3px var(--amber-glow);
 }
 
 #base-q::placeholder {
@@ -850,7 +857,6 @@ body.ready #app {
 
 #base-sort:focus {
   border-color: var(--amber);
-  box-shadow: 0 0 0 3px var(--amber-glow);
 }
 
 #base-list {
@@ -1240,7 +1246,6 @@ body.ready #app {
 
 .nv-text-edit:focus {
   border-color: var(--amber);
-  box-shadow: 0 0 0 3px var(--amber-glow);
 }
 
 .nv-text-edit:disabled {
@@ -1294,14 +1299,19 @@ body.ready #app {
     font-size: 17px;
   }
   
-  #hdr-status .st .lbl {
-    display: none;
-  }
-  
   #hdr {
     gap: 8px;
     padding: 10px 12px;
     padding-top: calc(10px + var(--safe-top));
+  }
+  
+  #hdr-status {
+    gap: 8px;
+  }
+  
+  .st {
+    gap: 4px;
+    font-size: 10px;
   }
   
   #feed {
@@ -1480,7 +1490,7 @@ body.ready #app {
 // ═══════════════════════════════════════════════════════════════════════════════
 // ВЕРСИЯ ПРИЛОЖЕНИЯ
 // ═══════════════════════════════════════════════════════════════════════════════
-const APP_VERSION = '0.3.0';
+const APP_VERSION = '0.3.1';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CORE/DI - ПРЕАМБУЛА
