@@ -230,7 +230,7 @@ body.ready #app{display:flex}
 // ВЕРСИЯ ПРИЛОЖЕНИЯ
 // Поднимается при каждом релизе. Отображается в меню (MenuView).
 // ═══════════════════════════════════════════════════════════════
-const APP_VERSION = '0.2.3';
+const APP_VERSION = '0.2.5';
 
 // ═══════════════════════════════════════════════════════════════
 // CORE/DI — ПРЕАМБУЛА (не модуль). Выполняется первой.
@@ -699,49 +699,21 @@ DI.register('Utils', function () {
 // ─── CORE/Utils ─── END ──────────────────────────────────────
 
 // ─── CORE/I18n ─── START ─────────────────────────────────────
-/**
- * Интернационализация: словари ru/en, подстановка {param}, fallback-цепочка
- * «текущий язык → en → fallback → сам ключ». Язык автодетектится, персистится
- * в Config, смена транслируется через шину ('i18n:change') и onChange-колбэки.
- *
- * Все ключи приложения собраны здесь единым словарём — разбрасывать addDict
- * по модулям не нужно (он оставлен на случай расширений).
- *
- * @deps Config, EventBus
- * @exports I18n
- */
 DI.register('I18n', function (Config, bus) {
-  /** Словари по языкам. @type {Object<string, Object<string,string>>} */
   const dicts = Object.create(null);
-  /** onChange-подписчики. @type {Function[]} */
   const listeners = [];
-  /** Текущий язык. @type {'ru'|'en'} */
   let current = 'ru';
 
-  // Автодетект: сохранённый → язык браузера → ru.
   const saved = Config.get('lang', null);
   if (saved === 'ru' || saved === 'en') current = saved;
   else current = (navigator.language || 'ru').toLowerCase().indexOf('ru') === 0 ? 'ru' : 'en';
 
-  /**
-   * Подставляет {param} из объекта.
-   * @param {string} str
-   * @param {Object<string,*>} [params]
-   * @returns {string}
-   */
   function format(str, params) {
     const s = String(str == null ? '' : str);
     if (!params) return s;
     return s.replace(/\{(\w+)\}/g, (m, k) => (params[k] != null ? String(params[k]) : m));
   }
 
-  /**
-   * Перевод по ключу.
-   * @param {string} key
-   * @param {Object<string,*>} [params] - Подстановки {p}.
-   * @param {string} [fallback] - Если ключа нет ни в одном словаре.
-   * @returns {string}
-   */
   function t(key, params, fallback) {
     const d = dicts[current] || {};
     let val = Object.prototype.hasOwnProperty.call(d, key) ? d[key] : undefined;
@@ -752,17 +724,8 @@ DI.register('I18n', function (Config, bus) {
     return format(val !== undefined ? val : (fallback !== undefined ? fallback : key), params);
   }
 
-  /**
-   * Добавляет/дополняет словарь языка (для расширений).
-   * @param {'ru'|'en'} lang
-   * @param {Object<string,string>} dict
-   */
   function addDict(lang, dict) { dicts[lang] = Object.assign(dicts[lang] || {}, dict || {}); }
 
-  /**
-   * Переключает язык, сохраняет и уведомляет (шина + onChange).
-   * @param {'ru'|'en'} lang
-   */
   function setLang(lang) {
     if (lang !== 'ru' && lang !== 'en') return;
     current = lang;
@@ -771,63 +734,50 @@ DI.register('I18n', function (Config, bus) {
     try { bus.emit('i18n:change', { lang: current }); } catch (_) {}
   }
 
-  /** @returns {'ru'|'en'} Текущий язык. */
   const getLang = () => current;
-
-  /**
-   * Подписка на смену языка.
-   * @param {Function} fn - (lang) => void.
-   */
   function onChange(fn) { if (typeof fn === 'function') listeners.push(fn); }
 
-  // ── Базовые словари: все ключи приложения ──
   addDict('ru', {
     'app.name': 'NOOmium',
-    // статусы
     'st.net': 'сеть', 'st.ai.loading': 'модель', 'st.ai.ready': 'ии', 'st.ai.demo': 'ии/хеш',
     'st.net.online': 'онлайн', 'st.net.listen': 'слушаю', 'st.net.connecting': 'соединение',
     'st.net.reconnecting': 'пересоединение', 'st.net.failed': 'нет сети',
-    // композер
     'ed.placeholder': 'О чём думаешь?', 'ed.chars': 'симв.',
     'btn.private': 'Личное', 'btn.public': 'Мир', 'btn.send': 'Отправить', 'btn.save': 'Сохранить',
-    // вкладки и сегменты
     'tab.stream': 'Поток', 'tab.base': 'База',
     'seg.local': 'Моё', 'seg.world': 'Мир', 'seg.seren': 'Озарения',
-    // контекст
     'ctx.pinned': 'пин', 'ctx.input': 'по тексту', 'ctx.drift': 'дрейф от', 'ctx.clear': 'снять',
-    // сходство и связи
     'sim.score': 'похожа на',
     'inf.resonance': 'резонанс', 'inf.linked': 'по мотивам', 'inf.bymotif': 'по мотивам',
     'inf.openparent': 'Открыть заметку-источник', 'inf.children': 'Потомки',
     'inf.nochildren': 'Потомков пока нет', 'inf.lineage': 'Линейка «по мотивам»',
     'inf.noancestors': 'Это корень — предков нет',
-    // пустые состояния
+    'inf.orphan': 'родитель удалён', 'inf.orphan.hint': 'Родитель этой заметки был удалён',
     'empty.local.t': 'Пока нет мыслей', 'empty.local.d': 'Напиши первую выше',
     'empty.world.t': 'Никто не думает так же', 'empty.world.d': 'Ждём открытые мысли',
     'empty.seren.t': 'Озарений нет', 'empty.seren.d': 'Попробуй иначе',
     'empty.base.t': 'База пуста', 'empty.base.d': 'Запиши первую мысль', 'empty.base.empty': 'Ничего не найдено',
-    // база
     'base.search': 'поиск...',
     'base.sort.new': 'новые', 'base.sort.old': 'старые', 'base.sort.az': 'а-я',
     'base.stat.total': 'всего', 'base.stat.open': 'открыто', 'base.stat.priv': 'лично',
     'base.tag.private': 'лично', 'base.tag.shared': 'открыто',
     'base.wipe': 'Стереть базу', 'base.wipe.confirm': 'Удалить все ваши заметки навсегда?',
-    // кнопки
     'btn.edit': 'Развить', 'btn.del': 'Удалить', 'btn.copy': 'Копия',
     'btn.cancel': 'Отмена', 'btn.close': 'Закрыть',
     'btn.toggle.priv': 'Скрыть', 'btn.toggle.pub': 'Открыть',
-    // тосты
+    'btn.send.aria': 'Отправить', 'btn.menu.aria': 'Меню', 'btn.base.aria': 'Моя база',
+    'btn.ctx.clear.aria': 'Снять контекст',
     'toast.saved.private': 'сохранено лично', 'toast.saved.public': 'опубликовано',
     'toast.copied': 'скопировано', 'toast.deleted': 'удалено', 'toast.copy.fail': 'не удалось',
     'toast.empty': 'напиши что-нибудь', 'toast.ai.notready': 'ии не готов',
     'toast.base.wiped': 'база очищена', 'toast.edit.saved': 'сохранено',
-    // меню
     'menu.settings': 'Настройки', 'menu.theme': 'Тема', 'menu.lang': 'Язык', 'menu.help': 'Как это работает',
-    // удаление
+    'menu.fullreset': 'Полный сброс',
+    'menu.fullreset.confirm': 'Удалить ВСЕ данные из браузера (заметки, кэш, модель) и перезагрузить? Это как первый запуск.',
+    'menu.fullreset.done': 'перезагрузка через 1.5 сек...',
     'del.confirm': 'Удалить эту заметку навсегда?',
-    // сеть
     'net.loadmore': 'Загрузить ещё', 'net.loading': 'Загружаю…',
-    // онбординг
+    'note.public.noedit': 'Публичные заметки нельзя редактировать',
     'onb.title': 'Как это работает', 'onb.dontshow': 'Больше не показывать', 'onb.gotit': 'Понятно',
     'onb.what.t': 'NOOmium',
     'onb.what.d': 'Соцсеть смыслов: мысли ищутся не по словам и не по лайкам, а по значению. Каждая мысль превращается в вектор — точку в пространстве смыслов.',
@@ -840,9 +790,15 @@ DI.register('I18n', function (Config, bus) {
     'onb.modes.d': 'Личное остаётся только у тебя. Мир — делится мыслью с сетью, и другие смогут найти её по смыслу.',
     'onb.resonance.t': 'Резонанс ◆',
     'onb.resonance.d': 'Сколько чужих мыслей родила твоя. «↳ по мотивам» ведёт к заметке-источнику, клик по ◆ показывает потомков.',
+    'onb.delete.t': 'Удаление',
+    'onb.delete.d': 'Удаление в Nostr — это просьба к релеям удалить заметку. Большинство рэлеев её выполнят, но те, кто уже увидел заметку, могут её сохранить. Полное удаление возможно только на своём релее.',
     'onb.keys.t': 'Клавиши',
     'onb.keys.d': 'Ctrl/Cmd+Enter — отправить · / — фокус на поле · Esc — снять пин или закрыть окно.',
+    'dev.title': 'Диагностика', 'dev.status': 'Статус', 'dev.notes': 'Заметки',
+    'dev.own': 'свои', 'dev.cached': 'сетевые', 'dev.clear': 'Очистить кэш',
+    'dev.reload': 'Перезагрузить модель', 'dev.showlogs': 'Показать логи',
   });
+  
   addDict('en', {
     'app.name': 'NOOmium',
     'st.net': 'net', 'st.ai.loading': 'model', 'st.ai.ready': 'ai', 'st.ai.demo': 'ai/hash',
@@ -856,8 +812,9 @@ DI.register('I18n', function (Config, bus) {
     'sim.score': 'similarity',
     'inf.resonance': 'resonance', 'inf.linked': 'inspired by', 'inf.bymotif': 'inspired by',
     'inf.openparent': 'Open source note', 'inf.children': 'Descendants',
-    'inf.nochildren': 'No descendants yet', 'inf.lineage': '“Inspired by” lineage',
+    'inf.nochildren': 'No descendants yet', 'inf.lineage': '"Inspired by" lineage',
     'inf.noancestors': 'This is the root — no ancestors',
+    'inf.orphan': 'parent deleted', 'inf.orphan.hint': 'The parent of this note was deleted',
     'empty.local.t': 'No thoughts yet', 'empty.local.d': 'Write the first above',
     'empty.world.t': 'Nobody thinks alike', 'empty.world.d': 'Waiting for open thoughts',
     'empty.seren.t': 'No insights', 'empty.seren.d': 'Try different wording',
@@ -870,27 +827,38 @@ DI.register('I18n', function (Config, bus) {
     'btn.edit': 'Develop', 'btn.del': 'Delete', 'btn.copy': 'Copy',
     'btn.cancel': 'Cancel', 'btn.close': 'Close',
     'btn.toggle.priv': 'Hide', 'btn.toggle.pub': 'Share',
+    'btn.send.aria': 'Send', 'btn.menu.aria': 'Menu', 'btn.base.aria': 'My base',
+    'btn.ctx.clear.aria': 'Clear context',
     'toast.saved.private': 'saved privately', 'toast.saved.public': 'shared',
     'toast.copied': 'copied', 'toast.deleted': 'deleted', 'toast.copy.fail': 'copy failed',
     'toast.empty': 'write something', 'toast.ai.notready': 'ai not ready',
     'toast.base.wiped': 'base wiped', 'toast.edit.saved': 'saved',
     'menu.settings': 'Settings', 'menu.theme': 'Theme', 'menu.lang': 'Language', 'menu.help': 'How it works',
+    'menu.fullreset': 'Full reset',
+    'menu.fullreset.confirm': 'Delete ALL data from browser (notes, cache, model) and reload? This is like first launch.',
+    'menu.fullreset.done': 'reloading in 1.5 sec...',
     'del.confirm': 'Delete this note forever?',
     'net.loadmore': 'Load more', 'net.loading': 'Loading…',
-    'onb.title': 'How it works', 'onb.dontshow': 'Don’t show again', 'onb.gotit': 'Got it',
+    'note.public.noedit': 'Public notes cannot be edited',
+    'onb.title': 'How it works', 'onb.dontshow': 'Don\'t show again', 'onb.gotit': 'Got it',
     'onb.what.t': 'NOOmium',
     'onb.what.d': 'A social network of meaning: thoughts are found not by words or likes, but by sense. Each thought becomes a vector — a point in meaning-space.',
     'onb.stream.t': 'Feed', 'onb.stream.d': 'Shows fresh thoughts — yours and from the network. Just read.',
     'onb.pin.t': 'Pin',
-    'onb.pin.d': 'Click a thought to make it the context: the feed shows what resonates, from your base and the network. The pinned thought becomes the “mother” of what you write next.',
+    'onb.pin.d': 'Click a thought to make it the context: the feed shows what resonates, from your base and the network. The pinned thought becomes the "mother" of what you write next.',
     'onb.drift.t': 'Drift',
     'onb.drift.d': 'Start typing while pinned — the context shifts toward your text. A natural way to drift from the original thought to your own.',
     'onb.modes.t': 'Private & World',
     'onb.modes.d': 'Private stays with you. World shares the thought with the network so others can find it by meaning.',
     'onb.resonance.t': 'Resonance ◆',
-    'onb.resonance.d': 'How many thoughts yours inspired. “↳ inspired by” leads to the source note; click ◆ to see descendants.',
+    'onb.resonance.d': 'How many thoughts yours inspired. "↳ inspired by" leads to the source note; click ◆ to see descendants.',
+    'onb.delete.t': 'Deletion',
+    'onb.delete.d': 'Deletion in Nostr is a request to relays to delete a note. Most relays will honor it, but those who already saw the note may keep it. Full deletion is only possible on your own relay.',
     'onb.keys.t': 'Keys',
     'onb.keys.d': 'Ctrl/Cmd+Enter — send · / — focus editor · Esc — unpin or close.',
+    'dev.title': 'Diagnostics', 'dev.status': 'Status', 'dev.notes': 'Notes',
+    'dev.own': 'own', 'dev.cached': 'cached', 'dev.clear': 'Clear cache',
+    'dev.reload': 'Reload model', 'dev.showlogs': 'Show logs',
   });
 
   return { t, addDict, setLang, getLang, onChange };
@@ -2576,39 +2544,25 @@ DI.register('Feed', function (DB, Ranker, Store, bus, Logger) {
 // ─── DOMAIN/Provenance ─── START ─────────────────────────────
 /**
  * Граф «по мотивам»: parent-связи между заметками (свои + сетевые).
- * Читает DB (свои) и DB.cache (сетевые), строит связи по parentId.
- *  - children(id)    — прямые дети (вниз).
- *  - descendants(id) — все потомки рекурсивно (вниз).
- *  - ancestors(id)   — цепочка предков вверх (мама → бабушка → … до корня).
- * При поиске индексирует заметки и по id, и по eventId (свои дети ссылаются
- * на id, чужие — на eventId).
+ * КЭШИРОВАНИЕ: ancestors() кэширует результат на 5 секунд для избежания
+ * N запросов на N карточек при рендере ленты.
  * @deps DB
  * @exports Provenance
  */
 DI.register('Provenance', function (DB) {
-  /**
-   * Все заметки (свои + сетевые) одним списком.
-   * @returns {Promise<Object[]>}
-   */
+  /** Кэш ancestors: id -> {chain, timestamp} */
+  const ancestorsCache = new Map();
+  const CACHE_TTL = 5000; // 5 секунд
+
   function loadAll() {
     return Promise.all([DB.all(), DB.cacheAll()]).then(([own, cached]) => own.concat(cached));
   }
 
-  /**
-   * Прямые дети заметки (заметки с parentId = id).
-   * @param {string} id
-   * @returns {Promise<Object[]>}
-   */
   function children(id) {
     if (!id) return Promise.resolve([]);
     return loadAll().then(all => all.filter(n => n && n.parentId === id));
   }
 
-  /**
-   * Все потомки (рекурсивно, BFS), без циклов.
-   * @param {string} id
-   * @returns {Promise<Object[]>}
-   */
   function descendants(id) {
     if (!id) return Promise.resolve([]);
     return loadAll().then(all => {
@@ -2631,13 +2585,19 @@ DI.register('Provenance', function (DB) {
   }
 
   /**
-   * Цепочка предков заметки вверх по parentId: от непосредственного родителя
-   * к корню. Останавливается, если родитель не найден или обнаружен цикл.
+   * Цепочка предков с кэшированием.
    * @param {string} id
-   * @returns {Promise<Object[]>} Массив предков [мама, бабушка, ...].
+   * @returns {Promise<Object[]>}
    */
   function ancestors(id) {
     if (!id) return Promise.resolve([]);
+    
+    // проверяем кэш
+    const cached = ancestorsCache.get(id);
+    if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
+      return Promise.resolve(cached.chain);
+    }
+    
     return loadAll().then(all => {
       const byId = new Map();
       all.forEach(n => {
@@ -2650,18 +2610,26 @@ DI.register('Provenance', function (DB) {
       const seen = new Set();
       let current = byId.get(id);
       while (current && current.parentId) {
-        if (seen.has(current.parentId)) break;      // защита от цикла
+        if (seen.has(current.parentId)) break;
         seen.add(current.parentId);
         const parent = byId.get(current.parentId);
-        if (!parent) break;                          // предок не загружен
+        if (!parent) break;
         chain.push(parent);
         current = parent;
       }
+      
+      // сохраняем в кэш
+      ancestorsCache.set(id, { chain, timestamp: Date.now() });
       return chain;
     });
   }
 
-  return { children, descendants, ancestors, loadAll };
+  /** Очищает кэш ancestors (вызывается при db:change/db:cache) */
+  function clearCache() {
+    ancestorsCache.clear();
+  }
+
+  return { children, descendants, ancestors, loadAll, clearCache };
 }, ['DB']);
 // ─── DOMAIN/Provenance ─── END ───────────────────────────────
 
@@ -3283,18 +3251,6 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
 // ─── UI/Composer ─── END ─────────────────────────────────────
 
 // ─── UI/FeedView ─── START ───────────────────────────────────
-/**
- * Рендер ленты и хром режимов.
- *  - просмотр: хронология Store.feed; бар скрыт.
- *  - input / drift (режим автора): бар виден, лента = Store.lists[seg].
- *  - pin: баннер, единый список похожего (закреплённая исключена).
- * Жесты: клик по карточке = пин/отпин; ✎ на своих = NoteView;
- * «↳ по мотивам» = линейка предков (если родитель удалён — не кликабельна);
- * «◆ N» = потомки; «Загрузить ещё» = история сети.
- * Резонанс = сумма уникальных авторов по локальному id и по eventId.
- * @deps Store, Context, I18n, Utils, EventBus, Influence, Provenance, Modal, NetService
- * @exports FeedView
- */
 DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, Provenance, Modal, NetService) {
   let feedEl, emptyEl, emptyT, segBar, ctxBanner, ctxSrc, ctxTxt, ctxX;
   let cLocal, cWorld, cSeren, histBtn;
@@ -3338,14 +3294,14 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, P
     body.style.cssText = 'display:flex;flex-direction:column;gap:8px;';
     if (!children.length) {
       const empty = document.createElement('div');
-      empty.style.cssText = 'color:var(--text-3);font-size:13px;';
+      empty.style.cssText = 'color:var(--text-3);font-size:13px;text-align:center;';
       empty.textContent = I18n.t('inf.nochildren');
       body.appendChild(empty);
     } else {
       children.forEach(c => {
         const item = document.createElement('button');
         item.className = 'nv-act';
-        item.style.cssText = 'text-align:left;justify-content:flex-start;white-space:normal;height:auto;min-height:40px;';
+        item.style.cssText = 'text-align:left;justify-content:flex-start;white-space:normal;height:auto;min-height:40px;width:100%;';
         item.textContent = (c.text || '').slice(0, 140);
         item.addEventListener('click', () => {
           Modal.close();
@@ -3379,14 +3335,14 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, P
     body.style.cssText = 'display:flex;flex-direction:column;gap:8px;';
     if (!chain.length) {
       const empty = document.createElement('div');
-      empty.style.cssText = 'color:var(--text-3);font-size:13px;';
+      empty.style.cssText = 'color:var(--text-3);font-size:13px;text-align:center;';
       empty.textContent = I18n.t('inf.noancestors');
       body.appendChild(empty);
     } else {
       chain.forEach((c, i) => {
         const item = document.createElement('button');
         item.className = 'nv-act';
-        item.style.cssText = 'text-align:left;justify-content:flex-start;white-space:normal;height:auto;min-height:40px;';
+        item.style.cssText = 'text-align:left;justify-content:flex-start;white-space:normal;height:auto;min-height:40px;width:100%;';
         item.style.paddingLeft = (16 + i * 14) + 'px';
         item.textContent = '↳ ' + (c.text || '').slice(0, 140);
         item.addEventListener('click', () => {
@@ -3439,10 +3395,8 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, P
       link.style.cssText = 'background:none;border:none;padding:0;cursor:pointer;font:inherit;color:var(--teal);';
       link.textContent = '↳ ' + I18n.t('inf.bymotif');
       link.title = I18n.t('inf.lineage');
-      // Проверяем, существует ли родитель (асинхронно)
       Provenance.ancestors(n.id).then(chain => {
         if (!chain.length) {
-          // Родитель удалён — не кликабельна
           link.style.cursor = 'default';
           link.style.opacity = '0.5';
           link.textContent = '↳ ' + I18n.t('inf.orphan');
@@ -3487,8 +3441,8 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, P
     if (n.own) {
       const openBtn = document.createElement('button');
       openBtn.className = 'na';
-      openBtn.style.cssText = 'position:absolute;top:10px;right:10px;font-size:12px;opacity:.7;';
-      openBtn.textContent = '✎';
+      openBtn.style.cssText = 'position:absolute;top:10px;right:10px;font-size:12px;opacity:.7;padding:4px 8px;';
+      openBtn.textContent = I18n.t('btn.edit');
       openBtn.title = I18n.t('btn.edit');
       openBtn.addEventListener('click', e => {
         e.stopPropagation();
@@ -3551,18 +3505,6 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, P
   function init() {
     bind();
     if (!feedEl) return;
-    I18n.addDict('ru', {
-      'inf.lineage': 'Линейка «по мотивам»',
-      'inf.noancestors': 'Это корень — предков нет',
-      'inf.orphan': 'родитель удалён',
-      'inf.orphan.hint': 'Родитель этой заметки был удалён',
-    });
-    I18n.addDict('en', {
-      'inf.lineage': '"Inspired by" lineage',
-      'inf.noancestors': 'This is the root — no ancestors',
-      'inf.orphan': 'parent deleted',
-      'inf.orphan.hint': 'The parent of this note was deleted',
-    });
 
     unsubs.push(Store.subscribe(s => s.context, scheduleRender, Store.shallowEqual));
     unsubs.push(Store.subscribe(s => s.lists, scheduleRender));
@@ -3899,10 +3841,8 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboar
       I18n.t('menu.fullreset'),
       I18n.t('menu.fullreset.confirm'),
       () => {
-        // 1. Остановить Nostr
         try { Nostr.close(); } catch (_) {}
         
-        // 2. Очистить все IndexedDB базы
         if (window.indexedDB && indexedDB.databases) {
           indexedDB.databases().then(dbs => {
             dbs.forEach(dbInfo => {
@@ -3913,13 +3853,9 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboar
           }).catch(() => {});
         }
         
-        // 3. Очистить localStorage
         try { localStorage.clear(); } catch (_) {}
-        
-        // 4. Очистить sessionStorage
         try { sessionStorage.clear(); } catch (_) {}
         
-        // 5. Очистить Cache API
         if (window.caches) {
           caches.keys().then(names => {
             names.forEach(name => caches.delete(name));
@@ -3928,9 +3864,13 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboar
         
         Toast.show('ok', I18n.t('menu.fullreset.done'));
         
-        // 6. Подождать закрытия соединений и перезагрузить
+        // Для мобильных: используем location.reload() с force
         setTimeout(() => {
-          window.location.href = window.location.href + '?reset=' + Date.now();
+          if (window.location) {
+            window.location.reload(true);
+          } else {
+            window.location.href = window.location.pathname;
+          }
         }, 1500);
       }
     );
@@ -4022,6 +3962,19 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboar
 
     unsubs.push(Store.subscribe(s => s.view, viewSync));
     unsubs.push(bus.on('i18n:change', viewSync));
+    unsubs.push(bus.on('db:change', () => {
+      // очищаем кэш Provenance при изменении БД
+      try {
+        const Provenance = DI.resolve('Provenance');
+        if (Provenance && Provenance.clearCache) Provenance.clearCache();
+      } catch (_) {}
+    }));
+    unsubs.push(bus.on('db:cache', () => {
+      try {
+        const Provenance = DI.resolve('Provenance');
+        if (Provenance && Provenance.clearCache) Provenance.clearCache();
+      } catch (_) {}
+    }));
     
     I18n.addDict('ru', {
       'menu.fullreset': 'Полный сброс',
@@ -4045,6 +3998,115 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboar
   return { init, destroy, setView, openMenu };
 }, ['Store', 'Config', 'Modal', 'Toast', 'I18n', 'EventBus', 'Onboarding', 'DB', 'Embedder', 'Nostr']);
 // ─── UI/MenuView ─── END ─────────────────────────────────────
+
+// ─── UI/DevTools ─── START ───────────────────────────────────
+/**
+ * Плавающая панель диагностики для тестирования.
+ * Показывает статусы, количество заметок, последний лог.
+ * Активируется через URL параметр ?dev=1 или кнопку в меню (если добавишь).
+ * @deps Store, DB, EventBus, Logger, I18n, Embedder, NetService
+ * @exports DevTools
+ */
+DI.register('DevTools', function (Store, DB, bus, Logger, I18n, Embedder, NetService) {
+  let panel = null;
+  let isVisible = false;
+  let updateTimer = null;
+
+  function createPanel() {
+    panel = document.createElement('div');
+    panel.style.cssText = `
+      position:fixed;bottom:80px;right:16px;width:280px;max-height:400px;
+      background:var(--surface);border:1px solid var(--line-2);border-radius:var(--r);
+      padding:12px;font-size:12px;z-index:9999;overflow-y:auto;
+      box-shadow:0 8px 24px rgba(0,0,0,.4);
+    `;
+    document.body.appendChild(panel);
+    update();
+  }
+
+  function update() {
+    if (!panel || !isVisible) return;
+    
+    const state = Store.getState();
+    const ctx = state.context;
+    const mode = Embedder.getMode();
+    
+    Promise.all([DB.count(), DB.cacheAll()]).then(([ownCount, cached]) => {
+      panel.innerHTML = `
+        <div style="font-weight:700;margin-bottom:8px;">${I18n.t('dev.title')}</div>
+        <div style="margin-bottom:6px;"><strong>${I18n.t('dev.status')}:</strong></div>
+        <div style="margin-left:8px;color:var(--text-2);">
+          • Mode: ${mode}<br>
+          • Context: ${ctx.source || 'none'}<br>
+          • View: ${state.view}
+        </div>
+        <div style="margin:8px 0 6px;"><strong>${I18n.t('dev.notes')}:</strong></div>
+        <div style="margin-left:8px;color:var(--text-2);">
+          • ${I18n.t('dev.own')}: ${ownCount}<br>
+          • ${I18n.t('dev.cached')}: ${cached.length}
+        </div>
+        <div style="margin-top:12px;display:flex;gap:6px;flex-wrap:wrap;">
+          <button class="nv-act" style="font-size:11px;padding:6px 10px;" onclick="window.__devtools_clear()">
+            ${I18n.t('dev.clear')}
+          </button>
+          <button class="nv-act" style="font-size:11px;padding:6px 10px;" onclick="window.__devtools_reload()">
+            ${I18n.t('dev.reload')}
+          </button>
+          <button class="nv-act" style="font-size:11px;padding:6px 10px;" onclick="window.__devtools_logs()">
+            ${I18n.t('dev.showlogs')}
+          </button>
+        </div>
+      `;
+    });
+  }
+
+  function show() {
+    if (!panel) createPanel();
+    isVisible = true;
+    panel.style.display = 'block';
+    update();
+    updateTimer = setInterval(update, 2000);
+  }
+
+  function hide() {
+    isVisible = false;
+    if (panel) panel.style.display = 'none';
+    if (updateTimer) { clearInterval(updateTimer); updateTimer = null; }
+  }
+
+  function toggle() {
+    if (isVisible) hide();
+    else show();
+  }
+
+  // Глобальные функции для кнопок
+  window.__devtools_clear = () => {
+    DB.cacheClear().then(() => {
+      Logger.info('DevTools: cache cleared');
+      update();
+    });
+  };
+
+  window.__devtools_reload = () => {
+    Embedder.load();
+    Logger.info('DevTools: model reload started');
+  };
+
+  window.__devtools_logs = () => {
+    Logger.dump();
+    console.log('[DevTools] Logs dumped to console');
+  };
+
+  function init() {
+    // Автопоказ при ?dev=1 в URL
+    if (window.location.search.includes('dev=1')) {
+      setTimeout(show, 1000);
+    }
+  }
+
+  return { init, show, hide, toggle };
+}, ['Store', 'DB', 'EventBus', 'Logger', 'I18n', 'Embedder', 'NetService']);
+// ─── UI/DevTools ─── END ─────────────────────────────────────
 
 // ─── INPUT/Hotkeys ─── START ─────────────────────────────────
 /**
@@ -4097,40 +4159,24 @@ DI.register('Hotkeys', function (Context) {
 // ─── INPUT/Hotkeys ─── END ───────────────────────────────────
 
 // ─── BOOT ─── START ──────────────────────────────────────────
-/**
- * Точка входа. Резолвит и инициализирует все модули в правильном порядке:
- *  1. Тема (до показа приложения, чтобы не мигнуть неверной темой).
- *  2. Подписчики событий без DOM (Progress, HeaderStatus, Feed, Influence).
- *  3. DOM-модули (Composer, FeedView, NoteView, BaseView, MenuView, Hotkeys).
- *  4. Слушатель wipe:request.
- *  5. Показ приложения (body.ready).
- *  6. Запуск Embedder (шлёт ai-события) и NetService (шлёт net-события).
- *  7. Onboarding последним.
- * Зависимостей через DI не имеет — резолвит модули внутри mount() сам.
- * @exports Boot {mount}
- */
 DI.register('Boot', function () {
-  /** Собирает и запускает приложение. Вызывать один раз. */
   function mount() {
-    // 1. Тема до показа
     const Config = DI.resolve('Config');
     document.body.setAttribute('data-theme', Config.get('theme', 'dark'));
 
-    // 2. Подписчики событий (без DOM)
     DI.resolve('Progress').init();
     DI.resolve('HeaderStatus').init();
     DI.resolve('Feed').init();
     DI.resolve('Influence').init();
 
-    // 3. DOM-модули
     DI.resolve('Composer').init();
     DI.resolve('FeedView').init();
     DI.resolve('NoteView').init();
     DI.resolve('BaseView').init();
     DI.resolve('MenuView').init();
     DI.resolve('Hotkeys').init();
+    DI.resolve('DevTools').init();
 
-    // 4. Слушатель стирания данных (эмитит MenuView)
     const EventBus = DI.resolve('EventBus');
     const DB = DI.resolve('DB');
     const Toast = DI.resolve('Toast');
@@ -4143,14 +4189,11 @@ DI.register('Boot', function () {
       });
     });
 
-    // 5. Показ приложения
     document.body.classList.add('ready');
 
-    // 6. Запуск AI и сети
     DI.resolve('Embedder').load();
     DI.resolve('NetService').start();
 
-    // 7. Онбординг последним
     DI.resolve('Onboarding').init();
   }
 
