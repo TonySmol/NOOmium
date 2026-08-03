@@ -2551,6 +2551,11 @@ DI.register('Feed', function (DB, Ranker, Store, bus, Logger) {
 /**
  * Граф «по мотивам»: parent-связи между заметками (свои + сетевые).
  * Читает DB (свои) и DB.cache (сетевые), строит связи по parentId.
+ *  - children(id)    — прямые дети (вниз).
+ *  - descendants(id) — все потомки рекурсивно (вниз).
+ *  - ancestors(id)   — цепочка предков вверх (мама → бабушка → … до корня).
+ * При поиске индексирует заметки и по id, и по eventId (свои дети ссылаются
+ * на id, чужие — на eventId).
  * @deps DB
  * @exports Provenance
  */
@@ -2599,7 +2604,38 @@ DI.register('Provenance', function (DB) {
     });
   }
 
-  return { children, descendants, loadAll };
+  /**
+   * Цепочка предков заметки вверх по parentId: от непосредственного родителя
+   * к корню. Останавливается, если родитель не найден или обнаружен цикл.
+   * @param {string} id
+   * @returns {Promise<Object[]>} Массив предков [мама, бабушка, ...].
+   */
+  function ancestors(id) {
+    if (!id) return Promise.resolve([]);
+    return loadAll().then(all => {
+      const byId = new Map();
+      all.forEach(n => {
+        if (n) {
+          if (n.id) byId.set(n.id, n);
+          if (n.eventId) byId.set(n.eventId, n);
+        }
+      });
+      const chain = [];
+      const seen = new Set();
+      let current = byId.get(id);
+      while (current && current.parentId) {
+        if (seen.has(current.parentId)) break;      // защита от цикла
+        seen.add(current.parentId);
+        const parent = byId.get(current.parentId);
+        if (!parent) break;                          // предок не загружен
+        chain.push(parent);
+        current = parent;
+      }
+      return chain;
+    });
+  }
+
+  return { children, descendants, ancestors, loadAll };
 }, ['DB']);
 // ─── МОДУЛЬ 18: DOMAIN/Provenance ─── END ────────────────────
 
@@ -3164,9 +3200,9 @@ DI.register('Composer', function (Context, Notes, DB, Store, I18n, bus, Toast, U
  *  - input / drift (режим автора): бар виден, лента = Store.lists[seg].
  *  - pin: баннер, единый список похожего.
  * Жесты: клик по карточке = пин/отпин; ✎ на своих = NoteView;
- * «↳ по мотивам» = источник; «◆ N» = потомки; «Загрузить ещё» = история сети.
- * Резонанс = сумма уникальных авторов по локальному id и по eventId
- * (свои дети ссылаются на id, чужие — на eventId; множества не пересекаются).
+ * «↳ по мотивам» = линейка предков (цепочка вверх); «◆ N» = потомки;
+ * «Загрузить ещё» = история сети.
+ * Резонанс = сумма уникальных авторов по локальному id и по eventId.
  * @deps Store, Context, I18n, Utils, EventBus, Influence, Provenance, Modal, NetService
  * @exports FeedView
  */
@@ -3249,6 +3285,43 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, P
     }).catch(() => {});
   }
 
+  /** Модалка-линейка: цепочка предков от мамы к корню, каждого можно открыть. */
+  function renderAncestorsModal(note, chain) {
+    const body = document.createElement('div');
+    body.style.cssText = 'display:flex;flex-direction:column;gap:8px;';
+    if (!chain.length) {
+      const empty = document.createElement('div');
+      empty.style.cssText = 'color:var(--text-3);font-size:13px;';
+      empty.textContent = I18n.t('inf.noancestors');
+      body.appendChild(empty);
+    } else {
+      chain.forEach((c, i) => {
+        const item = document.createElement('button');
+        item.className = 'nv-act';
+        item.style.cssText = 'text-align:left;justify-content:flex-start;white-space:normal;height:auto;min-height:40px;';
+        item.style.paddingLeft = (16 + i * 14) + 'px';   // отступ по глубине
+        item.textContent = (i === 0 ? '↳ ' : '↳ ') + (c.text || '').slice(0, 140);
+        item.addEventListener('click', () => {
+          Modal.close();
+          try { bus.emit('note:open', { id: c.id }); } catch (_) {}
+        });
+        body.appendChild(item);
+      });
+    }
+    Modal.open({
+      title: I18n.t('inf.lineage') + (chain.length ? ' · ' + chain.length : ''),
+      body,
+      buttons: [{ text: I18n.t('btn.close'), onClick: () => Modal.close() }],
+    });
+  }
+
+  /** Показывает линейку предков заметки. @param {Object} note */
+  function showAncestors(note) {
+    Provenance.ancestors(note.id).then(chain => {
+      renderAncestorsModal(note, chain);
+    }).catch(() => {});
+  }
+
   function card(n, isRanked, i) {
     const el = document.createElement('div');
     el.className = 'note' + (isPinned(n) ? ' pinned' : '');
@@ -3278,10 +3351,10 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, P
       link.className = 'note-parent';
       link.style.cssText = 'background:none;border:none;padding:0;cursor:pointer;font:inherit;color:var(--teal);';
       link.textContent = '↳ ' + I18n.t('inf.bymotif');
-      link.title = I18n.t('inf.openparent');
+      link.title = I18n.t('inf.lineage');
       link.addEventListener('click', e => {
         e.stopPropagation();
-        try { bus.emit('note:open', { id: n.parentId }); } catch (_) {}
+        showAncestors(n);
       });
       meta.appendChild(link);
     }
@@ -3381,6 +3454,10 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, P
   function init() {
     bind();
     if (!feedEl) return;
+    // новые строки для линейки предков
+    I18n.addDict('ru', { 'inf.lineage': 'Линейка «по мотивам»', 'inf.noancestors': 'Это корень — предков нет' });
+    I18n.addDict('en', { 'inf.lineage': '“Inspired by” lineage', 'inf.noancestors': 'This is the root — no ancestors' });
+
     unsubs.push(Store.subscribe(s => s.context, scheduleRender, Store.shallowEqual));
     unsubs.push(Store.subscribe(s => s.lists, scheduleRender));
     unsubs.push(Store.subscribe(s => s.feed, scheduleRender));
@@ -3685,7 +3762,7 @@ DI.register('NoteView', function (DB, Notes, NoteActions, Modal, Toast, I18n, Ut
 /**
  * Меню (кнопка #btn-menu) и переключение экранов Поток/База.
  *  - Модалка настроек: справка, тема, язык, навигация, стереть данные.
- *  - setView показывает/прячет элементы потока и панель #base.
+ *  - setView показывает/прячет элементы потока (включая btn-history) и панель #base.
  * Тема применяется через data-theme на body.
  * @deps Store, Config, Modal, Toast, I18n, EventBus, Onboarding
  * @exports MenuView
@@ -3703,7 +3780,8 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboar
   function setView(view) {
     Store.setState({ view });
     const isBase = view === 'base';
-    ['ctx-banner', 'seg', 'feed-wrap', 'composer'].forEach(id => {
+    // прячем всё, что относится к потоку; btn-history — часть потока, тоже прячем
+    ['ctx-banner', 'seg', 'feed-wrap', 'btn-history', 'composer'].forEach(id => {
       const el = document.getElementById(id);
       if (el) el.style.display = isBase ? 'none' : '';
     });
@@ -3726,14 +3804,12 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboar
     const body = document.createElement('div');
     body.style.cssText = 'display:flex;flex-direction:column;gap:12px;';
 
-    // справка
     const helpBtn = document.createElement('button');
     helpBtn.className = 'nv-act';
     helpBtn.textContent = '? ' + I18n.t('menu.help');
     helpBtn.addEventListener('click', () => { Modal.close(); Onboarding.showHelp(false); });
     body.appendChild(helpBtn);
 
-    // тема
     const themeBtn = document.createElement('button');
     themeBtn.className = 'nv-act';
     themeBtn.textContent = I18n.t('menu.theme') + ': ' + (Config.get('theme', 'dark') === 'dark' ? '🌙' : '☀️');
@@ -3745,7 +3821,6 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboar
     });
     body.appendChild(themeBtn);
 
-    // язык
     const langBtn = document.createElement('button');
     langBtn.className = 'nv-act';
     langBtn.textContent = I18n.t('menu.lang') + ': ' + I18n.getLang().toUpperCase();
@@ -3756,7 +3831,6 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboar
     });
     body.appendChild(langBtn);
 
-    // навигация
     const goBase = document.createElement('button');
     goBase.className = 'nv-act';
     goBase.textContent = I18n.t('tab.base');
@@ -3769,7 +3843,6 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboar
     goStream.addEventListener('click', () => { Modal.close(); setView('stream'); });
     body.appendChild(goStream);
 
-    // danger
     const wipe = document.createElement('button');
     wipe.className = 'nv-act danger';
     wipe.textContent = I18n.t('base.wipe');
