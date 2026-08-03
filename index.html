@@ -836,7 +836,6 @@ DI.register('I18n', function (Config, bus) {
  * вложенные структуры меняем только через setState с НОВЫМ объектом.
  *
  * @example
- *   // Реагировать только на смену режима:
  *   Store.subscribe(s => s.context.source, src => {
  *     segBar.classList.toggle('on', src !== null);
  *     ctxBanner.classList.toggle('on', src === 'pin');
@@ -847,9 +846,9 @@ DI.register('I18n', function (Config, bus) {
 DI.register('Store', function () {
   /** Внутреннее состояние. @type {Object} */
   const state = {
-    view: 'feed',            // 'feed' | 'base' — активный экран
+    view: 'stream',          // 'stream' | 'base' — активный экран (унифицировано с MenuView)
     seg: 'local',            // 'local' | 'world' | 'seren' — активный сегмент (author)
-    context: { source: null, noteId: null, text: '', vector: null }, // source: null|'input'|'pin'
+    context: { source: null, noteId: null, text: '', vector: null }, // source: null|'input'|'pin'|'drift'
     sendMode: 'private',     // 'private' | 'world' — куда публикуем
     sendLock: false,         // блокировка отправки (анти-дабл)
     lists: { local: [], world: [], seren: [] }, // результаты author-режима
@@ -2516,7 +2515,6 @@ DI.register('Feed', function (DB, Ranker, Store, bus, Logger) {
   return { init, destroy, refresh };
 }, ['DB', 'Ranker', 'Store', 'EventBus', 'Logger']);
 // ─── МОДУЛЬ 17: DOMAIN/Feed ─── END ──────────────────────────
-// ─── МОДУЛЬ 17: DOMAIN/Feed ─── END ──────────────────────────
 
 // ─── МОДУЛЬ 18: DOMAIN/Provenance ─── START ──────────────────
 /**
@@ -3790,7 +3788,9 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboar
 // ─── МОДУЛЬ 30: INPUT/Hotkeys ─── START ──────────────────────
 /**
  * Глобальные горячие клавиши:
- *  - Escape: сначала закрывает открытую модалку; иначе снимает пин.
+ *  - Escape: приоритет сверху вниз — модалка (#overlay) → просмотр (#noteview)
+ *    → снять пин. NoteView закрывает себя сам, поэтому при открытом просмотре
+ *    пин НЕ трогаем, просто даём событию дойти до NoteView.
  *  - '/': фокус на поле ввода (если не печатаешь уже).
  *  - Ctrl/Cmd+Enter обрабатывает сам Composer.
  * @deps Context, Modal
@@ -3803,12 +3803,19 @@ DI.register('Hotkeys', function (Context, Modal) {
     if (handler) return;
     handler = function (e) {
       if (e.key === 'Escape') {
+        // 1) открыта модалка — закрываем её и гасим событие
         const overlay = document.getElementById('overlay');
         if (overlay && overlay.classList.contains('on')) {
-          Modal.close();          // модалка важнее
+          Modal.close();
           e.stopPropagation();
           return;
         }
+        // 2) открыт просмотр заметки — NoteView закроется сам, пин не трогаем
+        const noteview = document.getElementById('noteview');
+        if (noteview && noteview.classList.contains('on')) {
+          return;
+        }
+        // 3) ничего не открыто — снимаем пин
         Context.clearPin();
         return;
       }
