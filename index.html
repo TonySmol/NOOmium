@@ -220,7 +220,7 @@ body.ready #app{display:flex}
 <div id="toasts"></div>
 <div id="progress"><div class="prog-c">
   <div style="font:700 18px var(--display)">Загружаем модель</div>
-  <div style="font-size:13px;color:var(--text-3);margin-top:6px">Один раз, чтобы искать по смыслу</div>
+  <div id="prog-info" style="font-size:12px;color:var(--text-3);margin-top:4px;font-family:var(--mono)"></div>
   <div class="prog-bar"><div class="prog-fill" id="prog-fill"></div></div>
   <div id="prog-pct" style="font:400 12px var(--mono);color:var(--text-3)">0%</div>
 </div></div>
@@ -233,7 +233,7 @@ body.ready #app{display:flex}
 // ВЕРСИЯ ПРИЛОЖЕНИЯ
 // Поднимается при каждом релизе. Отображается в меню (MenuView).
 // ═══════════════════════════════════════════════════════════════
-const APP_VERSION = '0.2.2';
+const APP_VERSION = '0.2.3';
 
 // ═══════════════════════════════════════════════════════════════
 // CORE/DI — ПРЕАМБУЛА (не модуль). Выполняется первой.
@@ -1367,26 +1367,11 @@ DI.register('DB', function (Config, bus, Logger) {
 // ─── DATA/DB ─── END ─────────────────────────────────────────
 
 // ─── AI/Embedder ─── START ───────────────────────────────────
-/**
- * Эмбеддинги в Web Worker (transformers.js, ленивая загрузка модели).
- *
- * Режимы: 'loading' → 'model' (успех) или 'demo' (fallback на hash-эмбеддинг).
- * В 'demo' и до вызова load() embed() мгновенно возвращает детерминированный
- * hash-вектор — приложение работает всегда, просто поиск грубее.
- *
- * Прогресс загрузки агрегируется по всем файлам (config, tokenizer, model),
- * чтобы не было дёрганья прогресс-бара. Транслируется через 'ai:progress' и 'ai:status'.
- * Ошибка/таймаут отдельного embed не роняет ничего — тихий hash-fallback.
- *
- * @deps Config, EventBus, Logger
- * @exports Embedder
- */
 DI.register('Embedder', function (Config, bus, Logger) {
-  /** Код Worker'а строкой: изолированный поток, модель не трогает UI. */
   const workerCode = `
 let extractor = null;
 let ready = false;
-let files = new Map(); // имя файла -> {loaded, total}
+let files = new Map(); // имя файла -> {loaded, total, file}
 
 self.onmessage = async function (e) {
   const msg = e.data;
@@ -1398,14 +1383,28 @@ self.onmessage = async function (e) {
       extractor = await mod.pipeline('feature-extraction', msg.model, {
         quantized: true,
         progress_callback: function (p) {
-          if (p.status === 'progress' && p.total > 0) {
-            // агрегируем прогресс по всем файлам
-            const fileName = p.name || 'unknown';
-            files.set(fileName, { loaded: p.loaded, total: p.total });
+          if (p.status === 'progress') {
+            const fileName = p.file || p.name || 'unknown';
+            files.set(fileName, { 
+              loaded: p.loaded || 0, 
+              total: p.total || 0,
+              file: fileName
+            });
+            
             let totalLoaded = 0, totalSize = 0;
-            files.forEach(f => { totalLoaded += f.loaded; totalSize += f.total; });
+            files.forEach(f => { 
+              totalLoaded += f.loaded; 
+              if (f.total > 0) totalSize += f.total; 
+            });
+            
             const pct = totalSize > 0 ? (totalLoaded / totalSize) * 100 : 0;
-            self.postMessage({ type: 'progress', pct });
+            self.postMessage({ 
+              type: 'progress', 
+              pct,
+              loadedMB: (totalLoaded / 1024 / 1024).toFixed(1),
+              totalMB: totalSize > 0 ? (totalSize / 1024 / 1024).toFixed(1) : null,
+              model: msg.model
+            });
           }
         }
       });
@@ -1428,15 +1427,15 @@ self.onmessage = async function (e) {
 };
 `;
 
-  /** @type {Worker|null} */ let worker = null;
-  /** @type {string|null} */ let workerUrl = null;
-  /** @type {'loading'|'model'|'demo'} */ let mode = 'loading';
-  /** @type {Promise|null} */ let loadPromise = null;
-  /** @type {number} */ let nextId = 0;
-  /** @type {number} */ let lastPct = 0;
-  /** @type {Map<number,{resolve:Function,timer:number,text:string}>} */ const pending = new Map();
-  /** @type {Function[]} */ const progressFns = [];
-  /** LRU-кэш «текст → вектор». @type {Map<string,Float32Array>} */ const cache = new Map();
+  let worker = null;
+  let workerUrl = null;
+  let mode = 'loading';
+  let loadPromise = null;
+  let nextId = 0;
+  let lastPct = 0;
+  const pending = new Map();
+  const progressFns = [];
+  const cache = new Map();
 
   function emitStatus() {
     try { bus.emit('ai:status', { mode, percent: lastPct }); } catch (_) {}
@@ -1512,9 +1511,9 @@ self.onmessage = async function (e) {
         const msg = e.data;
         if (msg.type === 'progress') {
           lastPct = msg.pct;
-          for (const fn of progressFns) { try { fn(msg.pct); } catch (_) {} }
-          try { bus.emit('ai:progress', { pct: msg.pct }); } catch (_) {}
-          try { bus.emit('ai:status', { mode: 'loading', percent: msg.pct }); } catch (_) {}
+          for (const fn of progressFns) { try { fn(msg); } catch (_) {} }
+          try { bus.emit('ai:progress', msg); } catch (_) {}
+          try { bus.emit('ai:status', { mode: 'loading', percent: msg.pct, loadedMB: msg.loadedMB, totalMB: msg.totalMB, model: msg.model }); } catch (_) {}
         } else if (msg.type === 'ready') {
           mode = 'model'; emitStatus();
           Logger.info('Embedder: модель готова');
@@ -2786,16 +2785,6 @@ DI.register('NoteActions', function (Notes, Modal, Toast, I18n) {
 // ─── DOMAIN/NoteActions ─── END ──────────────────────────────
 
 // ─── UI/Onboarding ─── START ─────────────────────────────────
-/**
- * Онбординг и справка «Как это работает».
- *  - init(): при первом запуске (Config.onboarded=false) показывает гайд.
- *  - showHelp(): открывает гайд из меню; чекбокс «больше не показывать»
- *    доступен только в онбординге первого запуска.
- * Текст берётся из единого словаря I18n (ключи onb.*).
- * Добавлена секция «Удаление» с честным объяснением best-effort удаления.
- * @deps Config, Modal, I18n
- * @exports Onboarding
- */
 DI.register('Onboarding', function (Config, Modal, I18n) {
   function buildBody(firstRun) {
     const el = document.createElement('div');
@@ -2860,8 +2849,7 @@ DI.register('Onboarding', function (Config, Modal, I18n) {
   }
 
   function init() {
-    if (Config.get('onboarded', false)) return;
-    showHelp(true);
+    // ДОБАВИТЬ КЛЮЧИ ДО showHelp()
     I18n.addDict('ru', {
       'onb.delete.t': 'Удаление',
       'onb.delete.d': 'Удаление в Nostr — это просьба к релеям удалить заметку. Большинство рэлеев её выполнят, но те, кто уже увидел заметку, могут её сохранить. Полное удаление возможно только на своём релее.',
@@ -2870,6 +2858,9 @@ DI.register('Onboarding', function (Config, Modal, I18n) {
       'onb.delete.t': 'Deletion',
       'onb.delete.d': 'Deletion in Nostr is a request to relays to delete a note. Most relays will honor it, but those who already saw the note may keep it. Full deletion is only possible on your own relay.',
     });
+    
+    if (Config.get('onboarded', false)) return;
+    showHelp(true);
   }
 
   return { init, showHelp };
@@ -3025,39 +3016,45 @@ DI.register('Toast', function (Config) {
 // ─── UI/Toast ─── END ────────────────────────────────────────
 
 // ─── UI/Progress ─── START ───────────────────────────────────
-/**
- * Полноэкранный оверлей загрузки модели. Слушает 'ai:progress'/'ai:status'.
- * Показывается с задержкой SHOW_DELAY (500ms), чтобы не мигать на быстрой загрузке;
- * скрывается при переходе в 'model'/'demo'.
- * @deps EventBus
- * @exports Progress
- */
 DI.register('Progress', function (bus) {
-  let overlay, fill, pctEl;
+  let overlay, fill, pctEl, infoEl;
   let showTimer = null;
-  const SHOW_DELAY = 500; // увеличено с 300 для плавности
+  const SHOW_DELAY = 500;
 
   function bind() {
     overlay = document.getElementById('progress');
     fill = document.getElementById('prog-fill');
     pctEl = document.getElementById('prog-pct');
+    infoEl = document.getElementById('prog-info');
   }
   function show() { if (overlay) overlay.classList.add('on'); }
   function hide() { if (overlay) overlay.classList.remove('on'); }
 
-  function update(pct) {
-    const p = Math.max(0, Math.min(100, Math.round(pct || 0)));
+  function update(data) {
+    const p = Math.max(0, Math.min(100, Math.round(data.pct || 0)));
     if (fill) fill.style.width = p + '%';
-    if (pctEl) pctEl.textContent = p + '%';
+    
+    if (pctEl) {
+      let text = p + '%';
+      if (data.loadedMB) {
+        text = data.loadedMB + ' MB';
+        if (data.totalMB) text += ' / ' + data.totalMB + ' MB';
+      }
+      pctEl.textContent = text;
+    }
+    
+    if (infoEl && data.model) {
+      infoEl.textContent = data.model;
+    }
   }
 
   function init() {
     bind();
-    bus.on('ai:progress', e => update(e && e.pct));
+    bus.on('ai:progress', e => update(e));
     bus.on('ai:status', e => {
       if (!e) return;
       if (e.mode === 'loading') {
-        update(e.percent || 0);
+        update(e);
         if (!showTimer && overlay && !overlay.classList.contains('on')) {
           showTimer = setTimeout(() => { show(); showTimer = null; }, SHOW_DELAY);
         }
@@ -3865,14 +3862,6 @@ DI.register('NoteView', function (DB, NoteActions, I18n, Utils, bus) {
 // ─── UI/NoteView ─── END ─────────────────────────────────────
 
 // ─── UI/MenuView ─── START ───────────────────────────────────
-/**
- * Меню (кнопка #btn-menu) и переключение экранов Поток/База.
- *  - Модалка настроек: справка, тема, язык, навигация, стереть данные, очистить кэш.
- *  - setView показывает/прячет элементы потока (включая btn-history) и панель #base.
- * Тема применяется через data-theme на body. Показывает версию приложения.
- * @deps Store, Config, Modal, Toast, I18n, EventBus, Onboarding, DB, Embedder
- * @exports MenuView
- */
 DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboarding, DB, Embedder) {
   let unsubs = [];
 
@@ -3901,27 +3890,42 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboar
     if (bb) bb.classList.toggle('active', view === 'base');
   }
 
-  /** Очищает кэш: сетевые заметки + модель transformers.js */
-  function clearCache() {
+  /** Полный сброс: всё в браузере (как первый запуск) */
+  function fullReset() {
     Modal.confirm(
-      I18n.t('menu.clearcache'),
-      I18n.t('menu.clearcache.confirm'),
+      I18n.t('menu.fullreset'),
+      I18n.t('menu.fullreset.confirm'),
       () => {
-        // 1. Очистить сетевые заметки
-        DB.cacheClear();
-        // 2. Очистить кэш модели (IndexedDB transformers.js)
+        // 1. Очистить все IndexedDB базы
         if (window.indexedDB && indexedDB.databases) {
           indexedDB.databases().then(dbs => {
             dbs.forEach(dbInfo => {
-              if (dbInfo.name && dbInfo.name.startsWith('transformers')) {
+              if (dbInfo.name) {
                 indexedDB.deleteDatabase(dbInfo.name);
               }
             });
           });
         }
-        Toast.show('ok', I18n.t('menu.clearcache.done'));
-        // 3. Перезапустить модель
-        Embedder.load();
+        
+        // 2. Очистить localStorage
+        localStorage.clear();
+        
+        // 3. Очистить sessionStorage
+        sessionStorage.clear();
+        
+        // 4. Очистить Cache API
+        if (window.caches) {
+          caches.keys().then(names => {
+            names.forEach(name => caches.delete(name));
+          });
+        }
+        
+        Toast.show('ok', I18n.t('menu.fullreset.done'));
+        
+        // 5. Перезагрузить страницу через 1 секунду
+        setTimeout(() => {
+          window.location.reload();
+        }, 1000);
       }
     );
   }
@@ -3930,14 +3934,12 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboar
     const body = document.createElement('div');
     body.style.cssText = 'display:flex;flex-direction:column;gap:12px;';
 
-    // справка
     const helpBtn = document.createElement('button');
     helpBtn.className = 'nv-act';
     helpBtn.textContent = '? ' + I18n.t('menu.help');
     helpBtn.addEventListener('click', () => { Modal.close(); Onboarding.showHelp(false); });
     body.appendChild(helpBtn);
 
-    // тема
     const themeBtn = document.createElement('button');
     themeBtn.className = 'nv-act';
     themeBtn.textContent = I18n.t('menu.theme') + ': ' + (Config.get('theme', 'dark') === 'dark' ? '🌙' : '☀️');
@@ -3949,7 +3951,6 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboar
     });
     body.appendChild(themeBtn);
 
-    // язык
     const langBtn = document.createElement('button');
     langBtn.className = 'nv-act';
     langBtn.textContent = I18n.t('menu.lang') + ': ' + I18n.getLang().toUpperCase();
@@ -3960,7 +3961,6 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboar
     });
     body.appendChild(langBtn);
 
-    // навигация
     const goBase = document.createElement('button');
     goBase.className = 'nv-act';
     goBase.textContent = I18n.t('tab.base');
@@ -3973,17 +3973,6 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboar
     goStream.addEventListener('click', () => { Modal.close(); setView('stream'); });
     body.appendChild(goStream);
 
-    // очистить кэш
-    const clearCacheBtn = document.createElement('button');
-    clearCacheBtn.className = 'nv-act';
-    clearCacheBtn.textContent = I18n.t('menu.clearcache');
-    clearCacheBtn.addEventListener('click', () => {
-      Modal.close();
-      clearCache();
-    });
-    body.appendChild(clearCacheBtn);
-
-    // danger: стереть данные
     const wipe = document.createElement('button');
     wipe.className = 'nv-act danger';
     wipe.textContent = I18n.t('base.wipe');
@@ -3995,7 +3984,15 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboar
     });
     body.appendChild(wipe);
 
-    // версия
+    const resetBtn = document.createElement('button');
+    resetBtn.className = 'nv-act danger';
+    resetBtn.textContent = I18n.t('menu.fullreset');
+    resetBtn.addEventListener('click', () => {
+      Modal.close();
+      fullReset();
+    });
+    body.appendChild(resetBtn);
+
     const version = document.createElement('div');
     version.style.cssText = 'text-align:center;font-size:11px;color:var(--text-3);margin-top:8px;';
     version.textContent = 'v' + APP_VERSION;
@@ -4020,16 +4017,15 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboar
     unsubs.push(Store.subscribe(s => s.view, viewSync));
     unsubs.push(bus.on('i18n:change', viewSync));
     
-    // добавить ключи для сброса кэша
     I18n.addDict('ru', {
-      'menu.clearcache': 'Очистить кэш',
-      'menu.clearcache.confirm': 'Удалить сетевые заметки и перезагрузить модель? Это не повлияет на ваши заметки.',
-      'menu.clearcache.done': 'кэш очищен',
+      'menu.fullreset': 'Полный сброс',
+      'menu.fullreset.confirm': 'Удалить ВСЕ данные из браузера (заметки, кэш, модель) и перезагрузить? Это как первый запуск.',
+      'menu.fullreset.done': 'перезагрузка через 1 сек...',
     });
     I18n.addDict('en', {
-      'menu.clearcache': 'Clear cache',
-      'menu.clearcache.confirm': 'Delete network notes and reload model? This will not affect your notes.',
-      'menu.clearcache.done': 'cache cleared',
+      'menu.fullreset': 'Full reset',
+      'menu.fullreset.confirm': 'Delete ALL data from browser (notes, cache, model) and reload? This is like first launch.',
+      'menu.fullreset.done': 'reloading in 1 sec...',
     });
     
     viewSync();
