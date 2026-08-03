@@ -2310,12 +2310,14 @@ DI.register('Notes', function (DB, Embedder, bus, Logger, Utils) {
 /**
  * Сердце режимов. Управляет активным контекстом, по которому Feed ранжирует ленту.
  *
- * Приоритет источника: pin > input > none.
- *  - setPin — ручной выбор заметки; пока пин жив, он и есть контекст
- *    (даже если в поле есть текст).
- *  - setInput — ввод включает автор-режим, только если пина нет; вектор
- *    догоняет с debounce, сам режим — мгновенно.
- *  - Снятие пина откатывается к вводу (если есть текст), иначе — просмотр.
+ * Источники и приоритеты:
+ *  - pin    — закреплена заметка, ввод пуст: контекст = пин.
+ *  - drift  — есть и пин, и ввод (вектор ввода готов): контекст ВЕДЁТ введённый
+ *             текст (дрейф от пина), а пин остаётся якорем (баннер) и родителем
+ *             при публикации. Вектор пина для ранжирования не используется.
+ *  - input  — только ввод: контекст = ввод.
+ *  - none   — просмотр.
+ * Пока вектор ввода считается (debounce), при наличии пина лента остаётся на пине.
  *
  * Пишет в Store.context; подписчики (Feed, FeedView) реагируют сами.
  *
@@ -2328,12 +2330,24 @@ DI.register('Context', function (Store, Embedder, Config, Utils) {
   /** @type {{id:string,text:string,vector:*}|null} */ let pinNote = null;
 
   /**
-   * Активный контекст. Пин доминирует над вводом.
-   * @returns {{source:(null|'input'|'pin'), noteId:(string|null), text:string, vector:*}}
+   * Активный контекст.
+   * @returns {{source:(null|'input'|'pin'|'drift'), noteId:(string|null), text:string, vector:*, pinText?:string}}
    */
   function activeContext() {
+    const hasInput = !!inputText.trim();
+
+    // дрейф: пин — якорь и будущий родитель, но ранжирование ведёт ввод
+    if (pinNote && hasInput) {
+      return {
+        source: 'drift',
+        noteId: pinNote.id,
+        text: inputText.trim(),
+        vector: inputVector,            // null, пока вектор ввода не готов → лента на пине
+        pinText: pinNote.text,
+      };
+    }
     if (pinNote) return { source: 'pin', noteId: pinNote.id, text: pinNote.text, vector: pinNote.vector };
-    if (inputText.trim()) return { source: 'input', noteId: null, text: inputText.trim(), vector: inputVector };
+    if (hasInput) return { source: 'input', noteId: null, text: inputText.trim(), vector: inputVector };
     return { source: null, noteId: null, text: '', vector: null };
   }
 
@@ -2341,8 +2355,7 @@ DI.register('Context', function (Store, Embedder, Config, Utils) {
   function push() { Store.setState({ context: activeContext() }); }
 
   /**
-   * Отложенный расчёт вектора ввода; если текст за это время изменился —
-   * результат выбрасывается.
+   * Отложенный расчёт вектора ввода; если текст изменился — результат отбрасывается.
    */
   const debouncedEmbed = Utils.debounce(() => {
     const t = inputText.trim();
@@ -2353,7 +2366,7 @@ DI.register('Context', function (Store, Embedder, Config, Utils) {
   }, Config.get('debounce', 350));
 
   return {
-    /** Обновляет текст ввода (автор-режим, если нет пина). @param {string} text */
+    /** Обновляет текст ввода. @param {string} text */
     setInput(text) {
       inputText = text || '';
       if (!inputText.trim()) inputVector = null;
@@ -2361,17 +2374,17 @@ DI.register('Context', function (Store, Embedder, Config, Utils) {
       debouncedEmbed();
     },
 
-    /** Закрепляет заметку — она становится контекстом поверх ввода. @param {{id,text,vector}} note */
+    /** Закрепляет заметку. @param {{id,text,vector}} note */
     setPin(note) {
       if (!note || !note.vector) return;
       pinNote = { id: note.id, text: note.text, vector: note.vector };
       push();
     },
 
-    /** Снимает пин (откат к вводу или просмотру). */
+    /** Снимает пин. */
     clearPin() { pinNote = null; push(); },
 
-    /** Полный сброс (ввод + пин) → просмотр. */
+    /** Полный сброс (ввод + пин). */
     clear() {
       inputText = ''; inputVector = null; pinNote = null;
       debouncedEmbed.cancel();
@@ -2382,7 +2395,7 @@ DI.register('Context', function (Store, Embedder, Config, Utils) {
     getVector() { return activeContext().vector; },
     /** Снимок активного контекста. */
     getActive() { return activeContext(); },
-    /** Закреплённая заметка (или null). */
+    /** Закреплённая заметка (или null) — используется как родитель при публикации. */
     getPin() { return pinNote; },
   };
 }, ['Store', 'Embedder', 'Config', 'Utils']);
@@ -3008,15 +3021,15 @@ DI.register('Composer', function (Context, Notes, DB, Store, I18n, bus, Toast, U
 /**
  * Рендер ленты и хром режимов.
  *  - просмотр (нет контекста): хронология из Store.feed, хром скрыт.
- *  - ввод без пина: бар сегментов виден, лента = Store.lists[seg].
- *  - пин: бар скрыт, баннер виден, лента = единый список похожего.
- * Жесты: клик по карточке = пин/отпин; карандаш на своих = открыть NoteView.
- * Карточка показывает связь «↳ по мотивам» (если есть parentId) и
- * резонанс «◆ N» (число уникальных авторов-потомков из Influence).
- * @deps Store, Context, I18n, Utils, EventBus, Influence
+ *  - input (ввод без пина): бар сегментов, лента = Store.lists[seg].
+ *  - drift (пин + ввод): бар сегментов + баннер-якорь; лента следует за вводом.
+ *  - pin: баннер, единый список похожего (закреплённая исключена).
+ * Жесты: клик по карточке = пин/отпин; карандаш на своих = открыть NoteView;
+ * клик по «↳ по мотивам» = открыть заметку-источник; клик по «◆ N» = потомки.
+ * @deps Store, Context, I18n, Utils, EventBus, Influence, Provenance, Modal
  * @exports FeedView
  */
-DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence) {
+DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, Provenance, Modal) {
   let feedEl, emptyEl, emptyT, segBar, ctxBanner, ctxSrc, ctxTxt, ctxX;
   let cLocal, cWorld, cSeren;
   let unsubs = [];
@@ -3050,8 +3063,51 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence) {
   /** Клик по карточке: пин, повторный по закреплённой — снять. @param {Object} n */
   function onNoteClick(n) {
     const ctx = Store.get('context');
-    if (ctx.source === 'pin' && ctx.noteId === n.id) { Context.clearPin(); return; }
+    if ((ctx.source === 'pin' || ctx.source === 'drift') && ctx.noteId === n.id) { Context.clearPin(); return; }
     if (n.vector) Context.setPin(n);
+  }
+
+  /** Модалка со списком потомков заметки. @param {Object[]} children */
+  function renderChildrenModal(children) {
+    const body = document.createElement('div');
+    body.style.cssText = 'display:flex;flex-direction:column;gap:8px;';
+    if (!children.length) {
+      const empty = document.createElement('div');
+      empty.style.cssText = 'color:var(--text-3);font-size:13px;';
+      empty.textContent = I18n.t('inf.nochildren');
+      body.appendChild(empty);
+    } else {
+      children.forEach(c => {
+        const item = document.createElement('button');
+        item.className = 'nv-act';
+        item.style.cssText = 'text-align:left;justify-content:flex-start;white-space:normal;height:auto;min-height:40px;';
+        item.textContent = (c.text || '').slice(0, 140);
+        item.addEventListener('click', () => {
+          Modal.close();
+          try { bus.emit('note:open', { id: c.id }); } catch (_) {}
+        });
+        body.appendChild(item);
+      });
+    }
+    Modal.open({
+      title: I18n.t('inf.children') + (children.length ? ' · ' + children.length : ''),
+      body,
+      buttons: [{ text: I18n.t('btn.close'), onClick: () => Modal.close() }],
+    });
+  }
+
+  /** Собирает потомков (по id и eventId) и открывает модалку. @param {Object} note */
+  function showChildren(note) {
+    const ids = [note.id];
+    if (note.eventId) ids.push(note.eventId);
+    Promise.all(ids.map(id => Provenance.children(id))).then(results => {
+      const seenIds = new Set();
+      const children = [];
+      results.forEach(list => (list || []).forEach(c => {
+        if (c && !seenIds.has(c.id)) { seenIds.add(c.id); children.push(c); }
+      }));
+      renderChildrenModal(children);
+    }).catch(() => {});
   }
 
   /** Карточка заметки. @param {Object} n @param {boolean} isRanked @param {number} i */
@@ -3079,12 +3135,17 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence) {
     }
     meta.appendChild(tag);
 
-    // связь «по мотивам»
+    // связь «по мотивам»: клик открывает заметку-источник
     if (n.parentId) {
-      const link = document.createElement('span');
+      const link = document.createElement('button');
       link.className = 'note-parent';
+      link.style.cssText = 'background:none;border:none;padding:0;cursor:pointer;font:inherit;color:var(--teal);';
       link.textContent = '↳ ' + I18n.t('inf.bymotif');
-      link.title = I18n.t('inf.linked');
+      link.title = I18n.t('inf.openparent');
+      link.addEventListener('click', e => {
+        e.stopPropagation();
+        try { bus.emit('note:open', { id: n.parentId }); } catch (_) {}
+      });
       meta.appendChild(link);
     }
 
@@ -3095,14 +3156,18 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence) {
       meta.appendChild(sim);
     }
 
-    // резонанс (уникальные авторы-потомки)
+    // резонанс: клик показывает потомков
     const res = Influence.resonance(n.id) || Influence.resonance(n.eventId);
     if (res > 0) {
-      const r = document.createElement('span');
+      const r = document.createElement('button');
       r.className = 'note-sim';
-      r.style.color = 'var(--teal)';
+      r.style.cssText = 'color:var(--teal);background:none;border:none;padding:0;cursor:pointer;font:inherit;';
       r.textContent = '◆ ' + res;
       r.title = I18n.t('inf.resonance');
+      r.addEventListener('click', e => {
+        e.stopPropagation();
+        showChildren(n);
+      });
       meta.appendChild(r);
     }
 
@@ -3138,13 +3203,15 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence) {
     const ctx = state.context;
     const isPinnedMode = ctx.source === 'pin';
     const isTyping = ctx.source === 'input';
-    const isRanked = isPinnedMode || isTyping;
+    const isDrift = ctx.source === 'drift';
+    const isRanked = isPinnedMode || isTyping || isDrift;
 
-    segBar.classList.toggle('on', isTyping);
-    ctxBanner.classList.toggle('on', isPinnedMode);
-    if (isPinnedMode) {
-      ctxSrc.textContent = I18n.t('ctx.pinned');
-      ctxTxt.textContent = ctx.text;
+    // хром: сегменты — при вводе/дрейфе; баннер-якорь — при пине/дрейфе
+    segBar.classList.toggle('on', isTyping || isDrift);
+    ctxBanner.classList.toggle('on', isPinnedMode || isDrift);
+    if (isPinnedMode || isDrift) {
+      ctxSrc.textContent = isDrift ? I18n.t('ctx.drift') : I18n.t('ctx.pinned');
+      ctxTxt.textContent = isDrift ? (ctx.pinText || ctx.text) : ctx.text;
     }
 
     document.querySelectorAll('.seg-b').forEach(b =>
@@ -3158,7 +3225,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence) {
       notes = [...state.lists.local, ...state.lists.world, ...state.lists.seren]
         .filter(n => n.id !== ctx.noteId)
         .sort((a, b) => (b.score || 0) - (a.score || 0));
-    } else if (isTyping) {
+    } else if (isTyping || isDrift) {
       notes = state.lists[state.seg] || [];
     } else {
       notes = state.feed;
@@ -3169,7 +3236,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence) {
       emptyEl.classList.add('on');
       emptyT.textContent = isPinnedMode
         ? I18n.t('empty.world.t')
-        : (isTyping ? I18n.t('empty.' + state.seg + '.t') : I18n.t('empty.local.t'));
+        : ((isTyping || isDrift) ? I18n.t('empty.' + state.seg + '.t') : I18n.t('empty.local.t'));
     } else {
       emptyEl.classList.remove('on');
       const frag = document.createDocumentFragment();
@@ -3200,7 +3267,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence) {
   }
 
   return { init, destroy, render };
-}, ['Store', 'Context', 'I18n', 'Utils', 'EventBus', 'Influence']);
+}, ['Store', 'Context', 'I18n', 'Utils', 'EventBus', 'Influence', 'Provenance', 'Modal']);
 // ─── МОДУЛЬ 25: UI/FeedView ─── END ──────────────────────────
 
 // ─── МОДУЛЬ 26: UI/BaseView ─── START ────────────────────────
@@ -3614,7 +3681,7 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus) {
  */
 // ─── МОДУЛЬ 31: BOOT ─── END ─────────────────────────────────
 
-// ─── ВРЕМЕННЫЙ BOOT (связь + резонанс) ─── START
+// ─── ВРЕМЕННЫЙ BOOT (дрейф + навигация по связям) ─── START
 (function tempBoot() {
   document.body.classList.add('ready');
   const I18n = DI.resolve('I18n');
@@ -3627,6 +3694,10 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus) {
     'toast.edit.saved': 'сохранено',
     'inf.linked': 'по мотивам',
     'inf.bymotif': 'по мотивам',
+    'inf.openparent': 'Открыть заметку-источник',
+    'inf.children': 'Потомки',
+    'inf.nochildren': 'Потомков пока нет',
+    'ctx.drift': 'дрейф от',
   });
   I18n.addDict('en', {
     'del.confirm': 'Delete this note forever?',
@@ -3637,6 +3708,10 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus) {
     'toast.edit.saved': 'saved',
     'inf.linked': 'inspired by',
     'inf.bymotif': 'inspired by',
+    'inf.openparent': 'Open source note',
+    'inf.children': 'Descendants',
+    'inf.nochildren': 'No descendants yet',
+    'ctx.drift': 'drift from',
   });
 
   const Progress = DI.resolve('Progress');
@@ -3660,7 +3735,7 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus) {
   HeaderStatus.init();
   Feed.init();
   Composer.init();
-  Influence.init();      // до FeedView, чтобы резонанс был готов к рендеру
+  Influence.init();
   FeedView.init();
   NoteView.init();
   BaseView.init();
@@ -3676,7 +3751,7 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus) {
   Embedder.load();
   NetService.start();
 
-  console.info('[NOOmium] связь заметок + резонанс');
+  console.info('[NOOmium] дрейф от пина + навигация по связям');
 })();
 // ─── ВРЕМЕННЫЙ BOOT ─── END
 
