@@ -240,7 +240,7 @@ body.ready #app{display:flex}
 // ВЕРСИЯ ПРИЛОЖЕНИЯ
 // Поднимается при каждом релизе. Отображается в меню (MenuView).
 // ═══════════════════════════════════════════════════════════════
-const APP_VERSION = '0.2.6';
+const APP_VERSION = '0.2.7';
 
 // ═══════════════════════════════════════════════════════════════
 // CORE/DI — ПРЕАМБУЛА (не модуль). Выполняется первой.
@@ -3523,10 +3523,9 @@ DI.register('NoteView', function (DB, Notes, NoteActions, I18n, Utils, Toast, bu
     body.appendChild(info);
 
     const txt = document.createElement('div');
-    txt.className = 'nv-text';
-    txt.style.cssText = 'flex:1;overflow-y:auto;font-size:16px;line-height:1.6;white-space:pre-wrap;word-break:break-word;padding:16px;';
-    txt.textContent = note.text || '';
-    body.appendChild(txt);
+	txt.className = 'nv-text';
+	txt.textContent = note.text || '';
+	body.appendChild(txt);
 
     r.appendChild(body);
 
