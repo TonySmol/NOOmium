@@ -2851,42 +2851,43 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
 
   /** Отправка: правка (Notes.edit) или создание (Notes.create + пин как родитель). */
   function send() {
-    if (sending) return;
-    const text = ta.value.trim();
-    if (!text) { Toast.show('warn', I18n.t('toast.empty')); return; }
-    const mode = Store.get('sendMode');
-    sending = true;
-    setSendingUI(true);
+  if (sending) return;
+  const text = ta.value.trim();
+  if (!text) { Toast.show('warn', I18n.t('toast.empty')); return; }
+  const mode = Store.get('sendMode');
+  sending = true;
+  setSendingUI(true);
 
-    const finish = () => {
-      sending = false;
-      setSendingUI(false);
-      editingId = null;
-      ta.value = '';
-      Context.setInput('');
-      updateCounter();
-      refreshEditUI();
-    };
+  const finish = () => {
+    sending = false;
+    setSendingUI(false);
+    editingId = null;
+    ta.value = '';
+    Context.setInput('');
+    updateCounter();
+    refreshEditUI();
+  };
 
-    if (editingId) {
-      Notes.edit(editingId, text)
-        .then(() => { Toast.show('ok', I18n.t('toast.edit.saved')); finish(); })
-        .catch(e => { Toast.show('err', String(e && e.message || e)); sending = false; setSendingUI(false); });
-      return;
-    }
-
-    const pin = Context.getPin();
-    const parentId = pin ? pin.id : null;
-
-    Notes.create(text, mode, parentId)
-      .then(note => {
-        Toast.show('ok', I18n.t(mode === 'world' ? 'toast.saved.public' : 'toast.saved.private')
-          + (note && note.parentId ? ' · ' + I18n.t('inf.linked') : ''));
-        try { bus.emit('editor:sent'); } catch (_) {}
-        finish();
-      })
+  if (editingId) {
+    Notes.edit(editingId, text)
+      .then(() => { Toast.show('ok', I18n.t('toast.edit.saved')); finish(); })
       .catch(e => { Toast.show('err', String(e && e.message || e)); sending = false; setSendingUI(false); });
+    return;
   }
+
+  // Берём eventId если родитель уже опубликован, иначе локальный id
+  const pin = Context.getPin();
+  const parentId = pin ? (pin.eventId || pin.id) : null;
+
+  Notes.create(text, mode, parentId)
+    .then(note => {
+      Toast.show('ok', I18n.t(mode === 'world' ? 'toast.saved.public' : 'toast.saved.private')
+        + (note && note.parentId ? ' · ' + I18n.t('inf.linked') : ''));
+      try { bus.emit('editor:sent'); } catch (_) {}
+      finish();
+    })
+    .catch(e => { Toast.show('err', String(e && e.message || e)); sending = false; setSendingUI(false); });
+}
 
   function init() {
     ta = document.getElementById('ed-ta');
