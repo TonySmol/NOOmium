@@ -1896,14 +1896,15 @@ DI.register('Nostr', function (Config, Logger, bus) {
  * Оркестратор децентрализованного обмена.
  *
  *  - Подписка на комнату: заметки (kind 1), запросы (21000), ответы (21001).
- *  - Анонсирует открытые заметки пользователя; после анонса сохраняет eventId.
+ *  - Анонсирует открытые заметки; после анонса сохраняет eventId.
  *  - На чужой запрос: префильтр → ранжирование → top-N ответов.
  *  - На пин шлёт запрос и собирает ответы в кеш.
- *  - loadHistory: расширяет окно подписки, чтобы подтянуть старые заметки с рэлеев.
+ *  - loadHistory: расширяет окно подписки (история сети).
+ *  - forgetNote: при удалении расшаренной заметки шлёт kind 5 (NIP-09),
+ *    прося релеи удалить событие. Best-effort (не все релеи поддерживают).
  *
- * Дедупликация: seen по ev.id + contentSeen по (автор+текст).
- * Нагрузочная устойчивость: rate-limit ответов, префильтр, лимит ответов,
- * ступенчатая отправка, переподключение.
+ * Переподключение защищено «эпохой» подписки: намеренное закрытие подписки
+ * (например, в loadHistory) не ложится в статус reconnecting.
  *
  * @deps Nostr, Protocol, DB, Ranker, Vec, Store, Config, Logger, EventBus
  * @exports NetService
@@ -1925,6 +1926,8 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   // окно подписки и история
   let currentWindow = Config.get('subWindow', 300);
   let historyLoading = false;
+  // «эпоха» подписки: отличает намеренное переподключение от обрыва
+  let subEpoch = 0;
 
   const kNote = () => Config.get('kNote', 1);
   const kQuery = () => Config.get('kQuery', 21000);
@@ -2056,6 +2059,24 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
       .catch(e => Logger.warn('NetService: не анонсировать', String(e)));
   }
 
+  /**
+   * Просит релеи удалить событие заметки (kind 5, NIP-09). Best-effort:
+   * поддерживают не все релеи, но это стандартный способ удаления.
+   * @param {Object} note - заметка с eventId.
+   */
+  function forgetNote(note) {
+    if (!note || !note.eventId) return;
+    const ev = {
+      kind: 5,
+      created_at: Math.floor(Date.now() / 1000),
+      tags: [['e', note.eventId]],
+      content: '',
+    };
+    Nostr.publish(ev)
+      .then(() => Logger.info('NetService: запрос удаления с рэлеев ' + note.id))
+      .catch(e => Logger.warn('NetService: не удалить с рэлеев', String(e)));
+  }
+
   // ── запрос при пине ──
   function maybeSendQuery() {
     const ctx = Store.get('context');
@@ -2074,16 +2095,19 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
       });
   }
 
-  // ── подписка на комнату ──
+  // ── подписка на комнату (с «эпохой» от ложных reconnect) ──
   function subscribeToRoom() {
     const since = Math.floor(Date.now() / 1000) - currentWindow;
     const filters = [{ kinds: [kNote(), kQuery(), kAnswer()], '#t': [room()], since }];
+    const myEpoch = ++subEpoch;
     if (subscription && typeof subscription.close === 'function') { try { subscription.close(); } catch (_) {} }
     subscription = Nostr.subscribe(filters, {
       onevent: onEvent,
       onclose: () => {
+        // устаревшая подписка (уже переподключились намеренно) — не дёргаем статус
+        if (myEpoch !== subEpoch) return;
         setStatus('reconnecting');
-        setTimeout(() => { if (started) subscribeToRoom(); }, Config.get('reconnectBaseDelay', 1000));
+        setTimeout(() => { if (started && myEpoch === subEpoch) subscribeToRoom(); }, Config.get('reconnectBaseDelay', 1000));
       },
     });
   }
@@ -2128,6 +2152,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
       subscribeToRoom();
       bus.on('note:created', note => { if (note && note.shared) announceNote(note); });
       bus.on('note:shared', note => { if (note && note.shared) announceNote(note); });
+      bus.on('note:deleted', note => { if (note && note.shared && note.eventId) forgetNote(note); });
       bus.on('db:change', () => rebuildCentroids());
       contextUnsub = Store.subscribe(s => s.context, () => maybeSendQuery());
       startHeartbeat();
@@ -2234,7 +2259,9 @@ DI.register('NoteActions', function (Notes, Modal, Toast, I18n) {
  * (JSON-безопасно для экспорта/импорта); Vec/Ranker переваривают оба формата.
  *
  * Сеть сюда не знает: модуль эмитит 'note:created'/'note:updated'/'note:deleted',
- * NetService подпишется и сделает announce. Изменение DB само триггерит Feed.
+ * NetService подпишется и сделает announce / forgetNote (NIP-09).
+ * remove сначала читает заметку, чтобы отдать в 'note:deleted' полный объект
+ * (с eventId и shared) — это нужно NetService для удаления с рэлеев.
  *
  * @deps DB, Embedder, EventBus, Logger, Utils
  * @exports Notes
@@ -2287,12 +2314,16 @@ DI.register('Notes', function (DB, Embedder, bus, Logger, Utils) {
   }
 
   /**
-   * Удаляет заметку.
+   * Удаляет заметку. Эмитит 'note:deleted' с ПОЛНЫМ объектом заметки
+   * (含 eventId и shared), чтобы NetService мог удалить её и с рэлеев (NIP-09).
    * @param {string} id
-   * @returns {Promise<void>}
+   * @returns {Promise<Object|null>} Удалённая заметка или null.
    */
   function remove(id) {
-    return DB.del(id).then(() => { emit('note:deleted', { id }); });
+    return DB.get(id).then(note => {
+      if (!note) return null;
+      return DB.del(id).then(() => { emit('note:deleted', note); return note; });
+    });
   }
 
   /**
