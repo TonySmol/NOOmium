@@ -5,7 +5,6 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
 <meta name="theme-color" content="#10131a">
 <title>NOOmium</title>
-<!-- CDN: nostr-tools — статический import в NET/Nostr; transformers — ленивый в AI/Embedder. Обе ESM. -->
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Spectral:wght@500;700&family=Manrope:wght@400;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
@@ -55,14 +54,12 @@ body.ready #app{display:flex}
 /* MAIN */
 #main{flex:1;display:flex;flex-direction:column;overflow:hidden;min-height:0}
 
-/* CONTEXT BANNER — скрыт в просмотре */
 #ctx-banner{display:none;align-items:center;gap:10px;margin:10px 14px 0;padding:9px 12px;background:var(--amber-glow);border:1px solid var(--line-2);border-radius:var(--r-sm);font-size:12px}
 #ctx-banner.on{display:flex}
 #ctx-banner .ctx-src{font:600 10px var(--mono);color:var(--amber);text-transform:uppercase;letter-spacing:.04em}
 #ctx-banner .ctx-txt{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text)}
 #ctx-banner .ctx-x{color:var(--text-3);font-size:16px;padding:0 4px}
 
-/* SEGMENTS — скрыты в просмотре */
 #seg{display:none;gap:2px;margin:10px 14px;padding:5px 3px;background:var(--surface);border:1px solid var(--line);border-radius:var(--r-sm);flex-shrink:0}
 #seg.on{display:flex}
 .seg-b{flex:1;padding:8px 6px;border-radius:6px;font-size:13px;font-weight:600;color:var(--text-3);display:flex;align-items:center;justify-content:center;gap:6px;transition:all .15s var(--ease)}
@@ -70,14 +67,12 @@ body.ready #app{display:flex}
 .seg-b .cnt{font:600 10px var(--mono);padding:1px 6px;border-radius:9px;background:var(--surface-3);min-width:16px;text-align:center}
 .seg-b.on .cnt{background:var(--amber-glow);color:var(--amber)}
 
-/* FEED — всегда видим */
 #feed-wrap{flex:1;position:relative;overflow:hidden;min-height:0}
 #feed{position:absolute;inset:0;overflow-y:auto;padding:10px 14px 12px;-webkit-overflow-scrolling:touch}
 .note{position:relative;background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:14px;margin-bottom:10px;cursor:pointer;transition:border-color .15s var(--ease),transform .15s var(--ease);animation:noteIn .25s var(--ease) both}
 .note:hover{border-color:var(--line-2)}.note.pinned{border-color:var(--amber);box-shadow:0 0 0 1px var(--amber-glow)}
 @keyframes noteIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
 .note-txt{font-size:15px;white-space:pre-wrap;word-break:break-word;margin-bottom:10px}
-.note-txt mark{background:var(--amber-glow);color:var(--amber);border-radius:3px;padding:0 2px}
 .note-meta{display:flex;align-items:center;gap:10px;font:400 11px var(--mono);color:var(--text-3);flex-wrap:wrap}
 .note-tag{padding:2px 7px;border-radius:4px;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.03em}
 .note-tag.priv{background:var(--surface-3);color:var(--text-2)}.note-tag.world{background:var(--teal-glow);color:var(--teal)}
@@ -85,12 +80,10 @@ body.ready #app{display:flex}
 #feed-empty{position:absolute;inset:0;display:none;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:32px;color:var(--text-3)}
 #feed-empty.on{display:flex}#feed-empty .ic{font:700 30px var(--display);opacity:.5;margin-bottom:12px}
 
-/* HISTORY — кнопка загрузки истории сети */
 .hist-btn{align-self:center;margin:2px 0 10px;padding:8px 16px;border-radius:999px;background:var(--surface-2);border:1px solid var(--line);color:var(--text-2);font-size:12px;cursor:pointer;transition:all .15s var(--ease)}
 .hist-btn:hover{border-color:var(--amber);color:var(--text)}
 .hist-btn:disabled{opacity:.5;cursor:default}
 
-/* COMPOSER — всегда видим */
 #composer{margin:0 14px 12px;padding:10px 12px;background:var(--surface);border:1px solid var(--line);border-radius:var(--r);flex-shrink:0;transition:border-color .15s var(--ease)}
 #composer:focus-within{border-color:var(--amber)}
 #ed-ta{width:100%;min-height:44px;max-height:120px;background:none;border:none;outline:none;resize:none;font:15px/1.5 var(--font);color:var(--text)}
@@ -109,7 +102,6 @@ body.ready #app{display:flex}
 #btn-send{height:38px;min-width:44px;padding:0 16px;border-radius:999px;background:var(--amber);color:#1a1206;font-weight:700;display:flex;align-items:center;justify-content:center;transition:transform .1s var(--ease),filter .15s var(--ease)}
 #btn-send:active:not(:disabled){transform:scale(.95)}#btn-send.sending{opacity:.7;pointer-events:none}
 
-/* BASE — скрыта по умолчанию, открывается из меню */
 #base{display:none;flex-direction:column;flex:1;overflow:hidden;min-height:0}
 #base.on{display:flex}
 #base-h{padding:10px 14px 0;flex-shrink:0}
@@ -125,7 +117,6 @@ body.ready #app{display:flex}
 .bi-t{font-size:14px;white-space:pre-wrap;word-break:break-word;margin-bottom:8px;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
 .bi-f{display:flex;justify-content:space-between;align-items:center;font:400 11px var(--mono);color:var(--text-3)}
 
-/* OVERLAYS */
 #overlay{position:fixed;inset:0;background:rgba(0,0,0,.5);backdrop-filter:blur(4px);display:none;align-items:center;justify-content:center;padding:16px;z-index:1000}
 #overlay.on{display:flex}
 #modal{background:var(--surface);border:1px solid var(--line-2);border-radius:var(--r);width:min(460px,100%);max-height:86vh;display:flex;flex-direction:column;box-shadow:0 24px 64px rgba(0,0,0,.5);animation:mIn .2s var(--ease)}
@@ -144,8 +135,6 @@ body.ready #app{display:flex}
 .prog-c{background:var(--surface);border:1px solid var(--line-2);border-radius:var(--r);padding:26px;max-width:340px;width:100%;text-align:center}
 .prog-bar{height:4px;background:var(--surface-3);border-radius:2px;overflow:hidden;margin:14px 0 8px}.prog-fill{height:100%;width:0;background:var(--amber);transition:width .3s var(--ease)}
 #noteview{position:fixed;inset:0;background:var(--bg);z-index:900;display:none;flex-direction:column}#noteview.on{display:flex}
-
-/* NOTEVIEW: раскладка и кнопки действий */
 .nv-f{display:flex;justify-content:center;gap:8px;padding:10px 14px;padding-top:calc(10px + var(--safe-top));background:var(--surface);border-bottom:1px solid var(--line);flex-wrap:wrap;flex-shrink:0}
 .nv-b{flex:1;display:flex;flex-direction:column;overflow:hidden;padding:16px;min-height:0}
 .nv-f-bottom{display:flex;justify-content:center;gap:8px;padding:10px 14px;padding-bottom:calc(10px + var(--safe-bot));background:var(--surface);border-top:1px solid var(--line);flex-shrink:0}
@@ -174,7 +163,6 @@ body.ready #app{display:flex}
   <div id="offline-bar"><span id="offline-text"></span></div>
 
   <div id="main">
-    <!-- Режим автора: баннер контекста + сегменты (скрыты в просмотре) -->
     <div id="ctx-banner">
       <span class="ctx-src" id="ctx-src"></span>
       <span class="ctx-txt" id="ctx-txt"></span>
@@ -186,16 +174,13 @@ body.ready #app{display:flex}
       <button class="seg-b" data-k="seren"><span>Озарения</span><span class="cnt" id="c-seren">0</span></button>
     </div>
 
-    <!-- Лента (всегда) -->
     <div id="feed-wrap">
       <div id="feed"></div>
       <div id="feed-empty"><div class="ic">◇</div><div id="feed-empty-t"></div></div>
     </div>
 
-    <!-- История сети -->
     <button id="btn-history" class="hist-btn">Загрузить ещё</button>
 
-    <!-- Поле ввода (всегда) -->
     <div id="composer">
       <textarea id="ed-ta" placeholder="О чём думаешь?"></textarea>
       <div id="ed-foot">
@@ -211,7 +196,6 @@ body.ready #app{display:flex}
       </div>
     </div>
 
-    <!-- База (скрыта, открывается из меню/кнопки) -->
     <div id="base">
       <div id="base-h">
         <div id="base-stats">
@@ -246,9 +230,15 @@ body.ready #app{display:flex}
 'use strict';
 
 // ═══════════════════════════════════════════════════════════════
-// CORE/DI — ПРЕАМБУЛА (готова, не модуль). Всегда выполнена первой.
-// Все модули ниже регистрируются через DI.register; порядок их
-// вставки не важен — DI.resolve ленивый и сам тянет зависимости.
+// ВЕРСИЯ ПРИЛОЖЕНИЯ
+// Поднимается при каждом релизе. Отображается в меню (MenuView).
+// ═══════════════════════════════════════════════════════════════
+const APP_VERSION = '0.2.0';
+
+// ═══════════════════════════════════════════════════════════════
+// CORE/DI — ПРЕАМБУЛА (не модуль). Выполняется первой.
+// Все модули ниже регистрируются через DI.register; порядок вставки
+// не важен — DI.resolve ленивый и сам тянет зависимости.
 // ═══════════════════════════════════════════════════════════════
 const DI = (() => {
   const factories = new Map();
@@ -282,31 +272,33 @@ const DI = (() => {
   return { register, resolve };
 })();
 
-// ═══════════════════ CORE ═══════════════════
-
-// ─── МОДУЛЬ 1: CORE/Config ─── START ─────────────────────────
+// ─── CORE/Config ─── START ───────────────────────────────────
 /**
- * Конфигурация: дефолты + персист в localStorage.
- * Мержит только известные ключи (защита от чужой/старой схемы).
+ * Конфигурация: дефолты + персист в localStorage + версионирование схемы.
  *
- * Миграция рэлеев: поле relaysVersion. Когда дефолтный relaysVersion выше
- * сохранённого, список relays принудительно берётся из дефолтов и фиксируется.
- * Это позволяет обновлять список рэлеев у всех без консольных команд.
+ * Версионирование:
+ *  - schemaVersion — текущая версия схемы конфига. Поднимается при изменении
+ *    структуры. При загрузке сохранённый конфиг прогоняется через миграции
+ *    (migrations), чтобы старые данные не ломали новую схему.
+ *  - Понимает и старый ключ `version` (обратная совместимость).
+ *  - Мержатся только известные ключи — чужое/устаревшее не попадает в state.
  *
  * @exports Config
  */
 DI.register('Config', function () {
   const KEY = 'noomium:cfg';
 
+  /** Текущая версия схемы конфига. @readonly */
+  const SCHEMA_VERSION = 3;
+
   /** Значения по умолчанию (заморожены). @readonly */
   const defaults = Object.freeze({
-    version: 2,
-    relaysVersion: 4,   // поднять при смене списка рэлеев → авто-обновление у всех
+    schemaVersion: SCHEMA_VERSION,
 
     // ── Общее ──
     room: 'noomium-main',
     theme: 'dark',
-    lang: null,
+    lang: null,                       // null = автодетект
     onboarded: false,
     logLevel: 'info',
 
@@ -322,15 +314,14 @@ DI.register('Config', function () {
     vectorSimilarityThreshold: 0.98,
 
     // ── Сеть ──
-    // Проверенные открытые релеи без woT, доходящие с деплоя.
-    // damus.io / nos.lol / nostr.mom / offchain.pub — не коннектятся или woT.
     relays: [
       'wss://relay.primal.net',
       'wss://relay.snort.social',
     ],
-    kNote: 1,
-    kQuery: 21000,
-    kAnswer: 21001,
+    kNote: 1,                         // regular, хранится релеями
+    kQuery: 21000,                    // ephemeral
+    kAnswer: 21001,                   // ephemeral
+    kDelete: 5,                       // NIP-09, удаление
     queryRateLimit: 3000,
     maxResponses: 8,
     responseWindow: 6000,
@@ -338,6 +329,7 @@ DI.register('Config', function () {
     peerTTL: 60000,
     heartbeat: 30000,
     subWindow: 300,
+    historyMaxWindow: 2592000,        // 30 дней — потолок «Загрузить ещё»
     relayErrorThreshold: 5,
     relayCircuitBreakTime: 120000,
     relayBackoff1: 15000,
@@ -369,22 +361,38 @@ DI.register('Config', function () {
     cloudView: false,
   });
 
+  /**
+   * Миграции схемы. Ключ — версия, С которой мигрируем; функция переводит
+   * сохранённый конфиг на следующую версию. Применяются последовательно.
+   */
+  const migrations = {
+    // v1 → v2: структура уже совпадает, просто поднимаем версию
+    1: s => s,
+    // v2 → v3: проверенный список рэлеев (старые могли лечь), виджет истории
+    2: s => {
+      s.relays = defaults.relays.slice();
+      return s;
+    },
+  };
+
   /** Текущее состояние (дефолты + сохранённое). @type {Object} */
   const state = Object.assign({}, defaults);
 
-  // Загрузка: мержим только известные ключи + миграция рэлеев.
+  // Загрузка + миграции + мерж только известных ключей.
   try {
     const raw = localStorage.getItem(KEY);
     if (raw) {
-      const saved = JSON.parse(raw);
+      let saved = JSON.parse(raw);
       if (saved && typeof saved === 'object') {
-        for (const k of Object.keys(defaults)) if (k in saved) state[k] = saved[k];
-        // если сохранённый relaysVersion устарел — берём релеи из дефолтов
-        if (!saved.relaysVersion || saved.relaysVersion < defaults.relaysVersion) {
-          state.relays = defaults.relays.slice();
-          state.relaysVersion = defaults.relaysVersion;
-          try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (_) {}
+        // обратная совместимость со старым ключом `version`
+        let v = saved.schemaVersion || saved.version || 1;
+        while (v < SCHEMA_VERSION) {
+          const migrate = migrations[v];
+          if (typeof migrate === 'function') saved = migrate(saved);
+          v++;
         }
+        saved.schemaVersion = SCHEMA_VERSION;
+        for (const k of Object.keys(defaults)) if (k in saved) state[k] = saved[k];
       }
     }
   } catch (_) { /* битый JSON / приватный режим — живём с дефолтами */ }
@@ -399,11 +407,14 @@ DI.register('Config', function () {
     get(k, def) { return (k in state) ? state[k] : def; },
     /** @param {string} k @param {*} v */
     set(k, v) { state[k] = v; persist(); },
+    /** Принудительное сохранение. */
     save: persist,
     /** Копия дефолтов. @returns {Object} */
     defaults() { return Object.assign({}, defaults); },
     /** Копия текущего состояния. @returns {Object} */
     all() { return Object.assign({}, state); },
+    /** Версия схемы конфига. @returns {number} */
+    schemaVersion() { return SCHEMA_VERSION; },
     /** Сброс к дефолтам. */
     reset() {
       for (const k of Object.keys(defaults)) state[k] = defaults[k];
@@ -411,9 +422,9 @@ DI.register('Config', function () {
     },
   };
 });
-// ─── МОДУЛЬ 1: CORE/Config ─── END ───────────────────────────
+// ─── CORE/Config ─── END ─────────────────────────────────────
 
-// ─── МОДУЛЬ 2: CORE/EventBus ─── START ───────────────────────
+// ─── CORE/EventBus ─── START ─────────────────────────────────
 /**
  * Шина событий (pub/sub) — единственный канал «кто кому не друг».
  *
@@ -492,9 +503,9 @@ DI.register('EventBus', function () {
 
   return { on, once, off, emit };
 });
-// ─── МОДУЛЬ 2: CORE/EventBus ─── END ─────────────────────────
+// ─── CORE/EventBus ─── END ───────────────────────────────────
 
-// ─── МОДУЛЬ 3: CORE/Logger ─── START ─────────────────────────
+// ─── CORE/Logger ─── START ───────────────────────────────────
 /**
  * Логгер с уровнями, цветным выводом и кольцевой историей.
  *
@@ -572,9 +583,9 @@ DI.register('Logger', function () {
     },
   };
 });
-// ─── МОДУЛЬ 3: CORE/Logger ─── END ───────────────────────────
+// ─── CORE/Logger ─── END ─────────────────────────────────────
 
-// ─── МОДУЛЬ 4: CORE/Utils ─── START ──────────────────────────
+// ─── CORE/Utils ─── START ────────────────────────────────────
 /**
  * Чистые утилиты без зависимостей: экранирование, плюрализация,
  * форматирование дат, генерация id, debounce.
@@ -688,13 +699,17 @@ DI.register('Utils', function () {
 
   return { esc, escRe, plural, word, fmtDate, fmtTime, shortPk, uid, debounce };
 });
-// ─── МОДУЛЬ 4: CORE/Utils ─── END ────────────────────────────
+// ─── CORE/Utils ─── END ──────────────────────────────────────
 
-// ─── МОДУЛЬ 5: CORE/I18n ─── START ───────────────────────────
+// ─── CORE/I18n ─── START ─────────────────────────────────────
 /**
  * Интернационализация: словари ru/en, подстановка {param}, fallback-цепочка
  * «текущий язык → en → fallback → сам ключ». Язык автодетектится, персистится
  * в Config, смена транслируется через шину ('i18n:change') и onChange-колбэки.
+ *
+ * Все ключи приложения собраны здесь единым словарём — разбрасывать addDict
+ * по модулям не нужно (он оставлен на случай расширений).
+ *
  * @deps Config, EventBus
  * @exports I18n
  */
@@ -741,7 +756,7 @@ DI.register('I18n', function (Config, bus) {
   }
 
   /**
-   * Добавляет/дополняет словарь языка.
+   * Добавляет/дополняет словарь языка (для расширений).
    * @param {'ru'|'en'} lang
    * @param {Object<string,string>} dict
    */
@@ -768,31 +783,68 @@ DI.register('I18n', function (Config, bus) {
    */
   function onChange(fn) { if (typeof fn === 'function') listeners.push(fn); }
 
-  // ── Базовые словари (UI-модули дополнят через addDict) ──
+  // ── Базовые словари: все ключи приложения ──
   addDict('ru', {
     'app.name': 'NOOmium',
+    // статусы
     'st.net': 'сеть', 'st.ai.loading': 'модель', 'st.ai.ready': 'ии', 'st.ai.demo': 'ии/хеш',
     'st.net.online': 'онлайн', 'st.net.listen': 'слушаю', 'st.net.connecting': 'соединение',
     'st.net.reconnecting': 'пересоединение', 'st.net.failed': 'нет сети',
+    // композер
     'ed.placeholder': 'О чём думаешь?', 'ed.chars': 'симв.',
-    'btn.private': 'Личное', 'btn.public': 'Мир', 'btn.send': 'Отправить',
+    'btn.private': 'Личное', 'btn.public': 'Мир', 'btn.send': 'Отправить', 'btn.save': 'Сохранить',
+    // вкладки и сегменты
     'tab.stream': 'Поток', 'tab.base': 'База',
     'seg.local': 'Моё', 'seg.world': 'Мир', 'seg.seren': 'Озарения',
-    'ctx.pinned': 'пин', 'ctx.input': 'по тексту', 'ctx.clear': 'снять',
-    'sim.score': 'похожа на', 'inf.resonance': 'резонанс',
+    // контекст
+    'ctx.pinned': 'пин', 'ctx.input': 'по тексту', 'ctx.drift': 'дрейф от', 'ctx.clear': 'снять',
+    // сходство и связи
+    'sim.score': 'похожа на',
+    'inf.resonance': 'резонанс', 'inf.linked': 'по мотивам', 'inf.bymotif': 'по мотивам',
+    'inf.openparent': 'Открыть заметку-источник', 'inf.children': 'Потомки',
+    'inf.nochildren': 'Потомков пока нет', 'inf.lineage': 'Линейка «по мотивам»',
+    'inf.noancestors': 'Это корень — предков нет',
+    // пустые состояния
     'empty.local.t': 'Пока нет мыслей', 'empty.local.d': 'Напиши первую выше',
     'empty.world.t': 'Никто не думает так же', 'empty.world.d': 'Ждём открытые мысли',
     'empty.seren.t': 'Озарений нет', 'empty.seren.d': 'Попробуй иначе',
-    'empty.base.t': 'База пуста', 'empty.base.d': 'Запиши первую мысль',
-    'base.search': 'поиск...', 'base.sort.new': 'новые', 'base.sort.old': 'старые', 'base.sort.az': 'а-я',
+    'empty.base.t': 'База пуста', 'empty.base.d': 'Запиши первую мысль', 'empty.base.empty': 'Ничего не найдено',
+    // база
+    'base.search': 'поиск...',
+    'base.sort.new': 'новые', 'base.sort.old': 'старые', 'base.sort.az': 'а-я',
     'base.stat.total': 'всего', 'base.stat.open': 'открыто', 'base.stat.priv': 'лично',
     'base.tag.private': 'лично', 'base.tag.shared': 'открыто',
-    'btn.edit': 'Развить', 'btn.del': 'Удалить', 'btn.copy': 'Копия', 'btn.save': 'Сохранить',
-    'btn.cancel': 'Отмена', 'btn.close': 'Закрыть', 'btn.toggle.priv': 'Скрыть', 'btn.toggle.pub': 'Открыть',
+    'base.wipe': 'Стереть базу', 'base.wipe.confirm': 'Удалить все ваши заметки навсегда?',
+    // кнопки
+    'btn.edit': 'Развить', 'btn.del': 'Удалить', 'btn.copy': 'Копия',
+    'btn.cancel': 'Отмена', 'btn.close': 'Закрыть',
+    'btn.toggle.priv': 'Скрыть', 'btn.toggle.pub': 'Открыть',
+    // тосты
     'toast.saved.private': 'сохранено лично', 'toast.saved.public': 'опубликовано',
     'toast.copied': 'скопировано', 'toast.deleted': 'удалено', 'toast.copy.fail': 'не удалось',
     'toast.empty': 'напиши что-нибудь', 'toast.ai.notready': 'ии не готов',
+    'toast.base.wiped': 'база стёрта', 'toast.edit.saved': 'сохранено',
+    // меню
     'menu.settings': 'Настройки', 'menu.theme': 'Тема', 'menu.lang': 'Язык', 'menu.help': 'Как это работает',
+    // удаление
+    'del.confirm': 'Удалить эту заметку навсегда?',
+    // сеть
+    'net.loadmore': 'Загрузить ещё', 'net.loading': 'Загружаю…',
+    // онбординг
+    'onb.title': 'Как это работает', 'onb.dontshow': 'Больше не показывать', 'onb.gotit': 'Понятно',
+    'onb.what.t': 'NOOmium',
+    'onb.what.d': 'Соцсеть смыслов: мысли ищутся не по словам и не по лайкам, а по значению. Каждая мысль превращается в вектор — точку в пространстве смыслов.',
+    'onb.stream.t': 'Лента', 'onb.stream.d': 'Показывает свежие мысли — твои и из сети. Просто читай.',
+    'onb.pin.t': 'Пин',
+    'onb.pin.d': 'Кликни по мысли — она станет контекстом: лента покажет созвучное из твоей базы и из сети. Закреплённая мысль становится «мамой» для всего, что ты напишешь следом.',
+    'onb.drift.t': 'Дрейф',
+    'onb.drift.d': 'Начни печатать при пине — контекст плавно перейдёт к твоему тексту. Так можно органично уйти от исходной мысли к своей.',
+    'onb.modes.t': 'Личное и Мир',
+    'onb.modes.d': 'Личное остаётся только у тебя. Мир — делится мыслью с сетью, и другие смогут найти её по смыслу.',
+    'onb.resonance.t': 'Резонанс ◆',
+    'onb.resonance.d': 'Сколько чужих мыслей родила твоя. «↳ по мотивам» ведёт к заметке-источнику, клик по ◆ показывает потомков.',
+    'onb.keys.t': 'Клавиши',
+    'onb.keys.d': 'Ctrl/Cmd+Enter — отправить · / — фокус на поле · Esc — снять пин или закрыть окно.',
   });
   addDict('en', {
     'app.name': 'NOOmium',
@@ -800,45 +852,69 @@ DI.register('I18n', function (Config, bus) {
     'st.net.online': 'online', 'st.net.listen': 'listening', 'st.net.connecting': 'connecting',
     'st.net.reconnecting': 'reconnecting', 'st.net.failed': 'offline',
     'ed.placeholder': 'What are you thinking?', 'ed.chars': 'chars',
-    'btn.private': 'Private', 'btn.public': 'World', 'btn.send': 'Send',
+    'btn.private': 'Private', 'btn.public': 'World', 'btn.send': 'Send', 'btn.save': 'Save',
     'tab.stream': 'Stream', 'tab.base': 'Base',
     'seg.local': 'Mine', 'seg.world': 'World', 'seg.seren': 'Insights',
-    'ctx.pinned': 'pinned', 'ctx.input': 'by text', 'ctx.clear': 'clear',
-    'sim.score': 'similarity', 'inf.resonance': 'resonance',
+    'ctx.pinned': 'pinned', 'ctx.input': 'by text', 'ctx.drift': 'drift from', 'ctx.clear': 'clear',
+    'sim.score': 'similarity',
+    'inf.resonance': 'resonance', 'inf.linked': 'inspired by', 'inf.bymotif': 'inspired by',
+    'inf.openparent': 'Open source note', 'inf.children': 'Descendants',
+    'inf.nochildren': 'No descendants yet', 'inf.lineage': '“Inspired by” lineage',
+    'inf.noancestors': 'This is the root — no ancestors',
     'empty.local.t': 'No thoughts yet', 'empty.local.d': 'Write the first above',
     'empty.world.t': 'Nobody thinks alike', 'empty.world.d': 'Waiting for open thoughts',
     'empty.seren.t': 'No insights', 'empty.seren.d': 'Try different wording',
-    'empty.base.t': 'Base is empty', 'empty.base.d': 'Write your first thought',
-    'base.search': 'search...', 'base.sort.new': 'newest', 'base.sort.old': 'oldest', 'base.sort.az': 'a-z',
+    'empty.base.t': 'Base is empty', 'empty.base.d': 'Write your first thought', 'empty.base.empty': 'Nothing found',
+    'base.search': 'search...',
+    'base.sort.new': 'newest', 'base.sort.old': 'oldest', 'base.sort.az': 'a-z',
     'base.stat.total': 'total', 'base.stat.open': 'open', 'base.stat.priv': 'private',
     'base.tag.private': 'private', 'base.tag.shared': 'open',
-    'btn.edit': 'Develop', 'btn.del': 'Delete', 'btn.copy': 'Copy', 'btn.save': 'Save',
-    'btn.cancel': 'Cancel', 'btn.close': 'Close', 'btn.toggle.priv': 'Hide', 'btn.toggle.pub': 'Share',
+    'base.wipe': 'Wipe base', 'base.wipe.confirm': 'Delete all your notes forever?',
+    'btn.edit': 'Develop', 'btn.del': 'Delete', 'btn.copy': 'Copy',
+    'btn.cancel': 'Cancel', 'btn.close': 'Close',
+    'btn.toggle.priv': 'Hide', 'btn.toggle.pub': 'Share',
     'toast.saved.private': 'saved privately', 'toast.saved.public': 'shared',
     'toast.copied': 'copied', 'toast.deleted': 'deleted', 'toast.copy.fail': 'copy failed',
     'toast.empty': 'write something', 'toast.ai.notready': 'ai not ready',
+    'toast.base.wiped': 'base wiped', 'toast.edit.saved': 'saved',
     'menu.settings': 'Settings', 'menu.theme': 'Theme', 'menu.lang': 'Language', 'menu.help': 'How it works',
+    'del.confirm': 'Delete this note forever?',
+    'net.loadmore': 'Load more', 'net.loading': 'Loading…',
+    'onb.title': 'How it works', 'onb.dontshow': 'Don’t show again', 'onb.gotit': 'Got it',
+    'onb.what.t': 'NOOmium',
+    'onb.what.d': 'A social network of meaning: thoughts are found not by words or likes, but by sense. Each thought becomes a vector — a point in meaning-space.',
+    'onb.stream.t': 'Feed', 'onb.stream.d': 'Shows fresh thoughts — yours and from the network. Just read.',
+    'onb.pin.t': 'Pin',
+    'onb.pin.d': 'Click a thought to make it the context: the feed shows what resonates, from your base and the network. The pinned thought becomes the “mother” of what you write next.',
+    'onb.drift.t': 'Drift',
+    'onb.drift.d': 'Start typing while pinned — the context shifts toward your text. A natural way to drift from the original thought to your own.',
+    'onb.modes.t': 'Private & World',
+    'onb.modes.d': 'Private stays with you. World shares the thought with the network so others can find it by meaning.',
+    'onb.resonance.t': 'Resonance ◆',
+    'onb.resonance.d': 'How many thoughts yours inspired. “↳ inspired by” leads to the source note; click ◆ to see descendants.',
+    'onb.keys.t': 'Keys',
+    'onb.keys.d': 'Ctrl/Cmd+Enter — send · / — focus editor · Esc — unpin or close.',
   });
 
   return { t, addDict, setLang, getLang, onChange };
 }, ['Config', 'EventBus']);
-// ─── МОДУЛЬ 5: CORE/I18n ─── END ─────────────────────────────
+// ─── CORE/I18n ─── END ───────────────────────────────────────
 
-// ─── МОДУЛЬ 6: CORE/Store ─── START ──────────────────────────
+// ─── CORE/Store ─── START ────────────────────────────────────
 /**
  * Единый источник истины для UI-состояния.
  *
- * Режим (view/author) НЕ хранится — выводится из context.source методом mode().
+ * Режим (просмотр/автор) НЕ хранится отдельным полем — выводится из
+ * context.source методом mode(): source пуст → просмотр, иначе автор.
  * Хранимый mode пришлось бы синхронизировать вручную, выводимый не рассинхронится.
- * Тема — в Config (это настройка, не UI-состояние).
+ * Тема — в Config (это настройка, а не UI-состояние).
  *
  * Контракт: getState() возвращает замороженный снимок верхнего уровня;
  * вложенные структуры меняем только через setState с НОВЫМ объектом.
  *
  * @example
  *   Store.subscribe(s => s.context.source, src => {
- *     segBar.classList.toggle('on', src !== null);
- *     ctxBanner.classList.toggle('on', src === 'pin');
+ *     segBar.classList.toggle('on', src === 'input' || src === 'drift');
  *   });
  *
  * @exports Store
@@ -846,13 +922,13 @@ DI.register('I18n', function (Config, bus) {
 DI.register('Store', function () {
   /** Внутреннее состояние. @type {Object} */
   const state = {
-    view: 'stream',          // 'stream' | 'base' — активный экран (унифицировано с MenuView)
-    seg: 'local',            // 'local' | 'world' | 'seren' — активный сегмент (author)
-    context: { source: null, noteId: null, text: '', vector: null }, // source: null|'input'|'pin'|'drift'
+    view: 'stream',          // 'stream' | 'base' — активный экран
+    seg: 'local',            // 'local' | 'world' | 'seren' — активный сегмент (автор)
+    context: { source: null, noteId: null, text: '', vector: null, pinText: null }, // source: null|'input'|'pin'|'drift'
     sendMode: 'private',     // 'private' | 'world' — куда публикуем
     sendLock: false,         // блокировка отправки (анти-дабл)
-    lists: { local: [], world: [], seren: [] }, // результаты author-режима
-    feed: [],                // свежая лента view-режима
+    lists: { local: [], world: [], seren: [] }, // результаты автор-режима
+    feed: [],                // свежая лента режима просмотра
     netAuthorized: false,    // ключ сети загружен
   };
   /** Подписчики. @type {Function[]} */
@@ -910,7 +986,7 @@ DI.register('Store', function () {
    *   subscribe(fn) — на любое изменение, fn(snapshot);
    *   subscribe(selector, fn, equals?) — fn(selected, snapshot) только при
    *     изменении выбранного (по умолчанию Object.is; можно shallowEqual).
-   * @param {Function|Function} a - fn или selector.
+   * @param {Function} a - fn или selector.
    * @param {Function} [b] - listener (для формы с селектором).
    * @param {Function} [equals] - компаратор.
    * @returns {Function} Отписка.
@@ -928,12 +1004,10 @@ DI.register('Store', function () {
   }
 
   return { getState, get, setState, subscribe, mode, shallowEqual };
-});
-// ─── МОДУЛЬ 6: CORE/Store ─── END ────────────────────────────
+}, []);
+// ─── CORE/Store ─── END ──────────────────────────────────────
 
-// ═══════════════════ DATA ═══════════════════
-
-// ─── МОДУЛЬ 7: DATA/Vec ─── START ────────────────────────────
+// ─── DATA/Vec ─── START ──────────────────────────────────────
 /**
  * Векторная математика: кодирование для Nostr-тегов, косинусное сходство,
  * нормализация и k-means для центроидов.
@@ -946,6 +1020,7 @@ DI.register('Store', function () {
  * @exports Vec
  */
 DI.register('Vec', function () {
+  /** Приводит вход к Float32Array. @param {*} v @returns {Float32Array} */
   const f32 = v => (v instanceof Float32Array ? v : Float32Array.from(v || []));
 
   /**
@@ -1015,6 +1090,7 @@ DI.register('Vec', function () {
     return out;
   }
 
+  /** Квадрат евклидова расстояния. @param {*} a @param {*} b @returns {number} */
   function sqDist(a, b) {
     const n = Math.min(a.length, b.length);
     let s = 0;
@@ -1027,7 +1103,7 @@ DI.register('Vec', function () {
    * @param {Array<Float32Array|number[]>} vectors
    * @param {number} k
    * @param {number} [iterations=10]
-   * @returns {Float32Array[]}
+   * @returns {Float32Array[]} Центроиды.
    */
   function kmeans(vectors, k, iterations) {
     const iters = iterations || 10;
@@ -1065,18 +1141,19 @@ DI.register('Vec', function () {
 
   return { toB64, fromB64, cosine, normalize, kmeans };
 }, []);
-// ─── МОДУЛЬ 7: DATA/Vec ─── END ──────────────────────────────
+// ─── DATA/Vec ─── END ────────────────────────────────────────
 
-// ─── МОДУЛЬ 8: DATA/DB ─── START ─────────────────────────────
+// ─── DATA/DB ─── START ───────────────────────────────────────
 /**
  * Персистентное хранилище: IndexedDB с прозрачным in-memory fallback.
  *
  * Два объектных хранилища:
- *   notes — заметки пользователя {id,text,vector,shared,parentId?,parentPubkey?,createdAt,updatedAt};
- *   cache — принятые из сети заметки (LRU/TTL чистит NetService).
+ *   notes — заметки пользователя {id,text,vector,shared,parentId?,parentPubkey?,createdAt,updatedAt,eventId?};
+ *   cache — принятые из сети заметки (их id = Nostr eventId).
  *
  * Мутации notes эмитят 'db:change', мутации cache — 'db:cache'
- * (по этим событиям инвалидируются кэши Feed/NetService).
+ * (по ним инвалидируются Feed/Influence/Provenance).
+ * cacheDel нужен NetService для kind-5 (NIP-09) удаления из кэша.
  *
  * @deps Config, EventBus, Logger
  * @exports DB
@@ -1126,11 +1203,12 @@ DI.register('DB', function (Config, bus, Logger) {
   }
 
   /**
-   *通用 обёртка: выполняет операцию над store, возвращает Promise.
+   * Обёртка: выполняет операцию над store, возвращает Promise.
    * В fallback-режиме синхронно работает с Map.
    * @param {string} store - Имя хранилища.
    * @param {'readonly'|'readwrite'} mode
-   * @param {function(ObjectStore):IDBRequest} fn
+   * @param {function(Object):Object} fn - (store) => IDBRequest.
+   * @param {Function} memFn - fallback на Map.
    * @returns {Promise<*>}
    */
   function withStore(store, mode, fn, memFn) {
@@ -1269,19 +1347,26 @@ DI.register('DB', function (Config, bus, Logger) {
   function cacheAll() {
     return withStore(CACHE(), 'readonly', s => s.getAll(), () => Array.from(memCache.values()));
   }
+  /**
+   * Удаляет заметку из кэша (для kind-5 удаления). Эмитит db:cache.
+   * @param {string} id
+   * @returns {Promise<*>}
+   */
+  function cacheDel(id) {
+    return withStore(CACHE(), 'readwrite', s => s.delete(id), () => { memCache.delete(id); })
+      .then(res => { emitCache(); return res; });
+  }
   /** @returns {Promise<void>} */
   function cacheClear() {
     return withStore(CACHE(), 'readwrite', s => s.clear(), () => { memCache.clear(); })
       .then(res => { emitCache(); return res; });
   }
 
-  return { put, get, del, all, count, getAllPaginated, bulkPut, reset, cachePut, cacheGet, cacheAll, cacheClear };
+  return { put, get, del, all, count, getAllPaginated, bulkPut, reset, cachePut, cacheGet, cacheAll, cacheDel, cacheClear };
 }, ['Config', 'EventBus', 'Logger']);
-// ─── МОДУЛЬ 8: DATA/DB ─── END ───────────────────────────────
+// ─── DATA/DB ─── END ─────────────────────────────────────────
 
-// ═══════════════════ AI ═══════════════════
-
-// ─── МОДУЛЬ 9: AI/Embedder ─── START ─────────────────────────
+// ─── AI/Embedder ─── START ───────────────────────────────────
 /**
  * Эмбеддинги в Web Worker (transformers.js, ленивая загрузка модели).
  *
@@ -1289,13 +1374,14 @@ DI.register('DB', function (Config, bus, Logger) {
  * В 'demo' и до вызова load() embed() мгновенно возвращает детерминированный
  * hash-вектор — приложение работает всегда, просто поиск грубее.
  *
- * Прогресс загрузки транслируется через 'ai:progress' и 'ai:status'.
- * Ошибка/таймаут отдельного embed не роняет ничего — тихий hash-fallback.
+ * Прогресс загрузки транслируется через 'ai:progress' и 'ai:status'
+ * (их слушают Progress и HeaderStatus). Ошибка/таймаут отдельного embed
+ * не роняет ничего — тихий hash-fallback.
  *
- * @deps Config, Logger, EventBus
+ * @deps Config, EventBus, Logger
  * @exports Embedder
  */
-DI.register('Embedder', function (Config, Logger, bus) {
+DI.register('Embedder', function (Config, bus, Logger) {
   /** Код Worker'а строкой: изолированный поток, модель не трогает UI. */
   const workerCode = `
 let extractor = null;
@@ -1523,10 +1609,10 @@ self.onmessage = async function (e) {
     /** Подписка на прогресс загрузки. @param {Function} fn */
     onProgress(fn) { if (typeof fn === 'function') progressFns.push(fn); },
   };
-}, ['Config', 'Logger', 'EventBus']);
-// ─── МОДУЛЬ 9: AI/Embedder ─── END ───────────────────────────
+}, ['Config', 'EventBus', 'Logger']);
+// ─── AI/Embedder ─── END ─────────────────────────────────────
 
-// ─── МОДУЛЬ 10: AI/Ranker ─── START ──────────────────────────
+// ─── AI/Ranker ─── START ─────────────────────────────────────
 /**
  * Ранжирование по векторному сходству.
  *
@@ -1586,19 +1672,19 @@ DI.register('Ranker', function (Vec, Config) {
 
   return { cosineBatch, split, isSimilar };
 }, ['Vec', 'Config']);
-// ─── МОДУЛЬ 10: AI/Ranker ─── END ────────────────────────────
+// ─── AI/Ranker ─── END ───────────────────────────────────────
 
-// ═══════════════════ NET ═══════════════════
-
-// ─── МОДУЛЬ 11: NET/Protocol ─── START ───────────────────────
+// ─── NET/Protocol ─── START ──────────────────────────────────
 /**
  * Контракт событий NOOmium поверх Nostr. Чистые функции encode/decode/validate.
  *
- *   NOTE  = kind 1 (regular, хранится релеями): content = текст;
- *           теги ['t',room], ['v',b64-вектор], ['parent',id,pubkey]?.
- *   QUERY = kind 21000 (ephemeral): content = JSON {vector, maxResponses, window}.
- *   ANSWER= kind 21001 (ephemeral): content = JSON {noteId, text, vector, score};
- *           тег ['e', queryId] — привязка к запросу.
+ *   NOTE   = kind 1 (regular, хранится релеями): content = текст;
+ *            теги ['t',room], ['v',b64-вектор], ['parent',id,pubkey]?.
+ *   QUERY  = kind 21000 (ephemeral): content = JSON {vector, maxResponses, window}.
+ *   ANSWER = kind 21001 (ephemeral): content = JSON {noteId, text, vector, score};
+ *            тег ['e', queryId] — привязка к запросу.
+ *   DELETE = kind 5 (NIP-09): теги ['e', eventId...] — просьба релеям удалить
+ *            события; ['t',room] — чтобы попадал в комнатный фильтр подписки.
  *
  * Вектор в событиях — компактный base64 (Int16) от Float32Array.
  * @deps Config, Vec
@@ -1743,11 +1829,48 @@ DI.register('Protocol', function (Config, Vec) {
     };
   }
 
-  return { noteEvent, decodeNote, queryEvent, decodeQuery, answerEvent, decodeAnswer };
-}, ['Config', 'Vec']);
-// ─── МОДУЛЬ 11: NET/Protocol ─── END ─────────────────────────
+  /**
+   * Шаблон события удаления (NIP-09, kind 5). Ссылается на удаляемые события
+   * тегами ['e', eventId]; тег ['t', room] нужен, чтобы событие попало в
+   * комнатный фильтр подписки и другие участники его получили.
+   * @param {string|string[]} eventIds - Один id или массив id удаляемых событий.
+   * @param {string} room
+   * @returns {Object|null} Шаблон, либо null если нет валидных id.
+   */
+  function deleteEvent(eventIds, room) {
+    const ids = Array.isArray(eventIds) ? eventIds : [eventIds];
+    const tags = ids.filter(Boolean).map(id => ['e', id]);
+    if (!tags.length) return null;
+    if (room) tags.push(['t', room]);
+    return {
+      kind: Config.get('kDelete', 5),
+      created_at: Math.floor(Date.now() / 1000),
+      tags,
+      content: '',
+    };
+  }
 
-// ─── МОДУЛЬ 12: NET/Nostr ─── START ──────────────────────────
+  /**
+   * Разбирает событие удаления (NIP-09). Возвращает список id, которые просят
+   * удалить. Используется NetService, чтобы вычистить их из кэша (DB.cacheDel).
+   * @param {Object} ev
+   * @returns {{eventIds:string[], authorPubkey:string}|null}
+   */
+  function decodeDelete(ev) {
+    if (!ev || ev.kind !== Config.get('kDelete', 5)) return null;
+    const eTags = (ev.tags || []).filter(t => Array.isArray(t) && t[0] === 'e' && t[1]);
+    if (!eTags.length) return null;
+    return {
+      eventIds: eTags.map(t => t[1]),
+      authorPubkey: ev.pubkey,
+    };
+  }
+
+  return { noteEvent, decodeNote, queryEvent, decodeQuery, answerEvent, decodeAnswer, deleteEvent, decodeDelete };
+}, ['Config', 'Vec']);
+// ─── NET/Protocol ─── END ────────────────────────────────────
+
+// ─── NET/Nostr ─── START ─────────────────────────────────────
 /**
  * Транспорт Nostr: динамический импорт nostr-tools, ключи, SimplePool,
  * публикация/подписка. Низкий уровень — оркестрирует NetService.
@@ -1755,13 +1878,16 @@ DI.register('Protocol', function (Config, Vec) {
  * Публикация порелейная (ensureRelay → relay.publish): переживает отказ
  * отдельных рэлеев, резолвится по первому принявшему.
  *
+ * Универсален по типам событий: одинаково возит kind 1 / 21000 / 21001 / 5,
+ * поэтому для NIP-09 удаления менять здесь ничего не нужно.
+ *
  * TODO(security): секретный ключ сейчас в localStorage открыто.
  * Шифрование PBKDF2+AES-GCM добавим отдельным срезом.
  *
- * @deps Config, Logger, EventBus
+ * @deps Config, EventBus, Logger
  * @exports Nostr
  */
-DI.register('Nostr', function (Config, Logger, bus) {
+DI.register('Nostr', function (Config, bus, Logger) {
   const CDN = 'https://cdn.jsdelivr.net/npm/nostr-tools@2.7.2/+esm';
   const SK_KEY = 'noomium:sk';
 
@@ -1838,30 +1964,24 @@ DI.register('Nostr', function (Config, Logger, bus) {
     if (!pool) return Promise.reject(new Error('Nostr not ready'));
     const urls = relays();
     if (!urls.length) return Promise.reject(new Error('no relays configured'));
-
     return new Promise((resolve, reject) => {
       let settled = false;
       let failures = 0;
       urls.forEach(url => {
         pool.ensureRelay(url)
           .then(relay => relay.publish(ev))
-          .then(() => {
-            if (!settled) { settled = true; resolve(ev); }
-          })
+          .then(() => { if (!settled) { settled = true; resolve(ev); } })
           .catch(err => {
             failures++;
             Logger.warn('Nostr: релей ' + url + ' не принял', String(err && err.message || err));
-            if (!settled && failures === urls.length) {
-              settled = true;
-              reject(new Error('no relay accepted'));
-            }
+            if (!settled && failures === urls.length) { settled = true; reject(new Error('no relay accepted')); }
           });
       });
     });
   }
 
   /**
-   * Подписка на многих релеях.
+   * Подписка на многих релеях. Универсальна по kind (включая kind 5).
    * @param {Object[]} filters
    * @param {{onevent?:Function,onclose?:Function}} handlers
    * @returns {Object|null} Подписка с close().
@@ -1888,23 +2008,29 @@ DI.register('Nostr', function (Config, Logger, bus) {
   }
 
   return { init, sign, publish, subscribe, ensureRelay, getPubkey, isReady, relays, close };
-}, ['Config', 'Logger', 'EventBus']);
-// ─── МОДУЛЬ 12: NET/Nostr ─── END ────────────────────────────
+}, ['Config', 'EventBus', 'Logger']);
+// ─── NET/Nostr ─── END ───────────────────────────────────────
 
-// ─── МОДУЛЬ 13: NET/NetService ─── START ─────────────────────
+// ─── NET/NetService ─── START ────────────────────────────────
 /**
  * Оркестратор децентрализованного обмена.
  *
- *  - Подписка на комнату: заметки (kind 1), запросы (21000), ответы (21001).
+ *  - Подписка на комнату: заметки (kind 1), запросы (21000), ответы (21001),
+ *    удаления (kind 5, NIP-09).
  *  - Анонсирует открытые заметки; после анонса сохраняет eventId.
- *  - На чужой запрос: префильтр → ранжирование → top-N ответов.
+ *  - На чужой запрос: центроидный префильтр → ранжирование → top-N ответов.
  *  - На пин шлёт запрос и собирает ответы в кеш.
  *  - loadHistory: расширяет окно подписки (история сети).
  *  - forgetNote: при удалении расшаренной заметки шлёт kind 5 (NIP-09),
- *    прося релеи удалить событие. Best-effort (не все релеи поддерживают).
+ *    прося релеи удалить событие; другие участники, получив kind 5,
+ *    вычищают заметку из кэша (DB.cacheDel) — метка резонанса гаснет.
  *
- * Переподключение защищено «эпохой» подписки: намеренное закрытие подписки
- * (например, в loadHistory) не ложится в статус reconnecting.
+ * Переподключение защищено «эпохой» подписки (subEpoch): намеренное
+ * закрытие подписки (например, в loadHistory) не ложится в статус reconnecting.
+ *
+ * Дедупликация: seen по ev.id + contentSeen по (автор+текст).
+ * Нагрузочная устойчивость: rate-limit ответов, префильтр, лимит ответов,
+ * ступенчатая отправка, переподключение.
  *
  * @deps Nostr, Protocol, DB, Ranker, Vec, Store, Config, Logger, EventBus
  * @exports NetService
@@ -1932,6 +2058,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   const kNote = () => Config.get('kNote', 1);
   const kQuery = () => Config.get('kQuery', 21000);
   const kAnswer = () => Config.get('kAnswer', 21001);
+  const kDelete = () => Config.get('kDelete', 5);
   const room = () => Config.get('room', 'noomium-main');
 
   function setStatus(s) { try { bus.emit('net:status', { status: s }); } catch (_) {} }
@@ -1977,11 +2104,12 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     if (!ev || seen.has(ev.id)) return;
     seen.add(ev.id);
     trimSeen();
-    if (ev.pubkey === Nostr.getPubkey()) return;
+    if (ev.pubkey === Nostr.getPubkey()) return;   // своё не обрабатываем
 
     if (ev.kind === kNote()) handleIncomingNote(ev);
     else if (ev.kind === kQuery()) handleIncomingQuery(ev);
     else if (ev.kind === kAnswer()) handleIncomingAnswer(ev);
+    else if (ev.kind === kDelete()) handleIncomingDelete(ev);
   }
 
   function handleIncomingNote(ev) {
@@ -1998,7 +2126,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     if (!q) return;
     const now = Date.now();
     const last = peerQueryTimes.get(ev.pubkey) || 0;
-    if (now - last < Config.get('queryRateLimit', 3000)) return;
+    if (now - last < Config.get('queryRateLimit', 3000)) return;   // rate-limit на пира
     peerQueryTimes.set(ev.pubkey, now);
     if (!passesPrefilter(q.vector)) return;
 
@@ -2026,7 +2154,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   function handleIncomingAnswer(ev) {
     const a = Protocol.decodeAnswer(ev);
     if (!a) return;
-    if (a.queryId !== activeQueryId) return;
+    if (a.queryId !== activeQueryId) return;   // ответ не на наш запрос
     if (isContentDuplicate(a.authorPubkey, a.text)) return;
     peers.set(a.authorPubkey, Date.now());
     DB.cachePut({
@@ -2038,6 +2166,21 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
       createdAt: a.createdAt,
       score: a.score,
     });
+    notifyPeers();
+  }
+
+  /**
+   * Входящее удаление (NIP-09): вычищаем указанные заметки из кэша.
+   * DB.cacheDel эмитит db:cache → Feed/Influence/Provenance пересчитаются,
+   * метка резонанса на родителе гаснет.
+   */
+  function handleIncomingDelete(ev) {
+    const del = Protocol.decodeDelete(ev);
+    if (!del) return;
+    del.eventIds.forEach(eventId => {
+      if (eventId) DB.cacheDel(eventId);
+    });
+    if (del.authorPubkey) peers.set(del.authorPubkey, Date.now());
     notifyPeers();
   }
 
@@ -2066,12 +2209,8 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
    */
   function forgetNote(note) {
     if (!note || !note.eventId) return;
-    const ev = {
-      kind: 5,
-      created_at: Math.floor(Date.now() / 1000),
-      tags: [['e', note.eventId]],
-      content: '',
-    };
+    const ev = Protocol.deleteEvent(note.eventId, room());
+    if (!ev) return;
     Nostr.publish(ev)
       .then(() => Logger.info('NetService: запрос удаления с рэлеев ' + note.id))
       .catch(e => Logger.warn('NetService: не удалить с рэлеев', String(e)));
@@ -2090,7 +2229,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     Nostr.publish(tpl)
       .then(ev => { activeQueryId = ev.id; Logger.info('NetService: запрос ' + ev.id.slice(0, 8) + '…'); })
       .catch(e => {
-        lastQueryVec = null; lastQueryTime = 0;
+        lastQueryVec = null; lastQueryTime = 0;   // даём повторить
         Logger.warn('NetService: не отправить запрос', String(e));
       });
   }
@@ -2098,7 +2237,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   // ── подписка на комнату (с «эпохой» от ложных reconnect) ──
   function subscribeToRoom() {
     const since = Math.floor(Date.now() / 1000) - currentWindow;
-    const filters = [{ kinds: [kNote(), kQuery(), kAnswer()], '#t': [room()], since }];
+    const filters = [{ kinds: [kNote(), kQuery(), kAnswer(), kDelete()], '#t': [room()], since }];
     const myEpoch = ++subEpoch;
     if (subscription && typeof subscription.close === 'function') { try { subscription.close(); } catch (_) {} }
     subscription = Nostr.subscribe(filters, {
@@ -2179,80 +2318,9 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
 
   return { start, stop, loadHistory };
 }, ['Nostr', 'Protocol', 'DB', 'Ranker', 'Vec', 'Store', 'Config', 'Logger', 'EventBus']);
-// ─── МОДУЛЬ 13: NET/NetService ─── END ───────────────────────
+// ─── NET/NetService ─── END ─────────────────────────────────
 
-// ─── МОДУЛЬ 14: NET/IndexClient ─── START ────────────────────
-/** ЗАДЕЛ (не реализуем сейчас).
- * REST-клиент к индексатору/Qdrant: search(vector,topK), лидерборд влияния.
- * Опционален; ядро работает без него. Активируется при Config.indexerUrl.
- * @deps Config, Logger
- * @exports IndexClient
- */
-// ─── МОДУЛЬ 14: NET/IndexClient ─── END ──────────────────────
-
-// ═══════════════════ DOMAIN ═══════════════════
-
-// ─── МОДУЛЬ: DOMAIN/NoteActions ─── START ────────────────────
-/**
- * Общие действия над заметкой: удалить, переключить видимость, копировать.
- * Единая точка, чтобы FeedView / NoteView / BaseView не дублировали логику.
- * @deps Notes, Modal, Toast, I18n
- * @exports NoteActions
- */
-DI.register('NoteActions', function (Notes, Modal, Toast, I18n) {
-  /**
-   * Удаляет заметку с подтверждением.
-   * @param {string} id
-   */
-  function remove(id) {
-    if (!id) return;
-    Modal.confirm(I18n.t('btn.del'), I18n.t('del.confirm'), () => {
-      Notes.remove(id);
-      Toast.show('ok', I18n.t('toast.deleted'));
-    });
-  }
-
-  /**
-   * Переключает видимость (личное ↔ открытое).
-   * @param {string} id
-   */
-  function toggle(id) {
-    if (!id) return;
-    Notes.toggleShared(id).then(note => {
-      if (!note) return;
-      Toast.show('ok', I18n.t(note.shared ? 'toast.saved.public' : 'toast.saved.private'));
-    });
-  }
-
-  /**
-   * Копирует текст заметки в буфер (с fallback для старых браузеров).
-   * @param {string} text
-   */
-  function copy(text) {
-    const done = () => Toast.show('ok', I18n.t('toast.copied'));
-    const fail = () => Toast.show('err', I18n.t('toast.copy.fail'));
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(text || '').then(done).catch(fail);
-    } else {
-      try {
-        const ta = document.createElement('textarea');
-        ta.value = text || '';
-        ta.style.position = 'fixed';
-        ta.style.left = '-9999px';
-        document.body.appendChild(ta);
-        ta.select();
-        document.execCommand('copy');
-        ta.remove();
-        done();
-      } catch (_) { fail(); }
-    }
-  }
-
-  return { remove, toggle, copy };
-}, ['Notes', 'Modal', 'Toast', 'I18n']);
-// ─── МОДУЛЬ: DOMAIN/NoteActions ─── END ──────────────────────
-
-// ─── МОДУЛЬ 15: DOMAIN/Notes ─── START ───────────────────────
+// ─── DOMAIN/Notes ─── START ──────────────────────────────────
 /**
  * Жизненный цикл заметок: создание, правка, удаление, переключение видимости.
  * Вектор считается при каждом сохранении текста. Вектор храним обычным массивом
@@ -2260,8 +2328,8 @@ DI.register('NoteActions', function (Notes, Modal, Toast, I18n) {
  *
  * Сеть сюда не знает: модуль эмитит 'note:created'/'note:updated'/'note:deleted',
  * NetService подпишется и сделает announce / forgetNote (NIP-09).
- * remove сначала читает заметку, чтобы отдать в 'note:deleted' полный объект
- * (с eventId и shared) — это нужно NetService для удаления с рэлеев.
+ * remove отдаёт в 'note:deleted' ПОЛНЫЙ объект заметки (включая eventId) — это
+ * нужно NetService, чтобы опубликовать kind-5 удаление с рэлеев.
  *
  * @deps DB, Embedder, EventBus, Logger, Utils
  * @exports Notes
@@ -2314,8 +2382,8 @@ DI.register('Notes', function (DB, Embedder, bus, Logger, Utils) {
   }
 
   /**
-   * Удаляет заметку. Эмитит 'note:deleted' с ПОЛНЫМ объектом заметки
-   * (含 eventId и shared), чтобы NetService мог удалить её и с рэлеев (NIP-09).
+   * Удаляет заметку. Эмитит 'note:deleted' с ПОЛНЫМ объектом (включая eventId),
+   * чтобы NetService мог опубликовать kind-5 удаление с рэлеев.
    * @param {string} id
    * @returns {Promise<Object|null>} Удалённая заметка или null.
    */
@@ -2351,16 +2419,16 @@ DI.register('Notes', function (DB, Embedder, bus, Logger, Utils) {
 
   return { create, edit, remove, toggleShared, get };
 }, ['DB', 'Embedder', 'EventBus', 'Logger', 'Utils']);
-// ─── МОДУЛЬ 15: DOMAIN/Notes ─── END ─────────────────────────
+// ─── DOMAIN/Notes ─── END ────────────────────────────────────
 
-// ─── МОДУЛЬ 16: DOMAIN/Context ─── START ─────────────────────
+// ─── DOMAIN/Context ─── START ────────────────────────────────
 /**
  * Сердце режимов. Управляет активным контекстом, по которому Feed ранжирует ленту.
  *
  * Источники и приоритеты:
  *  - pin    — закреплена заметка, ввод пуст: контекст = пин.
  *  - drift  — есть и пин, и ввод (вектор ввода готов): контекст ВЕДЁТ введённый
- *             текст (дрейф от пина), а пин остаётся якорем (баннер) и родителем
+ *             текст (дрейф от пина), пин остаётся якорем (баннер) и родителем
  *             при публикации. Вектор пина для ранжирования не используется.
  *  - input  — только ввод: контекст = ввод.
  *  - none   — просмотр.
@@ -2377,13 +2445,11 @@ DI.register('Context', function (Store, Embedder, Config, Utils) {
   /** @type {{id:string,text:string,vector:*}|null} */ let pinNote = null;
 
   /**
-   * Активный контекст.
-   * @returns {{source:(null|'input'|'pin'|'drift'), noteId:(string|null), text:string, vector:*, pinText?:string}}
+   * Активный контекст. Пин + ввод = дрейф (ведёт ввод).
+   * @returns {{source:(null|'input'|'pin'|'drift'), noteId:(string|null), text:string, vector:*, pinText:(string|null)}}
    */
   function activeContext() {
     const hasInput = !!inputText.trim();
-
-    // дрейф: пин — якорь и будущий родитель, но ранжирование ведёт ввод
     if (pinNote && hasInput) {
       return {
         source: 'drift',
@@ -2395,7 +2461,7 @@ DI.register('Context', function (Store, Embedder, Config, Utils) {
     }
     if (pinNote) return { source: 'pin', noteId: pinNote.id, text: pinNote.text, vector: pinNote.vector };
     if (hasInput) return { source: 'input', noteId: null, text: inputText.trim(), vector: inputVector };
-    return { source: null, noteId: null, text: '', vector: null };
+    return { source: null, noteId: null, text: '', vector: null, pinText: null };
   }
 
   /** Записывает активный контекст в Store. */
@@ -2446,19 +2512,20 @@ DI.register('Context', function (Store, Embedder, Config, Utils) {
     getPin() { return pinNote; },
   };
 }, ['Store', 'Embedder', 'Config', 'Utils']);
-// ─── МОДУЛЬ 16: DOMAIN/Context ─── END ───────────────────────
+// ─── DOMAIN/Context ─── END ──────────────────────────────────
 
-// ─── МОДУЛЬ 17: DOMAIN/Feed ─── START ────────────────────────
+// ─── DOMAIN/Feed ─── START ───────────────────────────────────
 /**
  * Готовит данные ленты под текущий режим.
  *
  *  - view  (контекста нет): свежая хронология — свои + сетевые заметки, feed[].
- *  - author (контекст есть): ранжирование по вектору контекста → lists
+ *  - автор (контекст есть): ранжирование по вектору контекста → lists
  *    {local: свои релевантные, world: чужие релевантные, seren: озарения}.
  *
- * Источники: DB (свои) + DB.cache (сетевые; пока пуст, наполнит NetService).
- * Обновляется по смене контекста и по db:change/db:cache. Защищён от гонки
- * sequence-номером: устаревшие результаты не затирают свежие.
+ * Источники: DB (свои) + DB.cache (сетевые). Обновляется по смене контекста
+ * и по db:change/db:cache. Защищён от гонки sequence-номером: устаревшие
+ * результаты не затирают свежие. Резонанс здесь НЕ считается (это Influence,
+ * его рисует FeedView) — поэтому на influence:updated Feed не подписан.
  *
  * @deps DB, Ranker, Store, EventBus, Logger
  * @exports Feed
@@ -2545,9 +2612,9 @@ DI.register('Feed', function (DB, Ranker, Store, bus, Logger) {
 
   return { init, destroy, refresh };
 }, ['DB', 'Ranker', 'Store', 'EventBus', 'Logger']);
-// ─── МОДУЛЬ 17: DOMAIN/Feed ─── END ──────────────────────────
+// ─── DOMAIN/Feed ─── END ─────────────────────────────────────
 
-// ─── МОДУЛЬ 18: DOMAIN/Provenance ─── START ──────────────────
+// ─── DOMAIN/Provenance ─── START ─────────────────────────────
 /**
  * Граф «по мотивам»: parent-связи между заметками (свои + сетевые).
  * Читает DB (свои) и DB.cache (сетевые), строит связи по parentId.
@@ -2637,21 +2704,20 @@ DI.register('Provenance', function (DB) {
 
   return { children, descendants, ancestors, loadAll };
 }, ['DB']);
-// ─── МОДУЛЬ 18: DOMAIN/Provenance ─── END ────────────────────
+// ─── DOMAIN/Provenance ─── END ───────────────────────────────
 
-// ─── МОДУЛЬ 19: DOMAIN/Influence ─── START ───────────────────
+// ─── DOMAIN/Influence ─── START ──────────────────────────────
 /**
- * Резонанс заметки: сколько мыслей она породила. Считаем по УНИКАЛЬНЫМ
- * авторам-потомкам (Sybil-resistant: один человек не накрутит себе много).
- * Свои заметки (authorPubkey=null) считаются одним автором «я».
- * Карта parentId→авторы строится асинхронно по db:change/db:cache.
- * После перестроения эмитит 'influence:updated', чтобы FeedView перерисовался
- * с актуальными данными (без гонки).
+ * Резонанс заметки: сколько уникальных авторов породило её прямых детей.
+ * Sybil-resistant: один человек не накрутит себе много, сколько бы детей ни создал.
+ * Свои дети (authorPubkey=null) считаются одним автором «я».
+ * Карта parentId→авторы строится асинхронно по db:change/db:cache; по
+ * завершении эмитит 'influence:updated' (FeedView перерисовывает ◆).
  * @deps DB, EventBus, Logger
  * @exports Influence
  */
 DI.register('Influence', function (DB, bus, Logger) {
-  /** parentId -> Set авторов-потомков. @type {Map<string,Set<string>>} */
+  /** parentId -> Set авторов-детей. @type {Map<string,Set<string>>} */
   const resonanceMap = new Map();
   let seq = 0;
 
@@ -2669,13 +2735,12 @@ DI.register('Influence', function (DB, bus, Logger) {
       });
       resonanceMap.clear();
       map.forEach((v, k) => resonanceMap.set(k, v));
-      // сообщаем ленте, что данные свежие — пусть перерисуется
       try { bus.emit('influence:updated'); } catch (_) {}
     }).catch(e => Logger.warn('Influence: ошибка rebuild', String(e)));
   }
 
   /**
-   * Число уникальных авторов-потомков заметки.
+   * Число уникальных авторов прямых детей заметки.
    * @param {string} id
    * @returns {number}
    */
@@ -2693,16 +2758,77 @@ DI.register('Influence', function (DB, bus, Logger) {
 
   return { init, resonance, rebuild };
 }, ['DB', 'EventBus', 'Logger']);
-// ─── МОДУЛЬ 19: DOMAIN/Influence ─── END ─────────────────────
+// ─── DOMAIN/Influence ─── END ────────────────────────────────
 
-// ═══════════════════ UI ═══════════════════
+// ─── DOMAIN/NoteActions ─── START ────────────────────────────
+/**
+ * Общие действия над заметкой: удалить, переключить видимость, копировать.
+ * Единая точка, чтобы FeedView / NoteView / BaseView не дублировали логику.
+ * ВНИМАНИЕ: зависит от Modal и Toast (едут в следующей пачке) — резолвится
+ * лениво, к моменту использования они уже зарегистрированы.
+ * @deps Notes, Modal, Toast, I18n
+ * @exports NoteActions
+ */
+DI.register('NoteActions', function (Notes, Modal, Toast, I18n) {
+  /**
+   * Удаляет заметку с подтверждением.
+   * @param {string} id
+   */
+  function remove(id) {
+    if (!id) return;
+    Modal.confirm(I18n.t('btn.del'), I18n.t('del.confirm'), () => {
+      Notes.remove(id);
+      Toast.show('ok', I18n.t('toast.deleted'));
+    });
+  }
 
-// ─── МОДУЛЬ: UI/Onboarding ─── START ─────────────────────────
+  /**
+   * Переключает видимость (личное ↔ открытое).
+   * @param {string} id
+   */
+  function toggle(id) {
+    if (!id) return;
+    Notes.toggleShared(id).then(note => {
+      if (!note) return;
+      Toast.show('ok', I18n.t(note.shared ? 'toast.saved.public' : 'toast.saved.private'));
+    });
+  }
+
+  /**
+   * Копирует текст заметки в буфер (с fallback для старых браузеров).
+   * @param {string} text
+   */
+  function copy(text) {
+    const done = () => Toast.show('ok', I18n.t('toast.copied'));
+    const fail = () => Toast.show('err', I18n.t('toast.copy.fail'));
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text || '').then(done).catch(fail);
+    } else {
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = text || '';
+        ta.style.position = 'fixed';
+        ta.style.left = '-9999px';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        ta.remove();
+        done();
+      } catch (_) { fail(); }
+    }
+  }
+
+  return { remove, toggle, copy };
+}, ['Notes', 'Modal', 'Toast', 'I18n']);
+// ─── DOMAIN/NoteActions ─── END ──────────────────────────────
+
+// ─── UI/Onboarding ─── START ─────────────────────────────────
 /**
  * Онбординг и справка «Как это работает».
  *  - init(): при первом запуске (Config.onboarded=false) показывает гайд.
  *  - showHelp(): открывает гайд из меню; чекбокс «больше не показывать»
  *    доступен только в онбординге первого запуска.
+ * Текст берётся из единого словаря I18n (ключи onb.*).
  * @deps Config, Modal, I18n
  * @exports Onboarding
  */
@@ -2757,7 +2883,7 @@ DI.register('Onboarding', function (Config, Modal, I18n) {
 
   /**
    * Открывает гайд.
-   * @param {boolean} firstRun - первый запуск (чекбокс + авто-флаг onboarded).
+   * @param {boolean} firstRun - первый запуск (чекбокс + сохранение onboarded).
    */
   function showHelp(firstRun) {
     const { el, checkbox } = buildBody(!!firstRun);
@@ -2785,9 +2911,9 @@ DI.register('Onboarding', function (Config, Modal, I18n) {
 
   return { init, showHelp };
 }, ['Config', 'Modal', 'I18n']);
-// ─── МОДУЛЬ: UI/Onboarding ─── END ───────────────────────────
+// ─── UI/Onboarding ─── END ───────────────────────────────────
 
-// ─── МОДУЛЬ 20: UI/Modal ─── START ───────────────────────────
+// ─── UI/Modal ─── START ──────────────────────────────────────
 /**
  * Модальное окно на готовой разметке (#overlay > #modal: #modal-h/-t/-x/-b/-f).
  *  - open({title, body, buttons}) — произвольное окно; body: строка или DOM-узел.
@@ -2867,7 +2993,7 @@ DI.register('Modal', function (I18n) {
   }
 
   /**
-   * Подтверждение: Cancel закрывает, OK выполняет onOk.
+   * Подтверждение: Cancel закрывает, OK (danger) выполняет onOk.
    * @param {string} title @param {string} text @param {Function} onOk @param {string} [okText]
    */
   function confirm(title, text, onOk, okText) {
@@ -2883,9 +3009,9 @@ DI.register('Modal', function (I18n) {
 
   return { open, close, confirm };
 }, ['I18n']);
-// ─── МОДУЛЬ 20: UI/Modal ─── END ─────────────────────────────
+// ─── UI/Modal ─── END ────────────────────────────────────────
 
-// ─── МОДУЛЬ 21: UI/Toast ─── START ───────────────────────────
+// ─── UI/Toast ─── START ──────────────────────────────────────
 /**
  * Всплывающие уведомления. Держит не более toastMaxVisible, старые вытесняет,
  * исчезает с плавным fade. Иконка подсвечивается цветом типа.
@@ -2933,9 +3059,9 @@ DI.register('Toast', function (Config) {
 
   return { show };
 }, ['Config']);
-// ─── МОДУЛЬ 21: UI/Toast ─── END ─────────────────────────────
+// ─── UI/Toast ─── END ────────────────────────────────────────
 
-// ─── МОДУЛЬ 22: UI/Progress ─── START ────────────────────────
+// ─── UI/Progress ─── START ───────────────────────────────────
 /**
  * Полноэкранный оверлей загрузки модели. Слушает 'ai:progress'/'ai:status'.
  * Показывается с задержкой SHOW_DELAY, чтобы не мигать на быстрой (кэшированной)
@@ -2982,12 +3108,12 @@ DI.register('Progress', function (bus) {
 
   return { init, show, hide, update };
 }, ['EventBus']);
-// ─── МОДУЛЬ 22: UI/Progress ─── END ──────────────────────────
+// ─── UI/Progress ─── END ─────────────────────────────────────
 
-// ─── МОДУЛЬ 23: UI/HeaderStatus ─── START ────────────────────
+// ─── UI/HeaderStatus ─── START ───────────────────────────────
 /**
  * Индикаторы в шапке: сеть и ИИ. Реагирует на 'ai:status' и 'net:status'.
- * Пока NET не подключён, сеть показана как offline — оживёт с NetService.
+ * Пока NET не подключён, сеть показана как disconnected — оживёт с NetService.
  * @deps EventBus, I18n, Embedder
  * @exports HeaderStatus
  */
@@ -3025,6 +3151,7 @@ DI.register('HeaderStatus', function (bus, I18n, Embedder) {
       connecting: ['load', 'st.net.connecting'],
       reconnecting: ['warn', 'st.net.reconnecting'],
       failed: ['err', 'st.net.failed'],
+      disconnected: ['', 'st.net'],
     };
     const [cls, key] = map[status] || ['', 'st.net'];
     netDot.className = 'dot' + (cls ? ' ' + cls : '');
@@ -3047,20 +3174,20 @@ DI.register('HeaderStatus', function (bus, I18n, Embedder) {
 
   return { init, destroy };
 }, ['EventBus', 'I18n', 'Embedder']);
-// ─── МОДУЛЬ 23: UI/HeaderStatus ─── END ──────────────────────
+// ─── UI/HeaderStatus ─── END ─────────────────────────────────
 
-// ─── МОДУЛЬ 24: UI/Composer ─── START ────────────────────────
+// ─── UI/Composer ─── START ───────────────────────────────────
 /**
  * Поле ввода: счётчик, переключатель Личное/Мир, отправка.
- * Ввод мгновенно включает режим автора (Context.setInput), вектор догоняет с debounce.
- * Если при публикации активен пин — новая заметка связывается с закреплённой
- * (parentId = пин): так работает механика «мысль по мотивам».
- * Режим правки: по 'note:edit-request' {id} загружает заметку в поле;
- * отправка тогда вызывает Notes.edit, а не create.
- * @deps Context, Notes, DB, Store, I18n, EventBus, Toast, Utils
+ * Ввод мгновенно включает режим автора (Context.setInput), вектор догоняет
+ * с debounce. Если при публикации активен пин — новая заметка связывается с
+ * закреплённой (parentId = пин): так работает механика «мысль по мотивам».
+ * Режим правки: по 'note:edit-request' {id} загружает заметку в поле (через
+ * Notes.get); отправка тогда вызывает Notes.edit, а не create.
+ * @deps Context, Notes, Store, I18n, EventBus, Toast, Utils
  * @exports Composer
  */
-DI.register('Composer', function (Context, Notes, DB, Store, I18n, bus, Toast, Utils) {
+DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils) {
   let ta, cnt, sendBtn, toggle;
   let sending = false;
   let editingId = null;
@@ -3097,7 +3224,7 @@ DI.register('Composer', function (Context, Notes, DB, Store, I18n, bus, Toast, U
 
   /** Загружает заметку в поле для правки. @param {string} id */
   function edit(id) {
-    DB.get(id).then(note => {
+    Notes.get(id).then(note => {
       if (!note || !ta) return;
       editingId = id;
       ta.value = note.text || '';
@@ -3190,17 +3317,17 @@ DI.register('Composer', function (Context, Notes, DB, Store, I18n, bus, Toast, U
   }
 
   return { init, destroy, send, edit, cancelEdit };
-}, ['Context', 'Notes', 'DB', 'Store', 'I18n', 'EventBus', 'Toast', 'Utils']);
-// ─── МОДУЛЬ 24: UI/Composer ─── END ──────────────────────────
+}, ['Context', 'Notes', 'Store', 'I18n', 'EventBus', 'Toast', 'Utils']);
+// ─── UI/Composer ─── END ─────────────────────────────────────
 
-// ─── МОДУЛЬ 25: UI/FeedView ─── START ────────────────────────
+// ─── UI/FeedView ─── START ───────────────────────────────────
 /**
  * Рендер ленты и хром режимов.
  *  - просмотр: хронология Store.feed; бар скрыт.
  *  - input / drift (режим автора): бар виден, лента = Store.lists[seg].
- *  - pin: баннер, единый список похожего.
+ *  - pin: баннер, единый список похожего (закреплённая исключена).
  * Жесты: клик по карточке = пин/отпин; ✎ на своих = NoteView;
- * «↳ по мотивам» = линейка предков (цепочка вверх); «◆ N» = потомки;
+ * «↳ по мотивам» = линейка предков; «◆ N» = потомки;
  * «Загрузить ещё» = история сети.
  * Резонанс = сумма уникальных авторов по локальному id и по eventId.
  * @deps Store, Context, I18n, Utils, EventBus, Influence, Provenance, Modal, NetService
@@ -3285,7 +3412,6 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, P
     }).catch(() => {});
   }
 
-  /** Модалка-линейка: цепочка предков от мамы к корню, каждого можно открыть. */
   function renderAncestorsModal(note, chain) {
     const body = document.createElement('div');
     body.style.cssText = 'display:flex;flex-direction:column;gap:8px;';
@@ -3299,8 +3425,8 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, P
         const item = document.createElement('button');
         item.className = 'nv-act';
         item.style.cssText = 'text-align:left;justify-content:flex-start;white-space:normal;height:auto;min-height:40px;';
-        item.style.paddingLeft = (16 + i * 14) + 'px';   // отступ по глубине
-        item.textContent = (i === 0 ? '↳ ' : '↳ ') + (c.text || '').slice(0, 140);
+        item.style.paddingLeft = (16 + i * 14) + 'px';
+        item.textContent = '↳ ' + (c.text || '').slice(0, 140);
         item.addEventListener('click', () => {
           Modal.close();
           try { bus.emit('note:open', { id: c.id }); } catch (_) {}
@@ -3315,7 +3441,6 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, P
     });
   }
 
-  /** Показывает линейку предков заметки. @param {Object} note */
   function showAncestors(note) {
     Provenance.ancestors(note.id).then(chain => {
       renderAncestorsModal(note, chain);
@@ -3366,7 +3491,6 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, P
       meta.appendChild(sim);
     }
 
-    // резонанс: свои дети ссылаются на id, чужие — на eventId; складываем
     const res = Influence.resonance(n.id) + Influence.resonance(n.eventId);
     if (res > 0) {
       const r = document.createElement('button');
@@ -3454,7 +3578,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, P
   function init() {
     bind();
     if (!feedEl) return;
-    // новые строки для линейки предков
+    // ключи линейки предков, отсутствующие в базовом словаре
     I18n.addDict('ru', { 'inf.lineage': 'Линейка «по мотивам»', 'inf.noancestors': 'Это корень — предков нет' });
     I18n.addDict('en', { 'inf.lineage': '“Inspired by” lineage', 'inf.noancestors': 'This is the root — no ancestors' });
 
@@ -3493,9 +3617,9 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, P
 
   return { init, destroy, render };
 }, ['Store', 'Context', 'I18n', 'Utils', 'EventBus', 'Influence', 'Provenance', 'Modal', 'NetService']);
-// ─── МОДУЛЬ 25: UI/FeedView ─── END ──────────────────────────
+// ─── UI/FeedView ─── END ─────────────────────────────────────
 
-// ─── МОДУЛЬ 26: UI/BaseView ─── START ────────────────────────
+// ─── UI/BaseView ─── START ───────────────────────────────────
 /**
  * Экран «База»: список своих заметок, статистика, поиск, сортировка.
  * Клик по заметке открывает NoteView (просмотр/правка/удаление).
@@ -3608,18 +3732,20 @@ DI.register('BaseView', function (Store, DB, I18n, Utils, bus) {
 
   return { init, destroy, render };
 }, ['Store', 'DB', 'I18n', 'Utils', 'EventBus']);
-// ─── МОДУЛЬ 26: UI/BaseView ─── END ──────────────────────────
+// ─── UI/BaseView ─── END ─────────────────────────────────────
 
-// ─── МОДУЛЬ 27: UI/NoteView ─── START ────────────────────────
+// ─── UI/NoteView ─── START ───────────────────────────────────
 /**
  * Полноэкранный просмотр заметки (#noteview): текст, метаданные и действия
  * удалить / переключить видимость / копировать / править.
  * Открывается по событию 'note:open' {id} (из BaseView и FeedView).
- * Закрытие — по ✕, клику на фон или Escape.
- * @deps DB, Notes, NoteActions, Modal, Toast, I18n, Utils, EventBus
+ * Закрытие — по клику на фон или Escape.
+ * Зависимости очищены: действия идут через NoteActions, Modal не используется
+ * (рендер напрямую в #noteview).
+ * @deps DB, NoteActions, I18n, Utils, EventBus
  * @exports NoteView
  */
-DI.register('NoteView', function (DB, Notes, NoteActions, Modal, Toast, I18n, Utils, bus) {
+DI.register('NoteView', function (DB, NoteActions, I18n, Utils, bus) {
   let root = null;
   let currentId = null;
   let escHandler = null;
@@ -3755,15 +3881,16 @@ DI.register('NoteView', function (DB, Notes, NoteActions, Modal, Toast, I18n, Ut
   function destroy() { close(); }
 
   return { init, destroy, open, close };
-}, ['DB', 'Notes', 'NoteActions', 'Modal', 'Toast', 'I18n', 'Utils', 'EventBus']);
-// ─── МОДУЛЬ 27: UI/NoteView ─── END ──────────────────────────
+}, ['DB', 'NoteActions', 'I18n', 'Utils', 'EventBus']);
+// ─── UI/NoteView ─── END ─────────────────────────────────────
 
-// ─── МОДУЛЬ 28: UI/MenuView ─── START ────────────────────────
+// ─── UI/MenuView ─── START ───────────────────────────────────
 /**
  * Меню (кнопка #btn-menu) и переключение экранов Поток/База.
  *  - Модалка настроек: справка, тема, язык, навигация, стереть данные.
  *  - setView показывает/прячет элементы потока (включая btn-history) и панель #base.
- * Тема применяется через data-theme на body.
+ * Тема применяется через data-theme на body. Стереть данные эмитит 'wipe:request'
+ * (слушатель ставит Boot).
  * @deps Store, Config, Modal, Toast, I18n, EventBus, Onboarding
  * @exports MenuView
  */
@@ -3780,7 +3907,6 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboar
   function setView(view) {
     Store.setState({ view });
     const isBase = view === 'base';
-    // прячем всё, что относится к потоку; btn-history — часть потока, тоже прячем
     ['ctx-banner', 'seg', 'feed-wrap', 'btn-history', 'composer'].forEach(id => {
       const el = document.getElementById(id);
       if (el) el.style.display = isBase ? 'none' : '';
@@ -3804,12 +3930,14 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboar
     const body = document.createElement('div');
     body.style.cssText = 'display:flex;flex-direction:column;gap:12px;';
 
+    // справка
     const helpBtn = document.createElement('button');
     helpBtn.className = 'nv-act';
     helpBtn.textContent = '? ' + I18n.t('menu.help');
     helpBtn.addEventListener('click', () => { Modal.close(); Onboarding.showHelp(false); });
     body.appendChild(helpBtn);
 
+    // тема
     const themeBtn = document.createElement('button');
     themeBtn.className = 'nv-act';
     themeBtn.textContent = I18n.t('menu.theme') + ': ' + (Config.get('theme', 'dark') === 'dark' ? '🌙' : '☀️');
@@ -3821,6 +3949,7 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboar
     });
     body.appendChild(themeBtn);
 
+    // язык
     const langBtn = document.createElement('button');
     langBtn.className = 'nv-act';
     langBtn.textContent = I18n.t('menu.lang') + ': ' + I18n.getLang().toUpperCase();
@@ -3831,6 +3960,7 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboar
     });
     body.appendChild(langBtn);
 
+    // навигация
     const goBase = document.createElement('button');
     goBase.className = 'nv-act';
     goBase.textContent = I18n.t('tab.base');
@@ -3843,6 +3973,7 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboar
     goStream.addEventListener('click', () => { Modal.close(); setView('stream'); });
     body.appendChild(goStream);
 
+    // danger: стереть данные
     const wipe = document.createElement('button');
     wipe.className = 'nv-act danger';
     wipe.textContent = I18n.t('base.wipe');
@@ -3882,51 +4013,33 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboar
 
   return { init, destroy, setView, openMenu };
 }, ['Store', 'Config', 'Modal', 'Toast', 'I18n', 'EventBus', 'Onboarding']);
-// ─── МОДУЛЬ 28: UI/MenuView ─── END ──────────────────────────
+// ─── UI/MenuView ─── END ─────────────────────────────────────
 
-// ═══════════════════ AUTH ═══════════════════
-
-// ─── МОДУЛЬ 29: AUTH/AuthService ─── START ───────────────────
+// ─── INPUT/Hotkeys ─── START ─────────────────────────────────
 /**
- * Функциональный (безопасность — задел): генерация/хранение ключа Nostr, hasKey/unlock.
- * Шифрование паролем (PBKDF2+AES-GCM) и миграция сырого ключа — расширения на потом.
- * @deps Config, Logger
- * @exports AuthService
- */
-// ─── МОДУЛЬ 29: AUTH/AuthService ─── END ─────────────────────
-
-// ═══════════════════ INPUT ═══════════════════
-
-// ─── МОДУЛЬ 30: INPUT/Hotkeys ─── START ──────────────────────
-/**
- * Глобальные горячие клавиши:
- *  - Escape: приоритет сверху вниз — модалка (#overlay) → просмотр (#noteview)
- *    → снять пин. NoteView закрывает себя сам, поэтому при открытом просмотре
- *    пин НЕ трогаем, просто даём событию дойти до NoteView.
+ * Глобальные горячие клавиши (capture-фаза, срабатывает первым):
+ *  - Escape: приоритет «модалка → NoteView → снять пин». Если открыта модалка
+ *    или NoteView — просто выходим, их собственные обработчики закроют окно;
+ *    пин не трогаем. Иначе снимаем пин.
  *  - '/': фокус на поле ввода (если не печатаешь уже).
  *  - Ctrl/Cmd+Enter обрабатывает сам Composer.
- * @deps Context, Modal
+ * Зависит только от Context (Modal/NoteView определяет по DOM, не закрывает сам).
+ * @deps Context
  * @exports Hotkeys
  */
-DI.register('Hotkeys', function (Context, Modal) {
+DI.register('Hotkeys', function (Context) {
   let handler = null;
 
   function init() {
     if (handler) return;
     handler = function (e) {
       if (e.key === 'Escape') {
-        // 1) открыта модалка — закрываем её и гасим событие
+        // 1) открыта модалка — её закроет собственный обработчик Modal
         const overlay = document.getElementById('overlay');
-        if (overlay && overlay.classList.contains('on')) {
-          Modal.close();
-          e.stopPropagation();
-          return;
-        }
-        // 2) открыт просмотр заметки — NoteView закроется сам, пин не трогаем
+        if (overlay && overlay.classList.contains('on')) return;
+        // 2) открыт NoteView — его закроет собственный обработчик NoteView
         const noteview = document.getElementById('noteview');
-        if (noteview && noteview.classList.contains('on')) {
-          return;
-        }
+        if (noteview && noteview.classList.contains('on')) return;
         // 3) ничего не открыто — снимаем пин
         Context.clearPin();
         return;
@@ -3940,7 +4053,7 @@ DI.register('Hotkeys', function (Context, Modal) {
         }
       }
     };
-    // capture: перехватываем Escape до FeedView/NoteView
+    // capture: перехватываем раньше Modal/NoteView
     document.addEventListener('keydown', handler, true);
   }
 
@@ -3949,135 +4062,74 @@ DI.register('Hotkeys', function (Context, Modal) {
   }
 
   return { init, destroy };
-}, ['Context', 'Modal']);
-// ─── МОДУЛЬ 30: INPUT/Hotkeys ─── END ────────────────────────
+}, ['Context']);
+// ─── INPUT/Hotkeys ─── END ───────────────────────────────────
 
-// ═══════════════════ BOOT ═══════════════════
-
-// ─── МОДУЛЬ 31: BOOT ─── START ───────────────────────────────
+// ─── BOOT ─── START ──────────────────────────────────────────
 /**
- * Резолв DI, инициализация компонентов, auth-flow, загрузка Embedder,
- * подписка на ленту (NetService), cleanup/refreshUI. Точка входа mount().
- * @deps всё
+ * Точка входа. Резолвит и инициализирует все модули в правильном порядке:
+ *  1. Тема (до показа приложения, чтобы не мигнуть неверной темой).
+ *  2. Подписчики событий без DOM (Progress, HeaderStatus, Feed, Influence).
+ *  3. DOM-модули (Composer, FeedView, NoteView, BaseView, MenuView, Hotkeys).
+ *  4. Слушатель wipe:request.
+ *  5. Показ приложения (body.ready).
+ *  6. Запуск Embedder (шлёт ai-события) и NetService (шлёт net-события).
+ *  7. Onboarding последним.
+ * Зависимостей через DI не имеет — резолвит модули внутри mount() сам.
  * @exports Boot {mount}
  */
-// ─── МОДУЛЬ 31: BOOT ─── END ─────────────────────────────────
+DI.register('Boot', function () {
+  /** Собирает и запускает приложение. Вызывать один раз. */
+  function mount() {
+    // 1. Тема до показа
+    const Config = DI.resolve('Config');
+    document.body.setAttribute('data-theme', Config.get('theme', 'dark'));
 
-// ─── ВРЕМЕННЫЙ BOOT (история сети) ─── START
-(function tempBoot() {
-  document.body.classList.add('ready');
-  const I18n = DI.resolve('I18n');
-  I18n.addDict('ru', {
-    'del.confirm': 'Удалить эту заметку навсегда?',
-    'base.wipe': 'Стереть базу',
-    'base.wipe.confirm': 'Удалить все ваши заметки навсегда?',
-    'toast.base.wiped': 'база стёрта',
-    'empty.base.empty': 'Ничего не найдено',
-    'toast.edit.saved': 'сохранено',
-    'inf.linked': 'по мотивам',
-    'inf.bymotif': 'по мотивам',
-    'inf.openparent': 'Открыть заметку-источник',
-    'inf.children': 'Потомки',
-    'inf.nochildren': 'Потомков пока нет',
-    'ctx.drift': 'дрейф от',
-    'net.loadmore': 'Загрузить ещё',
-    'net.loading': 'Загружаю…',
-    'onb.title': 'Как это работает',
-    'onb.dontshow': 'Больше не показывать',
-    'onb.gotit': 'Понятно',
-    'onb.what.t': 'NOOmium',
-    'onb.what.d': 'Соцсеть смыслов: мысли ищутся не по словам и не по лайкам, а по значению. Каждая мысль превращается в вектор — точку в пространстве смыслов.',
-    'onb.stream.t': 'Лента',
-    'onb.stream.d': 'Показывает свежие мысли — твои и из сети. Просто читай.',
-    'onb.pin.t': 'Пин',
-    'onb.pin.d': 'Кликни по мысли — она станет контекстом: лента покажет созвучное из твоей базы и из сети. Закреплённая мысль становится «мамой» для всего, что ты напишешь следом.',
-    'onb.drift.t': 'Дрейф',
-    'onb.drift.d': 'Начни печатать при пине — контекст плавно перейдёт к твоему тексту. Так можно органично уйти от исходной мысли к своей.',
-    'onb.modes.t': 'Личное и Мир',
-    'onb.modes.d': 'Личное остаётся только у тебя. Мир — делится мыслью с сетью, и другие смогут найти её по смыслу.',
-    'onb.resonance.t': 'Резонанс ◆',
-    'onb.resonance.d': 'Сколько чужих мыслей родила твоя. «↳ по мотивам» ведёт к заметке-источнику, клик по ◆ показывает потомков.',
-    'onb.keys.t': 'Клавиши',
-    'onb.keys.d': 'Ctrl/Cmd+Enter — отправить · / — фокус на поле · Esc — снять пин или закрыть окно.',
-  });
-  I18n.addDict('en', {
-    'del.confirm': 'Delete this note forever?',
-    'base.wipe': 'Wipe base',
-    'base.wipe.confirm': 'Delete all your notes forever?',
-    'toast.base.wiped': 'base wiped',
-    'empty.base.empty': 'Nothing found',
-    'toast.edit.saved': 'saved',
-    'inf.linked': 'inspired by',
-    'inf.bymotif': 'inspired by',
-    'inf.openparent': 'Open source note',
-    'inf.children': 'Descendants',
-    'inf.nochildren': 'No descendants yet',
-    'ctx.drift': 'drift from',
-    'net.loadmore': 'Load more',
-    'net.loading': 'Loading…',
-    'onb.title': 'How it works',
-    'onb.dontshow': "Don't show again",
-    'onb.gotit': 'Got it',
-    'onb.what.t': 'NOOmium',
-    'onb.what.d': 'A social network of meaning: thoughts are found not by words or likes, but by sense. Each thought becomes a vector — a point in meaning-space.',
-    'onb.stream.t': 'Feed',
-    'onb.stream.d': 'Shows fresh thoughts — yours and from the network. Just read.',
-    'onb.pin.t': 'Pin',
-    'onb.pin.d': 'Click a thought to make it the context: the feed shows what resonates, from your base and the network. The pinned thought becomes the "mother" of what you write next.',
-    'onb.drift.t': 'Drift',
-    'onb.drift.d': 'Start typing while pinned — the context shifts toward your text. A natural way to drift from the original thought to your own.',
-    'onb.modes.t': 'Private & World',
-    'onb.modes.d': 'Private stays with you. World shares the thought with the network so others can find it by meaning.',
-    'onb.resonance.t': 'Resonance ◆',
-    'onb.resonance.d': 'How many thoughts yours inspired. "↳ inspired by" leads to the source note; click ◆ to see descendants.',
-    'onb.keys.t': 'Keys',
-    'onb.keys.d': 'Ctrl/Cmd+Enter — send · / — focus editor · Esc — unpin or close.',
-  });
+    // 2. Подписчики событий (без DOM)
+    DI.resolve('Progress').init();
+    DI.resolve('HeaderStatus').init();
+    DI.resolve('Feed').init();
+    DI.resolve('Influence').init();
 
-  const Progress = DI.resolve('Progress');
-  const HeaderStatus = DI.resolve('HeaderStatus');
-  const Embedder = DI.resolve('Embedder');
-  const Feed = DI.resolve('Feed');
-  const Composer = DI.resolve('Composer');
-  const Influence = DI.resolve('Influence');
-  const FeedView = DI.resolve('FeedView');
-  const NetService = DI.resolve('NetService');
-  const NoteActions = DI.resolve('NoteActions');
-  const BaseView = DI.resolve('BaseView');
-  const NoteView = DI.resolve('NoteView');
-  const Onboarding = DI.resolve('Onboarding');
-  const MenuView = DI.resolve('MenuView');
-  const Hotkeys = DI.resolve('Hotkeys');
-  const Store = DI.resolve('Store');
-  const EventBus = DI.resolve('EventBus');
-  const DB = DI.resolve('DB');
-  const Toast = DI.resolve('Toast');
+    // 3. DOM-модули
+    DI.resolve('Composer').init();
+    DI.resolve('FeedView').init();
+    DI.resolve('NoteView').init();
+    DI.resolve('BaseView').init();
+    DI.resolve('MenuView').init();
+    DI.resolve('Hotkeys').init();
 
-  Progress.init();
-  HeaderStatus.init();
-  Feed.init();
-  Composer.init();
-  Influence.init();
-  FeedView.init();
-  NoteView.init();
-  BaseView.init();
-  MenuView.init();
-  Hotkeys.init();
-  Onboarding.init();
-
-  EventBus.on('wipe:request', () => {
-    DB.reset().then(() => {
-      Toast.show('ok', I18n.t('toast.base.wiped'));
-      Store.setState({ view: 'stream' });
+    // 4. Слушатель стирания данных (эмитит MenuView)
+    const EventBus = DI.resolve('EventBus');
+    const DB = DI.resolve('DB');
+    const Toast = DI.resolve('Toast');
+    const I18n = DI.resolve('I18n');
+    const Store = DI.resolve('Store');
+    EventBus.on('wipe:request', () => {
+      DB.reset().then(() => {
+        Toast.show('ok', I18n.t('toast.base.wiped'));
+        Store.setState({ view: 'stream' });
+      });
     });
-  });
 
-  Embedder.load();
-  NetService.start();
+    // 5. Показ приложения
+    document.body.classList.add('ready');
 
-  console.info('[NOOmium] история сети: «Загрузить ещё»');
-})();
-// ─── ВРЕМЕННЫЙ BOOT ─── END
+    // 6. Запуск AI и сети
+    DI.resolve('Embedder').load();
+    DI.resolve('NetService').start();
+
+    // 7. Онбординг последним
+    DI.resolve('Onboarding').init();
+  }
+
+  return { mount };
+});
+// ─── BOOT ─── END ────────────────────────────────────────────
+
+// ─── ЗАПУСК ─── START ────────────────────────────────────────
+DI.resolve('Boot').mount();
+// ─── ЗАПУСК ─── END ──────────────────────────────────────────
 
 </script>
 </body>
