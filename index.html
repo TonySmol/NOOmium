@@ -1596,7 +1596,7 @@ DI.register('Ranker', function (Vec, Config) {
  *   ANSWER= kind 21001 (ephemeral): content = JSON {noteId, text, vector, score};
  *           тег ['e', queryId] — привязка к запросу.
  *
- * Вектор в событиях — компактный base64 от Float32Array.
+ * Вектор в событиях — компактный base64 (Int16) от Float32Array.
  * @deps Config, Vec
  * @exports Protocol
  */
@@ -1892,15 +1892,13 @@ DI.register('Nostr', function (Config, Logger, bus) {
  * Оркестратор децентрализованного обмена.
  *
  *  - Подписка на комнату: заметки (kind 1), запросы (21000), ответы (21001).
- *  - Анонсирует открытые заметки пользователя (по 'note:created'/'note:shared').
+ *  - Анонсирует открытые заметки пользователя (по 'note:created'/'note:shared');
+ *    после успешного анонса сохраняет Nostr eventId заметки (нужен для связей
+ *    «по мотивам» между разными людьми).
  *  - На чужой запрос: центроидный префильтр → ранжирование своих открытых → top-N ответов.
  *  - На пин шлёт запрос и собирает ответы в кеш (Feed подхватывает).
  *
- * Дедупликация двух уровней:
- *  - seen: по ev.id (дёшево, против повторной доставки того же события);
- *  - contentSeen: по (authorPubkey + текст) — против повторной ПУБЛИКАЦИИ той же
- *    мысли (новый ev.id, который seen не ловит). Именно она убирает спам-дубли.
- *
+ * Дедупликация: seen по ev.id + contentSeen по (автор+текст).
  * Нагрузочная устойчивость: rate-limit ответов пиру, префильтр, лимит ответов,
  * ступенчатая отправка, переподключение.
  *
@@ -1916,10 +1914,10 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   let lastQueryTime = 0;
   let centroids = [];
   let contextUnsub = null;
-  const seen = new Set();             // ev.id обработанных событий
-  const contentSeen = new Map();      // 'pubkey::text' -> true (контентная дедупликация)
-  const peers = new Map();            // pubkey -> lastSeen
-  const peerQueryTimes = new Map();   // pubkey -> когда последний раз отвечали
+  const seen = new Set();
+  const contentSeen = new Map();
+  const peers = new Map();
+  const peerQueryTimes = new Map();
 
   const kNote = () => Config.get('kNote', 1);
   const kQuery = () => Config.get('kQuery', 21000);
@@ -1939,10 +1937,8 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
 
   /**
    * Контентная дедупликация: тот же автор + тот же текст уже встречались?
-   * Повторная публикация одной мысли даёт новый ev.id (seen не ловит),
-   * но contentSeen узнаёт её по содержанию.
    * @param {string} pubkey @param {string} text
-   * @returns {boolean} true = дубль, пропускаем
+   * @returns {boolean}
    */
   function isContentDuplicate(pubkey, text) {
     const key = pubkey + '::' + String(text || '').trim();
@@ -1975,7 +1971,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     if (!ev || seen.has(ev.id)) return;
     seen.add(ev.id);
     trimSeen();
-    if (ev.pubkey === Nostr.getPubkey()) return;   // своё не обрабатываем
+    if (ev.pubkey === Nostr.getPubkey()) return;
 
     if (ev.kind === kNote()) handleIncomingNote(ev);
     else if (ev.kind === kQuery()) handleIncomingQuery(ev);
@@ -1985,9 +1981,9 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   function handleIncomingNote(ev) {
     const note = Protocol.decodeNote(ev);
     if (!note) return;
-    if (isContentDuplicate(note.authorPubkey, note.text)) return;   // контентный дубль
+    if (isContentDuplicate(note.authorPubkey, note.text)) return;
     peers.set(note.authorPubkey, Date.now());
-    DB.cachePut(note);          // эмитит db:cache → Feed обновится
+    DB.cachePut(note);
     notifyPeers();
   }
 
@@ -1996,7 +1992,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     if (!q) return;
     const now = Date.now();
     const last = peerQueryTimes.get(ev.pubkey) || 0;
-    if (now - last < Config.get('queryRateLimit', 3000)) return;   // rate-limit на пира
+    if (now - last < Config.get('queryRateLimit', 3000)) return;
     peerQueryTimes.set(ev.pubkey, now);
     if (!passesPrefilter(q.vector)) return;
 
@@ -2024,8 +2020,8 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   function handleIncomingAnswer(ev) {
     const a = Protocol.decodeAnswer(ev);
     if (!a) return;
-    if (a.queryId !== activeQueryId) return;   // ответ не на наш запрос
-    if (isContentDuplicate(a.authorPubkey, a.text)) return;   // контентный дубль
+    if (a.queryId !== activeQueryId) return;
+    if (isContentDuplicate(a.authorPubkey, a.text)) return;
     peers.set(a.authorPubkey, Date.now());
     DB.cachePut({
       id: a.id,
@@ -2040,10 +2036,26 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   }
 
   // ── анонс наших открытых заметок ──
+  /**
+   * Публикует заметку в комнату и сохраняет её Nostr eventId.
+   * eventId нужен, чтобы чужие «потомки» могли сослаться на эту заметку
+   * и резонанс сошёлся у автора.
+   * @param {Object} note
+   */
   function announceNote(note) {
     if (!note || !note.shared || !note.vector) return;
     Nostr.publish(Protocol.noteEvent(note, room()))
-      .then(() => Logger.info('NetService: анонс заметки ' + note.id))
+      .then(ev => {
+        Logger.info('NetService: анонс заметки ' + note.id);
+        if (ev && ev.id && note.id) {
+          DB.get(note.id).then(cur => {
+            if (cur && cur.eventId !== ev.id) {
+              cur.eventId = ev.id;
+              DB.put(cur);   // тихо сохраняем eventId (db:change обновит ленту)
+            }
+          });
+        }
+      })
       .catch(e => Logger.warn('NetService: не анонсировать', String(e)));
   }
 
@@ -2060,7 +2072,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     Nostr.publish(tpl)
       .then(ev => { activeQueryId = ev.id; Logger.info('NetService: запрос ' + ev.id.slice(0, 8) + '…'); })
       .catch(e => {
-        lastQueryVec = null; lastQueryTime = 0;   // даём повторить
+        lastQueryVec = null; lastQueryTime = 0;
         Logger.warn('NetService: не отправить запрос', String(e));
       });
   }
@@ -2079,7 +2091,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     });
   }
 
-  // ── heartbeat: чистка пиров и seen ──
+  // ── heartbeat ──
   function startHeartbeat() {
     if (hbTimer) clearInterval(hbTimer);
     hbTimer = setInterval(() => {
@@ -2478,19 +2490,110 @@ DI.register('Feed', function (DB, Ranker, Store, bus, Logger) {
 
 // ─── МОДУЛЬ 18: DOMAIN/Provenance ─── START ──────────────────
 /**
- * Граф «по мотивам»: parent-связи (DAG). lineage(id) → цепочка предков; children(id).
+ * Граф «по мотивам»: parent-связи между заметками (свои + сетевые).
+ * Читает DB (свои) и DB.cache (сетевые), строит связи по parentId.
  * @deps DB
  * @exports Provenance
  */
+DI.register('Provenance', function (DB) {
+  /**
+   * Все заметки (свои + сетевые) одним списком.
+   * @returns {Promise<Object[]>}
+   */
+  function loadAll() {
+    return Promise.all([DB.all(), DB.cacheAll()]).then(([own, cached]) => own.concat(cached));
+  }
+
+  /**
+   * Прямые дети заметки (заметки с parentId = id).
+   * @param {string} id
+   * @returns {Promise<Object[]>}
+   */
+  function children(id) {
+    if (!id) return Promise.resolve([]);
+    return loadAll().then(all => all.filter(n => n && n.parentId === id));
+  }
+
+  /**
+   * Все потомки (рекурсивно, BFS), без циклов.
+   * @param {string} id
+   * @returns {Promise<Object[]>}
+   */
+  function descendants(id) {
+    if (!id) return Promise.resolve([]);
+    return loadAll().then(all => {
+      const out = [];
+      const seenIds = new Set([id]);
+      let frontier = [id];
+      while (frontier.length) {
+        const next = [];
+        for (const n of all) {
+          if (n && n.parentId && frontier.indexOf(n.parentId) !== -1 && !seenIds.has(n.id)) {
+            seenIds.add(n.id);
+            out.push(n);
+            next.push(n.id);
+          }
+        }
+        frontier = next;
+      }
+      return out;
+    });
+  }
+
+  return { children, descendants, loadAll };
+}, ['DB']);
 // ─── МОДУЛЬ 18: DOMAIN/Provenance ─── END ────────────────────
 
 // ─── МОДУЛЬ 19: DOMAIN/Influence ─── START ───────────────────
 /**
- * Резонанс заметки: число УНИКАЛЬНЫХ авторов-потомков (Sybil-resistant).
- * Локальный счётчик (что долетело); опц. взвешивание по возрасту аккаунта.
- * @deps Provenance, Config
+ * Резонанс заметки: сколько мыслей она породила. Считаем по УНИКАЛЬНЫМ
+ * авторам-потомкам (Sybil-resistant: один человек не накрутит себе много).
+ * Свои заметки (authorPubkey=null) считаются одним автором «я».
+ * Карта parentId→авторы строится асинхронно по db:change/db:cache.
+ * @deps DB, EventBus, Logger
  * @exports Influence
  */
+DI.register('Influence', function (DB, bus, Logger) {
+  /** parentId -> Set авторов-потомков. @type {Map<string,Set<string>>} */
+  const resonanceMap = new Map();
+  let seq = 0;
+
+  /** Перестраивает карту резонанса из своих + сетевых заметок. */
+  function rebuild() {
+    const my = ++seq;
+    return Promise.all([DB.all(), DB.cacheAll()]).then(([own, cached]) => {
+      if (my !== seq) return;
+      const map = new Map();
+      own.concat(cached).forEach(n => {
+        if (n && n.parentId) {
+          if (!map.has(n.parentId)) map.set(n.parentId, new Set());
+          map.get(n.parentId).add(n.authorPubkey || 'self');
+        }
+      });
+      resonanceMap.clear();
+      map.forEach((v, k) => resonanceMap.set(k, v));
+    }).catch(e => Logger.warn('Influence: ошибка rebuild', String(e)));
+  }
+
+  /**
+   * Число уникальных авторов-потомков заметки.
+   * @param {string} id
+   * @returns {number}
+   */
+  function resonance(id) {
+    if (!id) return 0;
+    const s = resonanceMap.get(id);
+    return s ? s.size : 0;
+  }
+
+  function init() {
+    bus.on('db:change', () => rebuild());
+    bus.on('db:cache', () => rebuild());
+    rebuild();
+  }
+
+  return { init, resonance, rebuild };
+}, ['DB', 'EventBus', 'Logger']);
 // ─── МОДУЛЬ 19: DOMAIN/Influence ─── END ─────────────────────
 
 // ═══════════════════ UI ═══════════════════
@@ -2761,6 +2864,8 @@ DI.register('HeaderStatus', function (bus, I18n, Embedder) {
 /**
  * Поле ввода: счётчик, переключатель Личное/Мир, отправка.
  * Ввод мгновенно включает режим автора (Context.setInput), вектор догоняет с debounce.
+ * Если при публикации активен пин — новая заметка связывается с закреплённой
+ * (parentId = пин): так работает механика «мысль по мотивам».
  * Режим правки: по 'note:edit-request' {id} загружает заметку в поле;
  * отправка тогда вызывает Notes.edit, а не create.
  * @deps Context, Notes, DB, Store, I18n, EventBus, Toast, Utils
@@ -2790,7 +2895,6 @@ DI.register('Composer', function (Context, Notes, DB, Store, I18n, bus, Toast, U
     if (!editingId) sendBtn.textContent = on ? '…' : '→';
   }
 
-  /** Входит/выход из режима правки, обновляет UI поля. */
   function refreshEditUI() {
     if (!sendBtn || !toggle) return;
     if (editingId) {
@@ -2814,7 +2918,6 @@ DI.register('Composer', function (Context, Notes, DB, Store, I18n, bus, Toast, U
     });
   }
 
-  /** Выход из правки без сохранения. */
   function cancelEdit() {
     editingId = null;
     if (ta) ta.value = '';
@@ -2822,7 +2925,7 @@ DI.register('Composer', function (Context, Notes, DB, Store, I18n, bus, Toast, U
     refreshEditUI();
   }
 
-  /** Отправка: правка (Notes.edit) или создание (Notes.create). */
+  /** Отправка: правка (Notes.edit) или создание (Notes.create + пин как родитель). */
   function send() {
     if (sending) return;
     const text = ta.value.trim();
@@ -2848,9 +2951,14 @@ DI.register('Composer', function (Context, Notes, DB, Store, I18n, bus, Toast, U
       return;
     }
 
-    Notes.create(text, mode)
-      .then(() => {
-        Toast.show('ok', I18n.t(mode === 'world' ? 'toast.saved.public' : 'toast.saved.private'));
+    // активный пин = родитель новой заметки («по мотивам»)
+    const pin = Context.getPin();
+    const parentId = pin ? pin.id : null;
+
+    Notes.create(text, mode, parentId)
+      .then(note => {
+        Toast.show('ok', I18n.t(mode === 'world' ? 'toast.saved.public' : 'toast.saved.private')
+          + (note && note.parentId ? ' · ' + I18n.t('inf.linked') : ''));
         try { bus.emit('editor:sent'); } catch (_) {}
         finish();
       })
@@ -2901,14 +3009,14 @@ DI.register('Composer', function (Context, Notes, DB, Store, I18n, bus, Toast, U
  * Рендер ленты и хром режимов.
  *  - просмотр (нет контекста): хронология из Store.feed, хром скрыт.
  *  - ввод без пина: бар сегментов виден, лента = Store.lists[seg].
- *  - пин: бар скрыт, баннер виден, лента = единый список похожего
- *    (Моё+Мир+Озарения, по схожести, сама закреплённая исключена).
+ *  - пин: бар скрыт, баннер виден, лента = единый список похожего.
  * Жесты: клик по карточке = пин/отпин; карандаш на своих = открыть NoteView.
- * Перерисовка коалесцируется через requestAnimationFrame, карточки — каскадом.
- * @deps Store, Context, I18n, Utils, EventBus
+ * Карточка показывает связь «↳ по мотивам» (если есть parentId) и
+ * резонанс «◆ N» (число уникальных авторов-потомков из Influence).
+ * @deps Store, Context, I18n, Utils, EventBus, Influence
  * @exports FeedView
  */
-DI.register('FeedView', function (Store, Context, I18n, Utils, bus) {
+DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence) {
   let feedEl, emptyEl, emptyT, segBar, ctxBanner, ctxSrc, ctxTxt, ctxX;
   let cLocal, cWorld, cSeren;
   let unsubs = [];
@@ -2939,7 +3047,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus) {
     return ctx.source === 'pin' && ctx.noteId === n.id;
   }
 
-  /** Клик по карточке: пин, а повторный клик по закреплённой — снять. @param {Object} n */
+  /** Клик по карточке: пин, повторный по закреплённой — снять. @param {Object} n */
   function onNoteClick(n) {
     const ctx = Store.get('context');
     if (ctx.source === 'pin' && ctx.noteId === n.id) { Context.clearPin(); return; }
@@ -2971,11 +3079,31 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus) {
     }
     meta.appendChild(tag);
 
+    // связь «по мотивам»
+    if (n.parentId) {
+      const link = document.createElement('span');
+      link.className = 'note-parent';
+      link.textContent = '↳ ' + I18n.t('inf.bymotif');
+      link.title = I18n.t('inf.linked');
+      meta.appendChild(link);
+    }
+
     if (isRanked && typeof n.score === 'number') {
       const sim = document.createElement('span');
       sim.className = 'note-sim';
       sim.textContent = I18n.t('sim.score') + ' ' + Math.round(n.score * 100) + '%';
       meta.appendChild(sim);
+    }
+
+    // резонанс (уникальные авторы-потомки)
+    const res = Influence.resonance(n.id) || Influence.resonance(n.eventId);
+    if (res > 0) {
+      const r = document.createElement('span');
+      r.className = 'note-sim';
+      r.style.color = 'var(--teal)';
+      r.textContent = '◆ ' + res;
+      r.title = I18n.t('inf.resonance');
+      meta.appendChild(r);
     }
 
     const date = document.createElement('span');
@@ -2984,7 +3112,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus) {
 
     el.appendChild(meta);
 
-    // карандаш на своих: открывает заметку (NoteView) со всеми действиями
+    // карандаш на своих: открыть NoteView
     if (n.own) {
       const openBtn = document.createElement('button');
       openBtn.className = 'na';
@@ -2998,7 +3126,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus) {
       el.appendChild(openBtn);
     }
 
-    // клик по карточке — пин (ядро семантики)
+    // клик по карточке — пин
     el.addEventListener('click', () => onNoteClick(n));
 
     return el;
@@ -3058,6 +3186,8 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus) {
     unsubs.push(Store.subscribe(s => s.feed, scheduleRender));
     unsubs.push(Store.subscribe(s => s.seg, scheduleRender));
     unsubs.push(bus.on('i18n:change', scheduleRender));
+    unsubs.push(bus.on('db:change', scheduleRender));
+    unsubs.push(bus.on('db:cache', scheduleRender));
     document.querySelectorAll('.seg-b').forEach(b =>
       b.addEventListener('click', () => Store.setState({ seg: b.getAttribute('data-k') })));
     if (ctxX) ctxX.addEventListener('click', () => Context.clearPin());
@@ -3070,7 +3200,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus) {
   }
 
   return { init, destroy, render };
-}, ['Store', 'Context', 'I18n', 'Utils', 'EventBus']);
+}, ['Store', 'Context', 'I18n', 'Utils', 'EventBus', 'Influence']);
 // ─── МОДУЛЬ 25: UI/FeedView ─── END ──────────────────────────
 
 // ─── МОДУЛЬ 26: UI/BaseView ─── START ────────────────────────
@@ -3338,11 +3468,12 @@ DI.register('NoteView', function (DB, Notes, NoteActions, Modal, Toast, I18n, Ut
 
 // ─── МОДУЛЬ 28: UI/MenuView ─── START ────────────────────────
 /**
- * Меню (кнопка #btn-menu) и переключение экранов.
+ * Меню (кнопка #btn-menu) и переключение экранов Поток/База.
  *  - Модалка настроек: тема, язык, стереть данные.
- *  - Переключение view: табы #tabs и кнопки #btn-base / #btn-menu-навигация.
- * Тема применяется через data-theme на body (стили уже в каркасе).
- * @deps Store, Config, Modal, Toast, I18n, EventBus, AuthService? (нет) 
+ *  - setView показывает/прячет элементы потока и панель #base
+ *    под реальную разметку (#main с детьми, #base).
+ * Тема применяется через data-theme на body.
+ * @deps Store, Config, Modal, Toast, I18n, EventBus
  * @exports MenuView
  */
 DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus) {
@@ -3354,18 +3485,21 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus) {
     Config.set('theme', theme);
   }
 
-  /** Переключает экран Поток/База. @param {'stream'|'base'} view */
+  /** Переключает экран Поток/База под реальную разметку. @param {'stream'|'base'} view */
   function setView(view) {
     Store.setState({ view });
-    const stream = document.getElementById('ws-stream');
-    const base = document.getElementById('ws-base');
-    if (stream) stream.style.display = view === 'stream' ? 'flex' : 'none';
-    if (base) base.classList.toggle('on', view === 'base');
+    const isBase = view === 'base';
+    ['ctx-banner', 'seg', 'feed-wrap', 'composer'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.style.display = isBase ? 'none' : '';
+    });
+    const base = document.getElementById('base');
+    if (base) base.classList.toggle('on', isBase);
     try { bus.emit('view:changed', { view }); } catch (_) {}
     viewSync();
   }
 
-  /** Синхронизирует active-классы табов/кнопок с текущим view. */
+  /** Синхронизирует active-классы навигации с текущим view. */
   function viewSync() {
     const view = Store.get('view');
     document.querySelectorAll('.tab-b').forEach(b => b.classList.toggle('on', b.getAttribute('data-v') === view));
@@ -3378,7 +3512,6 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus) {
     const body = document.createElement('div');
     body.style.cssText = 'display:flex;flex-direction:column;gap:12px;';
 
-    // тема
     const themeBtn = document.createElement('button');
     themeBtn.className = 'nv-act';
     themeBtn.textContent = I18n.t('menu.theme') + ': ' + (Config.get('theme', 'dark') === 'dark' ? '🌙' : '☀️');
@@ -3390,7 +3523,6 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus) {
     });
     body.appendChild(themeBtn);
 
-    // язык
     const langBtn = document.createElement('button');
     langBtn.className = 'nv-act';
     langBtn.textContent = I18n.t('menu.lang') + ': ' + I18n.getLang().toUpperCase();
@@ -3401,7 +3533,6 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus) {
     });
     body.appendChild(langBtn);
 
-    // перейти в базу / поток
     const goBase = document.createElement('button');
     goBase.className = 'nv-act';
     goBase.textContent = I18n.t('tab.base');
@@ -3414,7 +3545,6 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus) {
     goStream.addEventListener('click', () => { Modal.close(); setView('stream'); });
     body.appendChild(goStream);
 
-    // danger: стереть данные
     const wipe = document.createElement('button');
     wipe.className = 'nv-act danger';
     wipe.textContent = I18n.t('base.wipe');
@@ -3484,12 +3614,10 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus) {
  */
 // ─── МОДУЛЬ 31: BOOT ─── END ─────────────────────────────────
 
-// ─── ВРЕМЕННЫЙ BOOT (юзабилити-фундамент) ─── START
+// ─── ВРЕМЕННЫЙ BOOT (связь + резонанс) ─── START
 (function tempBoot() {
   document.body.classList.add('ready');
-
   const I18n = DI.resolve('I18n');
-  // строки, которые добавляют новые модули юзабилити
   I18n.addDict('ru', {
     'del.confirm': 'Удалить эту заметку навсегда?',
     'base.wipe': 'Стереть базу',
@@ -3497,6 +3625,8 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus) {
     'toast.base.wiped': 'база стёрта',
     'empty.base.empty': 'Ничего не найдено',
     'toast.edit.saved': 'сохранено',
+    'inf.linked': 'по мотивам',
+    'inf.bymotif': 'по мотивам',
   });
   I18n.addDict('en', {
     'del.confirm': 'Delete this note forever?',
@@ -3505,6 +3635,8 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus) {
     'toast.base.wiped': 'base wiped',
     'empty.base.empty': 'Nothing found',
     'toast.edit.saved': 'saved',
+    'inf.linked': 'inspired by',
+    'inf.bymotif': 'inspired by',
   });
 
   const Progress = DI.resolve('Progress');
@@ -3512,6 +3644,7 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus) {
   const Embedder = DI.resolve('Embedder');
   const Feed = DI.resolve('Feed');
   const Composer = DI.resolve('Composer');
+  const Influence = DI.resolve('Influence');
   const FeedView = DI.resolve('FeedView');
   const NetService = DI.resolve('NetService');
   const NoteActions = DI.resolve('NoteActions');
@@ -3527,12 +3660,12 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus) {
   HeaderStatus.init();
   Feed.init();
   Composer.init();
+  Influence.init();      // до FeedView, чтобы резонанс был готов к рендеру
   FeedView.init();
   NoteView.init();
   BaseView.init();
   MenuView.init();
 
-  // стирание данных из меню
   EventBus.on('wipe:request', () => {
     DB.reset().then(() => {
       Toast.show('ok', I18n.t('toast.base.wiped'));
@@ -3543,7 +3676,7 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus) {
   Embedder.load();
   NetService.start();
 
-  console.info('[NOOmium] юзабилити-фундамент: база, просмотр, правка, меню');
+  console.info('[NOOmium] связь заметок + резонанс');
 })();
 // ─── ВРЕМЕННЫЙ BOOT ─── END
 
