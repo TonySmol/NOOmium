@@ -8,12 +8,11 @@
 <style>
 /* ═══════════════════════════════════════════════════════════════════════════════
    ЦВЕТОВАЯ СИСТЕМА (DARK / LIGHT)
-   Современная, нейтральная, высококонтрастная палитра.
-   Вдохновлено Linear, Vercel, Stripe — серьёзный тон без тёплых перекосов.
+   Нейтральная, высококонтрастная палитра. Linear / Vercel / Stripe.
    ═══════════════════════════════════════════════════════════════════════════════ */
 
 :root {
-  /* ── Тёмная тема (по умолчанию) ── */
+  /* Тёмная тема (по умолчанию) */
   --bg: #0a0a0b;
   --bg-2: #111113;
   --surface: #141417;
@@ -27,7 +26,7 @@
   --text-2: #a1a1aa;
   --text-3: #71717a;
   
-  /* Акценты: насыщенные, но не кислотные */
+  /* Акценты */
   --amber: #f59e0b;
   --amber-glow: rgba(245, 158, 11, 0.12);
   --amber-hover: #d97706;
@@ -43,30 +42,32 @@
   --green: #22c55e;
   --green-glow: rgba(34, 197, 94, 0.12);
   
-  /* ── Шрифты ── */
+  /* Шрифты */
   --font: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, sans-serif;
   --display: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, sans-serif;
   --mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
   
-  /* ── Радиусы и эффекты ── */
+  /* Радиусы */
   --r: 12px;
   --r-sm: 8px;
   --r-xs: 6px;
+  
+  /* Анимации */
   --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
   
-  /* ── Безопасные зоны (iOS notch) ── */
+  /* Безопасные зоны (iOS) */
   --safe-top: env(safe-area-inset-top, 0px);
   --safe-bot: env(safe-area-inset-bottom, 0px);
   
-  /* ── Тени ── */
+  /* Тени */
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
   --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.25);
   --shadow-lg: 0 16px 40px rgba(0, 0, 0, 0.4);
   --shadow-xl: 0 24px 64px rgba(0, 0, 0, 0.5);
 }
 
-/* ── Светлая тема ── */
+/* Светлая тема */
 [data-theme="light"] {
   --bg: #fafafa;
   --bg-2: #ffffff;
@@ -103,7 +104,7 @@
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════════
-   СБРОС СТИЛЕЙ
+   СБРОС И БАЗОВЫЕ СТИЛИ
    ═══════════════════════════════════════════════════════════════════════════════ */
 
 *,
@@ -123,11 +124,8 @@ html, body {
   font: 15px / 1.55 var(--font);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
-  letter-spacing: -0.01em;
 }
 
-/* Мягкий градиент фона — едва заметные цветные пятна для глубины */
 body {
   background-image:
     radial-gradient(720px 460px at 92% -6%, var(--amber-glow), transparent 60%),
@@ -159,28 +157,29 @@ input, textarea, select {
   outline: none;
 }
 
-/* Кастомный скроллбар */
+/* Скроллбар */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-thumb { background: var(--line-2); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--text-3); }
 ::-webkit-scrollbar-track { background: transparent; }
 
-/* Фокус-стили для accessibility */
-/* Убираем outline для input/textarea, оставляем для кнопок */
-:focus-visible {
-  outline: none;
-}
+/* Фокус: только для клавиатурной навигации, янтарный */
+:focus { outline: none; }
 
-button:focus-visible {
+:focus-visible {
   outline: 2px solid var(--amber);
   outline-offset: 2px;
   border-radius: var(--r-xs);
 }
 
-/* Выделение текста */
+/* Выделение текста: насыщенный янтарный */
 ::selection {
-  background: var(--amber-glow);
+  background: rgba(245, 158, 11, 0.25);
   color: var(--text);
+}
+
+[data-theme="light"] ::selection {
+  background: rgba(217, 119, 6, 0.2);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════════
@@ -196,9 +195,7 @@ button:focus-visible {
   overflow: hidden;
 }
 
-body.ready #app {
-  display: flex;
-}
+body.ready #app { display: flex; }
 
 /* ═══════════════════════════════════════════════════════════════════════════════
    ШАПКА (HEADER)
@@ -222,6 +219,7 @@ body.ready #app {
   font: 600 18px / 1 var(--display);
   letter-spacing: -0.02em;
   color: var(--text);
+  flex-shrink: 0;
 }
 
 .logo b {
@@ -238,7 +236,7 @@ body.ready #app {
   font: 500 11px / 1 var(--mono);
   color: var(--text-3);
   overflow: hidden;
-  letter-spacing: 0;
+  min-width: 0;
 }
 
 .st {
@@ -255,7 +253,7 @@ body.ready #app {
   border-radius: 50%;
   background: var(--text-3);
   flex-shrink: 0;
-  transition: background 0.2s var(--ease);
+  transition: background 0.2s var(--ease), box-shadow 0.2s var(--ease);
 }
 
 .st .dot.ok { background: var(--green); box-shadow: 0 0 6px var(--green-glow); }
@@ -282,7 +280,7 @@ body.ready #app {
   justify-content: center;
   color: var(--text-2);
   font-size: 16px;
-  transition: background 0.15s var(--ease), color 0.15s var(--ease);
+  transition: background 0.15s var(--ease), color 0.15s var(--ease), transform 0.1s var(--ease);
   flex-shrink: 0;
 }
 
@@ -301,7 +299,7 @@ body.ready #app {
   color: var(--amber);
 }
 
-/* Бургер-меню (три линии) */
+/* Бургер-меню */
 #btn-menu {
   flex-direction: column;
   gap: 4px;
@@ -340,7 +338,7 @@ body.ready #app {
   position: relative;
 }
 
-/* ── Баннер контекста (пин / дрейф) ── */
+/* Баннер контекста */
 #ctx-banner {
   display: none;
   align-items: center;
@@ -369,6 +367,7 @@ body.ready #app {
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--text);
+  min-width: 0;
 }
 
 #ctx-banner .ctx-x {
@@ -389,7 +388,7 @@ body.ready #app {
   color: var(--text);
 }
 
-/* ── Сегменты (табы) ── */
+/* Сегменты (табы) */
 #seg {
   display: none;
   gap: 2px;
@@ -416,6 +415,7 @@ body.ready #app {
   gap: 6px;
   transition: all 0.15s var(--ease);
   user-select: none;
+  min-width: 0;
 }
 
 .seg-b:hover:not(.on) {
@@ -437,6 +437,7 @@ body.ready #app {
   min-width: 18px;
   text-align: center;
   transition: all 0.15s var(--ease);
+  flex-shrink: 0;
 }
 
 .seg-b.on .cnt {
@@ -444,7 +445,10 @@ body.ready #app {
   color: var(--amber);
 }
 
-/* ── Лента ── */
+/* ═══════════════════════════════════════════════════════════════════════════════
+   ЛЕНТА
+   ═══════════════════════════════════════════════════════════════════════════════ */
+
 #feed-wrap {
   flex: 1;
   position: relative;
@@ -461,6 +465,7 @@ body.ready #app {
   overscroll-behavior-y: contain;
 }
 
+/* Карточка заметки */
 .note {
   position: relative;
   background: var(--surface);
@@ -469,23 +474,20 @@ body.ready #app {
   padding: 14px;
   margin-bottom: 10px;
   cursor: pointer;
-  transition: border-color 0.15s var(--ease), transform 0.15s var(--ease), box-shadow 0.15s var(--ease);
+  transition: border-color 0.15s var(--ease), box-shadow 0.15s var(--ease);
   animation: noteIn 0.25s var(--ease-out) both;
+  display: flex;
+  flex-direction: column;
 }
 
 .note:hover {
   border-color: var(--line-2);
-  transform: translateY(-1px);
   box-shadow: var(--shadow-sm);
-}
-
-.note:active {
-  transform: translateY(0);
 }
 
 .note.pinned {
   border-color: var(--amber);
-  box-shadow: var(--shadow-sm);
+  box-shadow: 0 0 0 1px var(--amber-glow), var(--shadow-sm);
 }
 
 @keyframes noteIn {
@@ -502,16 +504,20 @@ body.ready #app {
   line-height: 1.55;
 }
 
+/* Мета-блок: прижат к низу, адаптивный */
 .note-meta {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   font: 400 11px / 1 var(--mono);
   color: var(--text-3);
   flex-wrap: wrap;
   letter-spacing: 0;
+  margin-top: auto;
+  padding-top: 10px;
 }
 
+/* Теги */
 .note-tag {
   padding: 3px 7px;
   border-radius: 4px;
@@ -520,6 +526,8 @@ body.ready #app {
   text-transform: uppercase;
   letter-spacing: 0.04em;
   line-height: 1;
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .note-tag.priv {
@@ -532,18 +540,92 @@ body.ready #app {
   color: var(--teal);
 }
 
-.note-sim {
+/* Вертикальный разделитель между группами */
+.note-meta-sep {
+  width: 1px;
+  height: 14px;
+  background: var(--line-2);
+  flex-shrink: 0;
+}
+
+/* Кнопки навигации: стрелка и ромб (24×24, бирюзовые) */
+.note-sim,
+.note-parent {
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-xs);
+  color: var(--teal);
+  font-size: 11px;
+  font-weight: 600;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.12s var(--ease), border-color 0.12s var(--ease), color 0.12s var(--ease);
+  flex-shrink: 0;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.note-sim:hover:not(:disabled),
+.note-parent:hover:not(:disabled) {
+  background: var(--surface-3);
+  border-color: var(--line-2);
+}
+
+.note-parent.orphan {
+  opacity: 0.35;
+  text-decoration: line-through;
+  cursor: default;
+  pointer-events: none;
+}
+
+/* Процент сходства — янтарный */
+.note-sim-info {
   color: var(--amber);
   font-weight: 600;
+  font-size: 11px;
+  font-family: var(--mono);
+  letter-spacing: 0;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
-.note-parent {
-  color: var(--teal);
-  transition: opacity 0.15s var(--ease);
+/* Время — серый, прижато вправо */
+.note-date {
+  color: var(--text-3);
+  font-size: 11px;
+  font-family: var(--mono);
+  letter-spacing: 0;
+  white-space: nowrap;
+  flex-shrink: 0;
+  margin-left: auto;
 }
 
-.note-parent:hover {
-  opacity: 0.8;
+/* Кнопка карандаша (24×24) */
+.na {
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-xs);
+  color: var(--text-2);
+  font-size: 12px;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.12s var(--ease), color 0.12s var(--ease), border-color 0.12s var(--ease);
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+.na:hover {
+  background: var(--surface-3);
+  color: var(--amber);
+  border-color: var(--amber);
 }
 
 /* Пустое состояние */
@@ -567,16 +649,10 @@ body.ready #app {
   margin-bottom: 12px;
 }
 
-#feed-empty .t {
+#feed-empty-t {
   font-size: 14px;
   font-weight: 500;
   color: var(--text-2);
-  margin-bottom: 4px;
-}
-
-#feed-empty .d {
-  font-size: 12px;
-  color: var(--text-3);
 }
 
 /* Кнопка "Загрузить ещё" */
@@ -605,7 +681,10 @@ body.ready #app {
   cursor: default;
 }
 
-/* ── Композер (поле ввода) ── */
+/* ═══════════════════════════════════════════════════════════════════════════════
+   КОМПОЗЕР (ПОЛЕ ВВОДА)
+   ═══════════════════════════════════════════════════════════════════════════════ */
+
 #composer {
   margin: 0 14px 12px;
   padding: 10px 12px;
@@ -614,7 +693,7 @@ body.ready #app {
   border: 1px solid var(--line);
   border-radius: var(--r);
   flex-shrink: 0;
-  transition: border-color 0.15s var(--ease), box-shadow 0.15s var(--ease);
+  transition: border-color 0.15s var(--ease);
 }
 
 #composer:focus-within {
@@ -634,9 +713,7 @@ body.ready #app {
   background: transparent;
 }
 
-#ed-ta::placeholder {
-  color: var(--text-3);
-}
+#ed-ta::placeholder { color: var(--text-3); }
 
 #ed-foot {
   display: flex;
@@ -651,6 +728,7 @@ body.ready #app {
   font: 400 11px / 1 var(--mono);
   color: var(--text-3);
   letter-spacing: 0;
+  flex-shrink: 0;
 }
 
 #ed-acts {
@@ -659,7 +737,7 @@ body.ready #app {
   gap: 8px;
 }
 
-/* Переключатель режима (Личное / Мир) */
+/* Переключатель Личное/Мир */
 #mode-toggle {
   display: inline-flex;
   align-items: center;
@@ -690,23 +768,12 @@ body.ready #app {
   cursor: pointer;
 }
 
-.mt-opt:hover:not(.on) {
-  color: var(--text-2);
-}
+.mt-opt:hover:not(.on) { color: var(--text-2); }
+.mt-opt.on { color: var(--text); }
 
-.mt-opt.on {
-  color: var(--text);
-}
+#mode-toggle[data-mode="world"] .mt-opt[data-v="world"] { color: var(--teal); }
+#mode-toggle[data-mode="private"] .mt-opt[data-v="private"] { color: var(--amber); }
 
-#mode-toggle[data-mode="world"] .mt-opt[data-v="world"] {
-  color: var(--teal);
-}
-
-#mode-toggle[data-mode="private"] .mt-opt[data-v="private"] {
-  color: var(--amber);
-}
-
-/* Жёлтый ползунок — точный расчёт ширины (FIX для русского текста) */
 .mt-thumb {
   position: absolute;
   top: 3px;
@@ -733,7 +800,7 @@ body.ready #app {
 #btn-send {
   height: 34px;
   min-width: 40px;
-  padding: 0 14px 2px 14px; /* Компенсация визуального смещения стрелки */
+  padding: 0 14px;
   border-radius: 999px;
   background: var(--amber);
   color: #1a1206;
@@ -747,18 +814,9 @@ body.ready #app {
   box-shadow: var(--shadow-sm);
 }
 
-#btn-send:hover:not(:disabled) {
-  background: var(--amber-hover);
-}
-
-#btn-send:active:not(:disabled) {
-  transform: scale(0.95);
-}
-
-#btn-send.sending {
-  opacity: 0.6;
-  cursor: wait;
-}
+#btn-send:hover:not(:disabled) { background: var(--amber-hover); }
+#btn-send:active:not(:disabled) { transform: scale(0.95); }
+#btn-send.sending { opacity: 0.6; cursor: wait; }
 
 /* ═══════════════════════════════════════════════════════════════════════════════
    БАЗА (BASE VIEW)
@@ -795,9 +853,7 @@ body.ready #app {
   transition: border-color 0.15s var(--ease);
 }
 
-.bstat:hover {
-  border-color: var(--line-2);
-}
+.bstat:hover { border-color: var(--line-2); }
 
 .bstat b {
   display: block;
@@ -825,18 +881,13 @@ body.ready #app {
   border: 1px solid var(--line);
   border-radius: var(--r-sm);
   padding: 9px 12px;
-  transition: border-color 0.15s var(--ease), box-shadow 0.15s var(--ease);
+  transition: border-color 0.15s var(--ease);
+  min-width: 0;
 }
 
-#base-q:focus {
-  border-color: var(--amber);
-}
+#base-q:focus { border-color: var(--amber); }
+#base-q::placeholder { color: var(--text-3); }
 
-#base-q::placeholder {
-  color: var(--text-3);
-}
-
-/* Выпадающий список (FIX: добавлена SVG-стрелка) */
 #base-sort {
   background-color: var(--surface);
   border: 1px solid var(--line);
@@ -847,20 +898,16 @@ body.ready #app {
   color: var(--text);
   font-size: 13px;
   font-weight: 500;
-  transition: border-color 0.15s var(--ease), box-shadow 0.15s var(--ease);
+  transition: border-color 0.15s var(--ease);
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23a1a1aa' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
   background-repeat: no-repeat;
   background-position: right 12px center;
   background-size: 12px;
+  flex-shrink: 0;
 }
 
-#base-sort:hover {
-  border-color: var(--line-2);
-}
-
-#base-sort:focus {
-  border-color: var(--amber);
-}
+#base-sort:hover { border-color: var(--line-2); }
+#base-sort:focus { border-color: var(--amber); }
 
 #base-list {
   flex: 1;
@@ -876,17 +923,12 @@ body.ready #app {
   padding: 12px 14px;
   margin-bottom: 8px;
   cursor: pointer;
-  transition: border-color 0.15s var(--ease), transform 0.15s var(--ease), box-shadow 0.15s var(--ease);
+  transition: border-color 0.15s var(--ease), box-shadow 0.15s var(--ease);
 }
 
 .bi:hover {
   border-color: var(--line-2);
-  transform: translateY(-1px);
   box-shadow: var(--shadow-sm);
-}
-
-.bi:active {
-  transform: translateY(0);
 }
 
 .bi-t {
@@ -979,6 +1021,7 @@ body.ready #app {
   justify-content: center;
   transition: background 0.15s var(--ease), color 0.15s var(--ease);
   flex-shrink: 0;
+  line-height: 1;
 }
 
 #modal-x:hover {
@@ -1013,9 +1056,7 @@ body.ready #app {
   background: var(--surface-2);
 }
 
-.mbtn:hover {
-  background: var(--surface-3);
-}
+.mbtn:hover { background: var(--surface-3); }
 
 .mbtn.primary {
   background: var(--amber);
@@ -1024,9 +1065,7 @@ body.ready #app {
   box-shadow: var(--shadow-sm);
 }
 
-.mbtn.primary:hover {
-  background: var(--amber-hover);
-}
+.mbtn.primary:hover { background: var(--amber-hover); }
 
 .mbtn.danger {
   color: var(--rose);
@@ -1039,14 +1078,13 @@ body.ready #app {
   color: #fff;
 }
 
-/* ── Блок уведомлений ── */
+/* Блок уведомлений (тосты) */
 #notif-bar {
   margin: 10px 14px 0;
   min-height: 0;
   flex-shrink: 0;
 }
 
-/* ── Тосты ── */
 #toasts {
   display: flex;
   flex-direction: column;
@@ -1064,9 +1102,15 @@ body.ready #app {
   gap: 10px;
   align-items: center;
   font-size: 13px;
-  white-space: nowrap;
   animation: tIn 0.25s var(--ease-out);
   width: 100%;
+  overflow: hidden;
+}
+
+.toast span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 @keyframes tIn {
@@ -1074,7 +1118,7 @@ body.ready #app {
   to { opacity: 1; transform: none; }
 }
 
-/* ── Прогресс загрузки модели ── */
+/* Прогресс загрузки модели */
 #progress {
   position: fixed;
   inset: 0;
@@ -1121,7 +1165,10 @@ body.ready #app {
   transition: width 0.3s var(--ease);
 }
 
-/* ── Просмотр заметки (NoteView) ── */
+/* ═══════════════════════════════════════════════════════════════════════════════
+   ПРОСМОТР ЗАМЕТКИ (NOTEVIEW)
+   ═══════════════════════════════════════════════════════════════════════════════ */
+
 #noteview {
   position: fixed;
   inset: 0;
@@ -1139,7 +1186,6 @@ body.ready #app {
   to { opacity: 1; }
 }
 
-/* FIX: align-items:center для корректного выравнивания кнопок */
 .nv-f {
   display: flex;
   justify-content: center;
@@ -1212,9 +1258,7 @@ body.ready #app {
   border-color: var(--line-2);
 }
 
-.nv-act:active:not(:disabled) {
-  transform: scale(0.97);
-}
+.nv-act:active:not(:disabled) { transform: scale(0.97); }
 
 .nv-act:disabled {
   opacity: 0.5;
@@ -1244,54 +1288,21 @@ body.ready #app {
   font: 15px / 1.6 var(--font);
   color: var(--text);
   resize: none;
-  transition: border-color 0.15s var(--ease), box-shadow 0.15s var(--ease);
+  transition: border-color 0.15s var(--ease);
 }
 
-.nv-text-edit:focus {
-  border-color: var(--amber);
-}
+.nv-text-edit:focus { border-color: var(--amber); }
 
 .nv-text-edit:disabled {
   opacity: 0.6;
   cursor: not-allowed;
 }
 
-/* Кнопка "Р" в карточках ленты (иконка карандаша) */
-.na {
-  background: var(--surface-2);
-  border: 1px solid var(--line);
-  border-radius: var(--r-xs);
-  color: var(--text-2);
-  font-size: 13px;
-  width: 26px;
-  height: 26px;
-  padding: 0;
-  margin-left: auto;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  transition: background 0.12s var(--ease), color 0.12s var(--ease), border-color 0.12s var(--ease);
-  flex-shrink: 0;
-  line-height: 1;
-}
-
-.na:hover {
-  background: var(--surface-3);
-  color: var(--amber);
-  border-color: var(--amber);
-}
-
 /* ═══════════════════════════════════════════════════════════════════════════════
-   УТИЛИТЫ
+   УТИЛИТЫ И АДАПТИВНОСТЬ
    ═══════════════════════════════════════════════════════════════════════════════ */
 
-.hidden {
-  display: none !important;
-}
-
-/* ═══════════════════════════════════════════════════════════════════════════════
-   АДАПТИВНОСТЬ
-   ═══════════════════════════════════════════════════════════════════════════════ */
+.hidden { display: none !important; }
 
 @media (prefers-reduced-motion: reduce) {
   *,
@@ -1305,9 +1316,7 @@ body.ready #app {
 }
 
 @media (max-width: 480px) {
-  .logo {
-    font-size: 17px;
-  }
+  .logo { font-size: 17px; }
   
   #hdr {
     gap: 8px;
@@ -1315,41 +1324,33 @@ body.ready #app {
     padding-top: calc(10px + var(--safe-top));
   }
   
-  #hdr-status {
-    gap: 8px;
-  }
+  #hdr-status { gap: 8px; }
   
   .st {
     gap: 4px;
     font-size: 10px;
   }
   
-  #feed {
-    padding: 8px 12px;
-  }
+  #feed { padding: 8px 12px; }
   
-  #composer {
-    margin: 0 12px 10px;
-  }
+  #composer { margin: 0 12px 10px; }
   
   .mt-opt {
     padding: 0 10px;
     font-size: 11px;
   }
+  
+  .note { padding: 12px; }
+  
+  .note-meta { gap: 6px; }
 }
 
 @media (min-width: 768px) {
-  #feed {
-    padding: 12px 20px;
-  }
+  #feed { padding: 12px 20px; }
   
-  #composer {
-    margin: 0 20px 14px;
-  }
+  #composer { margin: 0 20px 14px; }
   
-  .note {
-    padding: 16px;
-  }
+  .note { padding: 16px; }
 }
 </style>
 </head>
@@ -1369,8 +1370,8 @@ body.ready #app {
         <span class="lbl" id="st-ai-txt" data-i18n="st.ai.loading">модель</span>
       </span>
     </div>
-    <button class="icon-btn" id="btn-base" data-i18n-aria="btn.base.aria">▤</button>
-    <button class="icon-btn" id="btn-menu" data-i18n-aria="btn.menu.aria">
+    <button class="icon-btn" id="btn-base" data-i18n-aria="btn.base.aria" aria-label="Моя база">▤</button>
+    <button class="icon-btn" id="btn-menu" data-i18n-aria="btn.menu.aria" aria-label="Меню">
       <i></i><i></i><i></i>
     </button>
   </header>
@@ -1386,16 +1387,16 @@ body.ready #app {
     <div id="ctx-banner">
       <span class="ctx-src" id="ctx-src"></span>
       <span class="ctx-txt" id="ctx-txt"></span>
-      <button class="ctx-x" id="ctx-x" data-i18n-aria="btn.ctx.clear.aria">✕</button>
+      <button class="ctx-x" id="ctx-x" data-i18n-aria="btn.ctx.clear.aria" aria-label="Снять контекст">✕</button>
     </div>
     
-    <!-- Блок уведомлений и статусов -->
-	<div id="notif-bar">
-	  <div id="toasts"></div>
-	</div>
+    <!-- Блок уведомлений -->
+    <div id="notif-bar">
+      <div id="toasts"></div>
+    </div>
 
-<!-- Сегменты (табы) -->
-<div id="seg">
+    <!-- Сегменты (табы) -->
+    <div id="seg">
       <button class="seg-b on" data-k="local">
         <span data-i18n="seg.local">Моё</span>
         <span class="cnt" id="c-local">0</span>
@@ -1422,18 +1423,18 @@ body.ready #app {
     <!-- Кнопка загрузки истории -->
     <button id="btn-history" class="hist-btn" data-i18n="net.loadmore">Загрузить ещё</button>
 
-    <!-- Композер (поле ввода) -->
+    <!-- Композер -->
     <div id="composer">
-      <textarea id="ed-ta" data-i18n-ph="ed.placeholder"></textarea>
+      <textarea id="ed-ta" data-i18n-ph="ed.placeholder" aria-label="Текст заметки"></textarea>
       <div id="ed-foot">
         <span id="ed-cnt">0 <span data-i18n="ed.chars">симв.</span></span>
         <div id="ed-acts">
-          <div id="mode-toggle" data-mode="private">
+          <div id="mode-toggle" data-mode="private" role="radiogroup" aria-label="Режим видимости">
             <div class="mt-thumb"></div>
-            <div class="mt-opt on" data-v="private" data-i18n="btn.private">Личное</div>
-            <div class="mt-opt" data-v="world" data-i18n="btn.public">Мир</div>
+            <div class="mt-opt on" data-v="private" data-i18n="btn.private" role="radio" aria-checked="true">Личное</div>
+            <div class="mt-opt" data-v="world" data-i18n="btn.public" role="radio" aria-checked="false">Мир</div>
           </div>
-          <button id="btn-send" data-i18n-aria="btn.send.aria">→</button>
+          <button id="btn-send" data-i18n-aria="btn.send.aria" aria-label="Отправить">→</button>
         </div>
       </div>
     </div>
@@ -1456,8 +1457,8 @@ body.ready #app {
           </div>
         </div>
         <div id="base-ctrls">
-          <input id="base-q" data-i18n-ph="base.search">
-          <select id="base-sort">
+          <input id="base-q" data-i18n-ph="base.search" aria-label="Поиск по базе">
+          <select id="base-sort" aria-label="Сортировка">
             <option value="new" data-i18n="base.sort.new">новые</option>
             <option value="old" data-i18n="base.sort.old">старые</option>
             <option value="az" data-i18n="base.sort.az">а-я</option>
@@ -1470,22 +1471,19 @@ body.ready #app {
 </div>
 
 <!-- МОДАЛЬНЫЕ ОКНА -->
-<div id="overlay">
+<div id="overlay" role="dialog" aria-modal="true">
   <div id="modal">
     <div id="modal-h">
       <div id="modal-t"></div>
-      <button id="modal-x">✕</button>
+      <button id="modal-x" aria-label="Закрыть">✕</button>
     </div>
     <div id="modal-b"></div>
     <div id="modal-f"></div>
   </div>
 </div>
 
-<!-- ТОСТЫ -->
-<div id="toasts"></div>
-
 <!-- ПРОГРЕСС -->
-<div id="progress">
+<div id="progress" role="alert" aria-live="polite">
   <div class="prog-c">
     <div style="font:600 17px var(--display);letter-spacing:-0.01em" data-i18n="progress.title">Загружаем модель</div>
     <div id="prog-info" style="font-size:12px;color:var(--text-3);margin-top:4px;font-family:var(--mono)"></div>
@@ -1497,7 +1495,7 @@ body.ready #app {
 </div>
 
 <!-- ПРОСМОТР ЗАМЕТКИ -->
-<div id="noteview"></div>
+<div id="noteview" role="dialog" aria-modal="true"></div>
 
 <script type="module">
 'use strict';
@@ -1505,7 +1503,7 @@ body.ready #app {
 // ═══════════════════════════════════════════════════════════════════════════════
 // ВЕРСИЯ ПРИЛОЖЕНИЯ
 // ═══════════════════════════════════════════════════════════════════════════════
-const APP_VERSION = '0.3.1';
+const APP_VERSION = '0.3.3';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CORE/DI - ПРЕАМБУЛА
@@ -2014,6 +2012,9 @@ DI.register('I18n', function (Config, bus) {
     'btn.edit': 'Развить',
     'btn.del': 'Удалить',
     'btn.copy': 'Копия',
+	'btn.pin': 'Пин',
+	'btn.pin.aria': 'Закрепить для поиска',
+	'toast.pinned': 'закреплено',
     'btn.cancel': 'Отмена',
     'btn.close': 'Закрыть',
     'btn.toggle.priv': 'Скрыть',
@@ -2137,6 +2138,9 @@ DI.register('I18n', function (Config, bus) {
     'btn.edit': 'Develop',
     'btn.del': 'Delete',
     'btn.copy': 'Copy',
+	'btn.pin': 'Pin',
+	'btn.pin.aria': 'Pin for search',
+	'toast.pinned': 'pinned',
     'btn.cancel': 'Cancel',
     'btn.close': 'Close',
     'btn.toggle.priv': 'Hide',
@@ -3963,10 +3967,9 @@ DI.register('Notes', function (DB, Embedder, bus, Logger, Utils) {
  *  - input  — только ввод: контекст = ввод
  *  - none   — просмотр
  * 
- * ИСПРАВЛЕНО: setPin сохраняет eventId, чтобы Composer мог передавать сетевой
- * ID родителя в дочерние заметки (иначе на других устройствах они становятся orphan).
+ * Подписывается на 'note:pin' из NoteView — для бесшовного пина из полного просмотра.
  */
-DI.register('Context', function (Store, Embedder, Config, Utils) {
+DI.register('Context', function (Store, Embedder, Config, Utils, bus) {
   let inputText = '';
   let inputVector = null;
   let pinNote = null;
@@ -4041,7 +4044,6 @@ DI.register('Context', function (Store, Embedder, Config, Utils) {
 
     setPin(note) {
       if (!note || !note.vector) return;
-      // Сохраняем eventId для корректной работы с сетью
       pinNote = { 
         id: note.id, 
         eventId: note.eventId || null,
@@ -4075,8 +4077,15 @@ DI.register('Context', function (Store, Embedder, Config, Utils) {
     getPin() {
       return pinNote;
     },
+
+    init() {
+      // Подписка на событие пина из NoteView
+      bus.on('note:pin', note => {
+        if (note) this.setPin(note);
+      });
+    },
   };
-}, ['Store', 'Embedder', 'Config', 'Utils']);
+}, ['Store', 'Embedder', 'Config', 'Utils', 'EventBus']);
 // ─── DOMAIN/Context ─── END ─────────────────────────────────────────────────
 
 // ─── DOMAIN/Feed ─── START ──────────────────────────────────────────────────
@@ -5025,10 +5034,10 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
 /**
  * Рендер ленты и хром режимов.
  * 
- * Логика карточки:
- * - `↳ по мотивам` — навигация к предкам (без счётчика)
- * - `◆ N` — резонанс (уникальные авторы детей), клик → модалка детей
- * - Кнопка ✎ — открыть NoteView (только для своих)
+ * Порядок в мета-блоке карточки:
+ * [тег] | [↳ если есть] [◆ если есть] | [sim% если ранжирование] [время] [✎ если своя]
+ * 
+ * Группы разделены вертикальной чертой для читаемости.
  */
 DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, Provenance, Modal, NetService) {
   let feedEl, emptyEl, emptyT, segBar, ctxBanner, ctxSrc, ctxTxt, ctxX;
@@ -5082,7 +5091,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, P
     
     if (!children.length) {
       const empty = document.createElement('div');
-      empty.style.cssText = 'color:var(--text-3);font-size:13px;text-align:center;';
+      empty.style.cssText = 'color:var(--text-3);font-size:13px;text-align:center;padding:12px;';
       empty.textContent = I18n.t('inf.nochildren');
       body.appendChild(empty);
     } else {
@@ -5135,7 +5144,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, P
     
     if (!chain.length) {
       const empty = document.createElement('div');
-      empty.style.cssText = 'color:var(--text-3);font-size:13px;text-align:center;';
+      empty.style.cssText = 'color:var(--text-3);font-size:13px;text-align:center;padding:12px;';
       empty.textContent = I18n.t('inf.noancestors');
       body.appendChild(empty);
     } else {
@@ -5168,6 +5177,13 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, P
     }).catch(() => {});
   }
 
+  // Вертикальный разделитель между группами элементов
+  function createSep() {
+    const sep = document.createElement('span');
+    sep.className = 'note-meta-sep';
+    return sep;
+  }
+
   function card(n, isRanked, i) {
     const el = document.createElement('div');
     el.className = 'note' + (isPinned(n) ? ' pinned' : '');
@@ -5184,7 +5200,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, P
     const meta = document.createElement('div');
     meta.className = 'note-meta';
 
-    // Тег (личное/мир или автор)
+    // === ГРУППА 1: Тег (личное/мир или автор) ===
     const tag = document.createElement('span');
     if (n.own) {
       tag.className = 'note-tag ' + (n.shared ? 'world' : 'priv');
@@ -5195,59 +5211,69 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, P
     }
     meta.appendChild(tag);
 
-    // Ссылка на родителя (только стрелка)
-    if (n.parentId) {
-      const link = document.createElement('button');
-      link.className = 'note-parent';
-      link.style.cssText = 'background:none;border:none;padding:0;cursor:pointer;font:inherit;color:var(--teal);font-size:14px;';
-      link.textContent = '↳';
-      link.title = I18n.t('inf.lineage');
-      
-      Provenance.ancestors(n.id).then(chain => {
-        if (!chain.length) {
-          // Orphan — родитель удалён
-          link.style.cursor = 'default';
-          link.style.opacity = '0.3';
-          link.style.textDecoration = 'line-through';
-          link.title = I18n.t('inf.orphan.hint');
-        } else {
-          link.addEventListener('click', e => {
-            e.stopPropagation();
-            showAncestors(n);
-          });
-        }
-      }).catch(() => {});
-      
-      meta.appendChild(link);
+    // === ГРУППА 2: Навигация (стрелка + ромб) ===
+    const hasNav = !!n.parentId;
+    const res = Influence.resonance(n.id) + Influence.resonance(n.eventId);
+    const hasResonance = res > 0;
+
+    if (hasNav || hasResonance) {
+      meta.appendChild(createSep());
+
+      // Стрелка "по мотивам" (если есть родитель)
+      if (n.parentId) {
+        const link = document.createElement('button');
+        link.className = 'note-parent';
+        link.textContent = '↳';
+        link.title = I18n.t('inf.lineage');
+        link.setAttribute('aria-label', I18n.t('inf.openparent'));
+        
+        Provenance.ancestors(n.id).then(chain => {
+          if (!chain.length) {
+            link.classList.add('orphan');
+            link.title = I18n.t('inf.orphan.hint');
+          } else {
+            link.addEventListener('click', e => {
+              e.stopPropagation();
+              showAncestors(n);
+            });
+          }
+        }).catch(() => {});
+        
+        meta.appendChild(link);
+      }
+
+      // Ромб (резонанс)
+      if (hasResonance) {
+        const r = document.createElement('button');
+        r.className = 'note-sim';
+        r.textContent = '◆' + res;
+        r.title = I18n.t('inf.resonance');
+        r.setAttribute('aria-label', I18n.t('inf.resonance'));
+        
+        r.addEventListener('click', e => {
+          e.stopPropagation();
+          showChildren(n);
+        });
+        
+        meta.appendChild(r);
+      }
     }
+
+    // === ГРУППА 3: Info (sim%, время, карандаш) ===
+    meta.appendChild(createSep());
 
     // Сходство (score) в режиме ранжирования
     if (isRanked && typeof n.score === 'number') {
       const sim = document.createElement('span');
-      sim.className = 'note-sim';
-      sim.textContent = I18n.t('sim.score') + ' ' + Math.round(n.score * 100) + '%';
+      sim.className = 'note-sim-info';
+      sim.textContent = Math.round(n.score * 100) + '%';
+      sim.title = I18n.t('sim.score');
       meta.appendChild(sim);
-    }
-
-    // Резонанс ◆ (уникальные авторы детей)
-    const res = Influence.resonance(n.id) + Influence.resonance(n.eventId);
-    if (res > 0) {
-      const r = document.createElement('button');
-      r.className = 'note-sim';
-      r.style.cssText = 'color:var(--teal);background:none;border:none;padding:0;cursor:pointer;font:inherit;';
-      r.textContent = '◆ ' + res;
-      r.title = I18n.t('inf.resonance');
-      
-      r.addEventListener('click', e => {
-        e.stopPropagation();
-        showChildren(n);
-      });
-      
-      meta.appendChild(r);
     }
 
     // Относительное время
     const date = document.createElement('span');
+    date.className = 'note-date';
     date.textContent = Utils.fmtRelativeTime(n.createdAt, I18n.getLang(), I18n.t);
     meta.appendChild(date);
 
@@ -5515,10 +5541,14 @@ DI.register('BaseView', function (Store, DB, I18n, Utils, Config, bus) {
 /**
  * Полноэкранный просмотр заметки (#noteview).
  * Inline-редактирование с индикатором сохранения.
+ * 
+ * ИСПРАВЛЕНО: кнопка "Копия" заменена на "Пин" — при клике закрывает окно
+ * и закрепляет заметку как контекст для поиска подобного в ленте.
  */
 DI.register('NoteView', function (DB, Notes, NoteActions, I18n, Utils, Toast, bus) {
   let root = null;
   let currentId = null;
+  let currentNote = null;
   let escHandler = null;
   let editMode = false;
   let editTextarea = null;
@@ -5541,6 +5571,7 @@ DI.register('NoteView', function (DB, Notes, NoteActions, I18n, Utils, Toast, bu
     }
     
     currentId = null;
+    currentNote = null;
     editMode = false;
     editTextarea = null;
   }
@@ -5606,6 +5637,7 @@ DI.register('NoteView', function (DB, Notes, NoteActions, I18n, Utils, Toast, bu
       }
       
       Toast.show('ok', I18n.t('toast.edit.saved'));
+      currentNote = updatedNote;
       render(updatedNote);
     }).catch(() => {
       Toast.show('err', I18n.t('toast.copy.fail'));
@@ -5617,11 +5649,30 @@ DI.register('NoteView', function (DB, Notes, NoteActions, I18n, Utils, Toast, bu
     });
   }
 
+  /**
+   * Закрепляет заметку как контекст и закрывает окно.
+   * После возврата в ленту пользователь увидит похожие мысли.
+   */
+  function pinAndClose() {
+    if (!currentNote) {
+      close();
+      return;
+    }
+    
+    try {
+      bus.emit('note:pin', currentNote);
+      Toast.show('ok', I18n.t('toast.pinned'));
+    } catch (_) {}
+    
+    close();
+  }
+
   function render(note) {
     const r = ensureRoot();
     if (!r) return;
     
     currentId = note.id;
+    currentNote = note;
     r.innerHTML = '';
     r.classList.add('on');
     editMode = false;
@@ -5652,11 +5703,14 @@ DI.register('NoteView', function (DB, Notes, NoteActions, I18n, Utils, Toast, bu
       top.appendChild(tog);
     }
 
-    const copy = document.createElement('button');
-    copy.className = 'nv-act';
-    copy.textContent = I18n.t('btn.copy');
-    copy.addEventListener('click', () => NoteActions.copy(note.text));
-    top.appendChild(copy);
+    // Кнопка "Пин" (вместо "Копия")
+    const pinBtn = document.createElement('button');
+    pinBtn.className = 'nv-act';
+    pinBtn.textContent = '◈ ' + I18n.t('btn.pin');
+    pinBtn.title = I18n.t('btn.pin.aria');
+    pinBtn.setAttribute('aria-label', I18n.t('btn.pin.aria'));
+    pinBtn.addEventListener('click', pinAndClose);
+    top.appendChild(pinBtn);
 
     if (isOwn && !note.shared) {
       const edit = document.createElement('button');
@@ -5737,9 +5791,13 @@ DI.register('NoteView', function (DB, Notes, NoteActions, I18n, Utils, Toast, bu
 
   function init() {
     ensureRoot();
+    
     bus.on('note:open', p => {
       if (p && p.id) open(p.id);
     });
+    
+    // Слушаем событие пина — Context модуль подпишется
+    // NoteView эмитит 'note:pin', Context ловит и делает setPin
   }
 
   function destroy() {
@@ -5958,7 +6016,6 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboar
 // ─── BOOT ─── START ─────────────────────────────────────────────────────────
 /**
  * Точка входа. Резолвит и инициализирует все модули в правильном порядке.
- * Удалены Hotkeys и DevTools.
  */
 DI.register('Boot', function () {
   function mount() {
@@ -5972,6 +6029,9 @@ DI.register('Boot', function () {
     DI.resolve('HeaderStatus').init();
     DI.resolve('Feed').init();
     DI.resolve('Influence').init();
+    
+    // Context.init подписывается на 'note:pin' от NoteView
+    DI.resolve('Context').init();
 
     // 3. DOM-модули
     DI.resolve('Composer').init();
