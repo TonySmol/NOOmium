@@ -1545,7 +1545,7 @@ DI.register('Config', function () {
     lang: null,
     onboarded: false,
     logLevel: 'info',
-    model: 'Xenova/paraphrase-multilingual-MiniLM-L12-v2',
+    model: 'Xenova/multilingual-e5-small',
     dim: 384,
     aiCacheLimit: 300,
     aiEmbedTimeout: 15000,
@@ -2716,17 +2716,23 @@ DI.register('DB', function (Config, bus, Logger) {
  * Режимы: 'loading' → 'model' (успех) или 'demo' (fallback на hash-эмбеддинг).
  * В 'demo' и до вызова load() embed() мгновенно возвращает детерминированный
  * hash-вектор — приложение работает всегда, просто поиск грубее.
+ * 
+ * Для E5-моделей автоматически добавляется префикс 'passage: '.
  */
 DI.register('Embedder', function (Config, bus, Logger) {
   const workerCode = `
 let extractor = null;
 let ready = false;
 let files = new Map();
+let isE5 = false;
 
 self.onmessage = async function (e) {
   const msg = e.data;
   
   if (msg.type === 'load') {
+    // Определяем, нужна ли E5-обработка
+    isE5 = (msg.model || '').indexOf('e5') !== -1;
+    
     try {
       const mod = await import('https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2');
       mod.env.allowLocalModels = false;
@@ -2767,7 +2773,7 @@ self.onmessage = async function (e) {
       self.postMessage({ 
         type: 'error', 
         id: null, 
-        message: String(err && err.message || err) 
+        message: 'LOAD_FAIL: ' + String(err && err.message || err) + ' | model: ' + msg.model
       });
     }
     return;
@@ -2784,7 +2790,9 @@ self.onmessage = async function (e) {
   
   if (msg.type === 'embed') {
     try {
-      const out = await extractor(msg.text, { pooling: 'mean', normalize: true });
+      // E5 требует префикс для корректных векторов
+      const text = isE5 ? 'passage: ' + msg.text : msg.text;
+      const out = await extractor(text, { pooling: 'mean', normalize: true });
       self.postMessage({ 
         type: 'result', 
         id: msg.id, 
@@ -2900,7 +2908,7 @@ self.onmessage = async function (e) {
       }
 
       worker.onerror = err => {
-        Logger.warn('Embedder: ошибка Worker, demo mode', String(err && err.message || err));
+        Logger.error('Embedder: ошибка Worker, fallback на hash', String(err && err.message || err));
         cleanup();
         mode = 'demo';
         emitStatus();
@@ -2935,7 +2943,7 @@ self.onmessage = async function (e) {
           resolve();
         }
         else if (msg.type === 'error' && msg.id === null) {
-          Logger.warn('Embedder: ошибка загрузки модели, demo mode', msg.message);
+          Logger.error('Embedder: МОДЕЛЬ НЕ ЗАГРУЗИЛАСЬ, fallback на hash', msg.message);
           cleanup();
           mode = 'demo';
           emitStatus();
@@ -6058,7 +6066,39 @@ DI.register('Boot', function () {
     document.body.classList.add('ready');
 
     // 6. Запуск AI и сети
-    DI.resolve('Embedder').load();
+    const Embedder = DI.resolve('Embedder');
+    
+    Embedder.load().then(() => {
+      // Миграция: если модель сменилась — пересчитываем векторы заметок
+      const currentModel = Config.get('model', '');
+      const savedModel = localStorage.getItem('noomium:last_embed_model') || '';
+      
+      if (savedModel && savedModel !== currentModel) {
+        Logger.info('Миграция: модель сменилась, пересчитываю векторы');
+        
+        DB.all().then(notes => {
+          const toUpdate = notes.filter(n => n && n.text);
+          if (!toUpdate.length) return;
+          
+          let done = 0;
+          const total = toUpdate.length;
+          
+          toUpdate.forEach(note => {
+            Embedder.embed(note.text).then(vector => {
+              note.vector = vector ? Array.from(vector) : null;
+              DB.put(note).catch(() => {});
+              done++;
+              if (done === total) {
+                Logger.info('Миграция: пересчитано ' + total + ' векторов');
+              }
+            });
+          });
+        });
+      }
+      
+      localStorage.setItem('noomium:last_embed_model', currentModel);
+    });
+    
     DI.resolve('NetService').start();
 
     // 7. Онбординг последним (ждёт загрузки модели)
