@@ -1256,25 +1256,29 @@ body.ready #app {
   cursor: not-allowed;
 }
 
-/* Кнопка "Развернуть" в карточках ленты (в мета-блоке, справа) */
+/* Кнопка "Р" в карточках ленты (иконка карандаша) */
 .na {
   background: var(--surface-2);
   border: 1px solid var(--line);
   border-radius: var(--r-xs);
   color: var(--text-2);
-  font-size: 11px;
-  font-weight: 500;
-  padding: 4px 8px;
-  margin-left: auto; /* Прижимает кнопку вправо */
+  font-size: 13px;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   transition: background 0.12s var(--ease), color 0.12s var(--ease), border-color 0.12s var(--ease);
-  white-space: nowrap;
   flex-shrink: 0;
+  line-height: 1;
 }
 
 .na:hover {
   background: var(--surface-3);
-  color: var(--text);
-  border-color: var(--line-2);
+  color: var(--amber);
+  border-color: var(--amber);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════════
@@ -4956,6 +4960,11 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
 // ─── UI/FeedView ─── START ──────────────────────────────────────────────────
 /**
  * Рендер ленты и хром режимов.
+ * 
+ * Логика карточки:
+ * - `↳ по мотивам` — навигация к предкам (без счётчика)
+ * - `◆ N` — резонанс (уникальные авторы детей), клик → модалка детей
+ * - Кнопка ✎ — открыть NoteView (только для своих)
  */
 DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, Provenance, Modal, NetService) {
   let feedEl, emptyEl, emptyT, segBar, ctxBanner, ctxSrc, ctxTxt, ctxX;
@@ -5030,7 +5039,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, P
     
     Modal.open({
       title: I18n.t('inf.children') + (children.length ? ' · ' + children.length : ''),
-      body,
+      body: body,
       buttons: [{ text: I18n.t('btn.close'), onClick: () => Modal.close() }],
     });
   }
@@ -5043,12 +5052,14 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, P
       const seenIds = new Set();
       const children = [];
       
-      results.forEach(list => (list || []).forEach(c => {
-        if (c && !seenIds.has(c.id)) {
-          seenIds.add(c.id);
-          children.push(c);
-        }
-      }));
+      results.forEach(list => {
+        (list || []).forEach(c => {
+          if (c && !seenIds.has(c.id)) {
+            seenIds.add(c.id);
+            children.push(c);
+          }
+        });
+      });
       
       renderChildrenModal(children);
     }).catch(() => {});
@@ -5082,7 +5093,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, P
     
     Modal.open({
       title: I18n.t('inf.lineage') + (chain.length ? ' · ' + chain.length : ''),
-      body,
+      body: body,
       buttons: [{ text: I18n.t('btn.close'), onClick: () => Modal.close() }],
     });
   }
@@ -5099,17 +5110,18 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, P
     el.style.animationDelay = Math.min(i * 25, 300) + 'ms';
     el.dataset.id = n.id;
 
+    // Текст заметки
     const txt = document.createElement('div');
     txt.className = 'note-txt';
     txt.textContent = n.text || '';
     el.appendChild(txt);
 
+    // Мета-блок
     const meta = document.createElement('div');
     meta.className = 'note-meta';
 
     // Тег (личное/мир или автор)
     const tag = document.createElement('span');
-    
     if (n.own) {
       tag.className = 'note-tag ' + (n.shared ? 'world' : 'priv');
       tag.textContent = n.shared ? I18n.t('base.tag.shared') : I18n.t('base.tag.private');
@@ -5117,22 +5129,22 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, P
       tag.className = 'note-tag world';
       tag.textContent = '· ' + Utils.shortPk(n.authorPubkey || '');
     }
-    
     meta.appendChild(tag);
 
-    // Ссылка на родителя (если есть) — БЕЗ счётчика детей родителя
+    // Ссылка на родителя (только стрелка)
     if (n.parentId) {
       const link = document.createElement('button');
       link.className = 'note-parent';
-      link.style.cssText = 'background:none;border:none;padding:0;cursor:pointer;font:inherit;color:var(--teal);';
-      link.textContent = '↳ ' + I18n.t('inf.bymotif');
+      link.style.cssText = 'background:none;border:none;padding:0;cursor:pointer;font:inherit;color:var(--teal);font-size:14px;';
+      link.textContent = '↳';
       link.title = I18n.t('inf.lineage');
       
       Provenance.ancestors(n.id).then(chain => {
         if (!chain.length) {
+          // Orphan — родитель удалён
           link.style.cursor = 'default';
-          link.style.opacity = '0.5';
-          link.textContent = '↳ ' + I18n.t('inf.orphan');
+          link.style.opacity = '0.3';
+          link.style.textDecoration = 'line-through';
           link.title = I18n.t('inf.orphan.hint');
         } else {
           link.addEventListener('click', e => {
@@ -5153,9 +5165,8 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, P
       meta.appendChild(sim);
     }
 
-    // Резонанс (◆) — количество уникальных авторов среди прямых детей
+    // Резонанс ◆ (уникальные авторы детей)
     const res = Influence.resonance(n.id) + Influence.resonance(n.eventId);
-    
     if (res > 0) {
       const r = document.createElement('button');
       r.className = 'note-sim';
@@ -5176,21 +5187,20 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, P
     date.textContent = Utils.fmtRelativeTime(n.createdAt, I18n.getLang(), I18n.t);
     meta.appendChild(date);
 
-    el.appendChild(meta);
-
-    // Кнопка "Развить" для своих заметок (в мета-блоке, справа)
+    // Кнопка ✎ (карандаш) для своих заметок
     if (n.own) {
       const openBtn = document.createElement('button');
       openBtn.className = 'na';
-      openBtn.textContent = I18n.t('btn.expand');
+      openBtn.textContent = '✎';
       openBtn.title = I18n.t('btn.expand');
+      openBtn.setAttribute('aria-label', I18n.t('btn.expand'));
       
       openBtn.addEventListener('click', e => {
         e.stopPropagation();
         try { bus.emit('note:open', { id: n.id }); } catch (_) {}
       });
       
-      meta.appendChild(openBtn); // Добавляем В МЕТА-БЛОК, а не в карточку
+      meta.appendChild(openBtn);
     }
 
     el.appendChild(meta);
@@ -5216,9 +5226,9 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, P
       ctxTxt.textContent = isDrift ? (ctx.pinText || ctx.text) : ctx.text;
     }
 
-    document.querySelectorAll('.seg-b').forEach(b =>
-      b.classList.toggle('on', b.getAttribute('data-k') === state.seg)
-    );
+    document.querySelectorAll('.seg-b').forEach(b => {
+      b.classList.toggle('on', b.getAttribute('data-k') === state.seg);
+    });
     
     cLocal.textContent = state.lists.local.length;
     cWorld.textContent = state.lists.world.length;
@@ -5248,7 +5258,9 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, P
       emptyEl.classList.remove('on');
       
       const frag = document.createDocumentFragment();
-      notes.forEach((n, i) => frag.appendChild(card(n, isRanked, i)));
+      notes.forEach((n, i) => {
+        frag.appendChild(card(n, isRanked, i));
+      });
       feedEl.appendChild(frag);
     }
   }
@@ -5282,11 +5294,15 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, P
       }));
     }
     
-    document.querySelectorAll('.seg-b').forEach(b =>
-      b.addEventListener('click', () => Store.setState({ seg: b.getAttribute('data-k') }))
-    );
+    document.querySelectorAll('.seg-b').forEach(b => {
+      b.addEventListener('click', () => {
+        Store.setState({ seg: b.getAttribute('data-k') });
+      });
+    });
     
-    if (ctxX) ctxX.addEventListener('click', () => Context.clearPin());
+    if (ctxX) {
+      ctxX.addEventListener('click', () => Context.clearPin());
+    }
     
     render();
   }
