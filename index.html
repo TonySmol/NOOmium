@@ -500,7 +500,6 @@ body.ready #app {
   margin-bottom: 10px;
   color: var(--text);
   line-height: 1.55;
-  padding-right: 80px; /* Место для кнопки "Развить" */
 }
 
 .note-meta {
@@ -1257,16 +1256,19 @@ body.ready #app {
   cursor: not-allowed;
 }
 
-/* Кнопка "Развернуть" в карточках ленты */
+/* Кнопка "Развернуть" в карточках ленты (в мета-блоке, справа) */
 .na {
   background: var(--surface-2);
   border: 1px solid var(--line);
   border-radius: var(--r-xs);
   color: var(--text-2);
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 500;
-  padding: 5px 10px;
+  padding: 4px 8px;
+  margin-left: auto; /* Прижимает кнопку вправо */
   transition: background 0.12s var(--ease), color 0.12s var(--ease), border-color 0.12s var(--ease);
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .na:hover {
@@ -5176,11 +5178,10 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, P
 
     el.appendChild(meta);
 
-    // Кнопка "Развить" для своих заметок
+    // Кнопка "Развить" для своих заметок (в мета-блоке, справа)
     if (n.own) {
       const openBtn = document.createElement('button');
       openBtn.className = 'na';
-      openBtn.style.cssText = 'position:absolute;top:10px;right:10px;';
       openBtn.textContent = I18n.t('btn.expand');
       openBtn.title = I18n.t('btn.expand');
       
@@ -5189,9 +5190,10 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, P
         try { bus.emit('note:open', { id: n.id }); } catch (_) {}
       });
       
-      el.appendChild(openBtn);
+      meta.appendChild(openBtn); // Добавляем В МЕТА-БЛОК, а не в карточку
     }
 
+    el.appendChild(meta);
     el.addEventListener('click', () => onNoteClick(n));
     return el;
   }
