@@ -1505,7 +1505,7 @@ body.ready #app {
 // ═══════════════════════════════════════════════════════════════════════════════
 // ВЕРСИЯ ПРИЛОЖЕНИЯ
 // ═══════════════════════════════════════════════════════════════════════════════
-const APP_VERSION = '0.3.0';
+const APP_VERSION = '0.3.1';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CORE/DI - ПРЕАМБУЛА
@@ -3439,6 +3439,10 @@ DI.register('Nostr', function (Config, bus, Logger) {
  *  - На пин шлёт запрос и собирает ответы в кеш
  *  - loadHistory: расширяет окно подписки (история сети)
  *  - forgetNote: при удалении/снятии публикации шлёт kind 5 (NIP-09)
+ * 
+ * ИСПРАВЛЕНО: при публикации родителя все его локальные дочки мигрируют
+ * parentId с локального ID на eventId — иначе на других устройствах они
+ * отображаются как orphan.
  */
 DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Config, Logger, bus) {
   let started = false;
@@ -3637,6 +3641,26 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     notifyPeers();
   }
 
+  /**
+   * Мигрирует parentId у дочек с локального ID на eventId родителя.
+   * Вызывается после успешной публикации родителя.
+   */
+  function migrateChildrenParentId(oldParentId, newParentId) {
+    if (!oldParentId || !newParentId || oldParentId === newParentId) return;
+    
+    DB.all().then(notes => {
+      const children = notes.filter(n => n && n.parentId === oldParentId);
+      if (!children.length) return;
+      
+      Logger.info('NetService: мигрирую parentId у ' + children.length + ' детей');
+      
+      children.forEach(child => {
+        child.parentId = newParentId;
+        DB.put(child).catch(e => Logger.warn('NetService: не обновить дочку', String(e)));
+      });
+    }).catch(e => Logger.warn('NetService: не мигрировать детей', String(e)));
+  }
+
   function announceNote(note) {
     if (!note || !note.shared || !note.vector) return;
     
@@ -3649,6 +3673,8 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
             if (cur && cur.eventId !== ev.id) {
               cur.eventId = ev.id;
               DB.put(cur);
+              // Мигрируем parentId у дочек с локального на eventId
+              migrateChildrenParentId(cur.id, cur.eventId);
             }
           });
         }
@@ -3936,6 +3962,9 @@ DI.register('Notes', function (DB, Embedder, bus, Logger, Utils) {
  *  - drift  — есть и пин, и ввод: контекст ВЕДЁТ введённый текст (дрейф от пина)
  *  - input  — только ввод: контекст = ввод
  *  - none   — просмотр
+ * 
+ * ИСПРАВЛЕНО: setPin сохраняет eventId, чтобы Composer мог передавать сетевой
+ * ID родителя в дочерние заметки (иначе на других устройствах они становятся orphan).
  */
 DI.register('Context', function (Store, Embedder, Config, Utils) {
   let inputText = '';
@@ -4012,7 +4041,13 @@ DI.register('Context', function (Store, Embedder, Config, Utils) {
 
     setPin(note) {
       if (!note || !note.vector) return;
-      pinNote = { id: note.id, text: note.text, vector: note.vector };
+      // Сохраняем eventId для корректной работы с сетью
+      pinNote = { 
+        id: note.id, 
+        eventId: note.eventId || null,
+        text: note.text, 
+        vector: note.vector 
+      };
       push();
     },
 
@@ -4145,6 +4180,10 @@ DI.register('Feed', function (DB, Ranker, Store, bus, Logger) {
 /**
  * Граф «по мотивам»: parent-связи между заметками (свои + сетевые).
  * КЭШИРОВАНИЕ: ancestors() кэширует результат на 5 секунд.
+ * 
+ * ИСПРАВЛЕНО: улучшенная функция поиска родителя с учётом локальных ID и eventId.
+ * Это решает проблему orphan на других устройствах, когда дочка ссылается на
+ * локальный ID родителя, а родитель известен только по сетевому eventId.
  */
 DI.register('Provenance', function (DB) {
   const ancestorsCache = new Map();
@@ -4186,6 +4225,10 @@ DI.register('Provenance', function (DB) {
     });
   }
 
+  /**
+   * Ищет цепочку предков заметки.
+   * Учитывает как локальные ID, так и eventId для корректной работы между устройствами.
+   */
   function ancestors(id) {
     if (!id) return Promise.resolve([]);
     
@@ -4195,25 +4238,46 @@ DI.register('Provenance', function (DB) {
     }
     
     return loadAll().then(all => {
+      // Строим маппинг: id/eventId → заметка
       const byId = new Map();
       
       all.forEach(n => {
-        if (n) {
-          if (n.id) byId.set(n.id, n);
-          if (n.eventId) byId.set(n.eventId, n);
-        }
+        if (!n) return;
+        if (n.id) byId.set(n.id, n);
+        if (n.eventId) byId.set(n.eventId, n);
       });
+      
+      /**
+       * Ищет заметку по targetId с учётом рассинхронизации ID между устройствами.
+       * Сценарий: на устройстве А дочка имеет parentId = локальный_ID родителя,
+       * а на устройстве Б родитель известен только по eventId.
+       */
+      function findNote(targetId) {
+        if (!targetId) return null;
+        
+        // Прямой поиск: id или eventId совпадает
+        if (byId.has(targetId)) return byId.get(targetId);
+        
+        // Обратный поиск: ищем локальную заметку с таким id, которая уже опубликована
+        const localPublished = all.find(n => n && n.id === targetId && n.eventId);
+        if (localPublished) return localPublished;
+        
+        // Ищем сетевую заметку с таким eventId, если targetId похож на eventId
+        const byEvent = all.find(n => n && n.eventId === targetId);
+        if (byEvent) return byEvent;
+        
+        return null;
+      }
       
       const chain = [];
       const seen = new Set();
-      let current = byId.get(id);
+      let current = findNote(id);
       
       while (current && current.parentId) {
-        if (seen.has(current.parentId)) break;
-        
+        if (seen.has(current.parentId)) break; // Защита от циклов
         seen.add(current.parentId);
-        const parent = byId.get(current.parentId);
         
+        const parent = findNote(current.parentId);
         if (!parent) break;
         
         chain.push(parent);
