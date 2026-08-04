@@ -190,9 +190,10 @@ button:focus-visible {
 #app {
   display: none;
   flex-direction: column;
-  height: 100vh;
   height: 100dvh;
+  max-height: 100dvh;
   position: relative;
+  overflow: hidden;
 }
 
 body.ready #app {
@@ -457,6 +458,7 @@ body.ready #app {
   overflow-y: auto;
   padding: 10px 14px;
   -webkit-overflow-scrolling: touch;
+  overscroll-behavior-y: contain;
 }
 
 .note {
@@ -498,6 +500,7 @@ body.ready #app {
   margin-bottom: 10px;
   color: var(--text);
   line-height: 1.55;
+  padding-right: 80px; /* Место для кнопки "Развить" */
 }
 
 .note-meta {
@@ -607,6 +610,7 @@ body.ready #app {
 #composer {
   margin: 0 14px 12px;
   padding: 10px 12px;
+  padding-bottom: calc(10px + var(--safe-bot));
   background: var(--surface);
   border: 1px solid var(--line);
   border-radius: var(--r);
@@ -730,7 +734,7 @@ body.ready #app {
 #btn-send {
   height: 34px;
   min-width: 40px;
-  padding: 0 16px;
+  padding: 0 14px 2px 14px; /* Компенсация визуального смещения стрелки */
   border-radius: 999px;
   background: var(--amber);
   color: #1a1206;
@@ -1036,18 +1040,19 @@ body.ready #app {
   color: #fff;
 }
 
+/* ── Блок уведомлений ── */
+#notif-bar {
+  margin: 10px 14px 0;
+  min-height: 0;
+  flex-shrink: 0;
+}
+
 /* ── Тосты ── */
 #toasts {
-  position: fixed;
-  left: 50%;
-  bottom: 24px;
-  transform: translateX(-50%);
   display: flex;
-  flex-direction: column-reverse;
+  flex-direction: column;
   gap: 8px;
-  z-index: 1100;
-  pointer-events: none;
-  max-width: calc(100vw - 24px);
+  width: 100%;
 }
 
 .toast {
@@ -1055,15 +1060,14 @@ body.ready #app {
   border: 1px solid var(--line-2);
   border-radius: var(--r-sm);
   padding: 10px 14px;
-  box-shadow: var(--shadow-lg);
+  box-shadow: var(--shadow-md);
   display: flex;
   gap: 10px;
   align-items: center;
   font-size: 13px;
   white-space: nowrap;
   animation: tIn 0.25s var(--ease-out);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
+  width: 100%;
 }
 
 @keyframes tIn {
@@ -1379,8 +1383,13 @@ body.ready #app {
       <button class="ctx-x" id="ctx-x" data-i18n-aria="btn.ctx.clear.aria">✕</button>
     </div>
     
-    <!-- Сегменты (табы) -->
-    <div id="seg">
+    <!-- Блок уведомлений и статусов -->
+	<div id="notif-bar">
+	  <div id="toasts"></div>
+	</div>
+
+<!-- Сегменты (табы) -->
+<div id="seg">
       <button class="seg-b on" data-k="local">
         <span data-i18n="seg.local">Моё</span>
         <span class="cnt" id="c-local">0</span>
@@ -1490,7 +1499,7 @@ body.ready #app {
 // ═══════════════════════════════════════════════════════════════════════════════
 // ВЕРСИЯ ПРИЛОЖЕНИЯ
 // ═══════════════════════════════════════════════════════════════════════════════
-const APP_VERSION = '0.3.1';
+const APP_VERSION = '0.3.0';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CORE/DI - ПРЕАМБУЛА
@@ -5096,6 +5105,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, P
     const meta = document.createElement('div');
     meta.className = 'note-meta';
 
+    // Тег (личное/мир или автор)
     const tag = document.createElement('span');
     
     if (n.own) {
@@ -5108,6 +5118,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, P
     
     meta.appendChild(tag);
 
+    // Ссылка на родителя (если есть) — БЕЗ счётчика детей родителя
     if (n.parentId) {
       const link = document.createElement('button');
       link.className = 'note-parent';
@@ -5126,18 +5137,13 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, P
             e.stopPropagation();
             showAncestors(n);
           });
-          
-          Provenance.children(n.parentId).then(children => {
-            if (children.length > 1) {
-              link.textContent = '↳ ' + I18n.t('inf.bymotif') + ' · ' + children.length;
-            }
-          }).catch(() => {});
         }
       }).catch(() => {});
       
       meta.appendChild(link);
     }
 
+    // Сходство (score) в режиме ранжирования
     if (isRanked && typeof n.score === 'number') {
       const sim = document.createElement('span');
       sim.className = 'note-sim';
@@ -5145,6 +5151,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, P
       meta.appendChild(sim);
     }
 
+    // Резонанс (◆) — количество уникальных авторов среди прямых детей
     const res = Influence.resonance(n.id) + Influence.resonance(n.eventId);
     
     if (res > 0) {
@@ -5162,12 +5169,14 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, P
       meta.appendChild(r);
     }
 
+    // Относительное время
     const date = document.createElement('span');
     date.textContent = Utils.fmtRelativeTime(n.createdAt, I18n.getLang(), I18n.t);
     meta.appendChild(date);
 
     el.appendChild(meta);
 
+    // Кнопка "Развить" для своих заметок
     if (n.own) {
       const openBtn = document.createElement('button');
       openBtn.className = 'na';
