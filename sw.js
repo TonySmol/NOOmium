@@ -1,8 +1,10 @@
-const CACHE_NAME = 'noomium-v1';
+const CACHE_NAME = 'noomium-v0.4.0';
 const ASSETS = [
   '.',
   './index.html',
   './manifest.json',
+  './icon-192.png',
+  './icon-512.png',
 ];
 
 // Установка: кэшируем основные ресурсы
