@@ -5,6 +5,12 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
 <meta name="theme-color" content="#0a0a0b">
 <title>NOOmium</title>
+
+<!-- Манифест для PWA -->
+<link rel="manifest" href="manifest.json">
+
+<!-- Telegram Web App API -->
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
 /* ═══════════════════════════════════════════════════════════════════════════════
    ЦВЕТОВАЯ СИСТЕМА (DARK / LIGHT)
@@ -1497,13 +1503,23 @@ body.ready #app { display: flex; }
 <!-- ПРОСМОТР ЗАМЕТКИ -->
 <div id="noteview" role="dialog" aria-modal="true"></div>
 
+<script>
+  // Регистрация Service Worker
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('./sw.js')
+        .then(reg => console.log('SW registered:', reg.scope))
+        .catch(err => console.warn('SW registration failed:', err));
+    });
+  }
+</script>
+
 <script type="module">
 'use strict';
-
 // ═══════════════════════════════════════════════════════════════════════════════
 // ВЕРСИЯ ПРИЛОЖЕНИЯ
 // ═══════════════════════════════════════════════════════════════════════════════
-const APP_VERSION = '0.3.3';
+const APP_VERSION = '0.4.0';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CORE/DI - ПРЕАМБУЛА
@@ -4657,9 +4673,19 @@ DI.register('Toast', function (Config) {
   };
   let container = null;
 
-  function show(type, msg, ms) {
-    if (!container) container = document.getElementById('toasts');
-    if (!container) return;
+function show(type, msg, ms) {
+  if (!container) container = document.getElementById('toasts');
+  if (!container) return;
+  
+  // Haptic feedback в Telegram
+  try {
+    const TelegramAdapter = DI.resolve('TelegramAdapter');
+    if (TelegramAdapter && TelegramAdapter.isTelegram()) {
+      if (type === 'ok') TelegramAdapter.hapticFeedback('success');
+      else if (type === 'err') TelegramAdapter.hapticFeedback('error');
+      else TelegramAdapter.hapticFeedback('light');
+    }
+  } catch (_) {}
     
     const cls = ICONS[type] ? type : 'info';
 
@@ -6096,6 +6122,113 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboar
 }, ['Store', 'Config', 'Modal', 'Toast', 'I18n', 'EventBus', 'Onboarding', 'DB', 'Embedder', 'Nostr']);
 // ─── UI/MenuView ─── END ────────────────────────────────────────────────────
 
+// ─── PLATFORM/TelegramAdapter ─── START ─────────────────────────────────────
+/**
+ * Адаптер для работы в Telegram Mini App.
+ * Определяет, открыто ли приложение в Telegram, и применяет тему/кнопки.
+ */
+DI.register('TelegramAdapter', function (Config, bus, Logger) {
+  let tg = null;
+  let isActive = false;
+
+  function init() {
+    // Проверяем, открыто ли в Telegram
+    if (!window.Telegram || !window.Telegram.WebApp) {
+      Logger.info('TelegramAdapter: не в Telegram, пропускаем');
+      return;
+    }
+
+    tg = window.Telegram.WebApp;
+    
+    // Инициализируем
+    try {
+      tg.ready();
+      tg.expand();
+      isActive = true;
+      Logger.info('TelegramAdapter: активирован');
+    } catch (e) {
+      Logger.warn('TelegramAdapter: ошибка инициализации', String(e));
+      return;
+    }
+
+    // Применяем тему из Telegram
+    applyTheme();
+
+    // Слушаем изменение темы
+    tg.onEvent('themeChanged', () => {
+      applyTheme();
+    });
+
+    // Устанавливаем цвет заголовка
+    try {
+      tg.setHeaderColor(tg.colorScheme === 'dark' ? '#0a0a0b' : '#fafafa');
+      tg.setBackgroundColor(tg.colorScheme === 'dark' ? '#0a0a0b' : '#fafafa');
+    } catch (_) {}
+  }
+
+  function applyTheme() {
+    if (!tg) return;
+    
+    const scheme = tg.colorScheme || 'dark';
+    document.body.setAttribute('data-theme', scheme);
+    
+    try {
+      tg.setHeaderColor(scheme === 'dark' ? '#0a0a0b' : '#fafafa');
+      tg.setBackgroundColor(scheme === 'dark' ? '#0a0a0b' : '#fafafa');
+    } catch (_) {}
+    
+    try {
+      bus.emit('telegram:theme', { scheme });
+    } catch (_) {}
+  }
+
+  function isTelegram() {
+    return isActive;
+  }
+
+  function hapticFeedback(type) {
+    if (!tg || !tg.HapticFeedback) return;
+    
+    try {
+      if (type === 'success') {
+        tg.HapticFeedback.notificationOccurred('success');
+      } else if (type === 'error') {
+        tg.HapticFeedback.notificationOccurred('error');
+      } else {
+        tg.HapticFeedback.impactOccurred('light');
+      }
+    } catch (_) {}
+  }
+
+  function showAlert(message) {
+    if (!tg) return;
+    
+    try {
+      tg.showAlert(message);
+    } catch (_) {
+      alert(message);
+    }
+  }
+
+  function showConfirm(message, callback) {
+    if (!tg) {
+      if (confirm(message)) callback();
+      return;
+    }
+    
+    try {
+      tg.showConfirm(message, confirmed => {
+        if (confirmed) callback();
+      });
+    } catch (_) {
+      if (confirm(message)) callback();
+    }
+  }
+
+  return { init, isTelegram, hapticFeedback, showAlert, showConfirm };
+}, ['Config', 'EventBus', 'Logger']);
+// ─── PLATFORM/TelegramAdapter ─── END ───────────────────────────────────────
+	
 // ─── BOOT ─── START ─────────────────────────────────────────────────────────
 /**
  * Точка входа. Резолвит и инициализирует все модули в правильном порядке.
@@ -6108,13 +6241,16 @@ DI.register('Boot', function () {
     DI.resolve('I18n').init();
 
     // 2. Подписчики событий (без DOM)
-    DI.resolve('Progress').init();
-    DI.resolve('HeaderStatus').init();
-    DI.resolve('Feed').init();
-    DI.resolve('Influence').init();
-    
-    // Context.init подписывается на 'note:pin' от NoteView
-    DI.resolve('Context').init();
+	DI.resolve('Progress').init();
+	DI.resolve('HeaderStatus').init();
+	DI.resolve('Feed').init();
+	DI.resolve('Influence').init();
+
+	// Telegram адаптер (должен быть до Context, чтобы тема применилась)
+	DI.resolve('TelegramAdapter').init();
+
+	// Context.init подписывается на 'note:pin' от NoteView
+	DI.resolve('Context').init();
 
     // 3. DOM-модули
     DI.resolve('Composer').init();
