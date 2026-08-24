@@ -1556,7 +1556,7 @@ body.ready #app { display: flex; }
 // ═══════════════════════════════════════════════════════════════════════════════
 // ВЕРСИЯ ПРИЛОЖЕНИЯ
 // ═══════════════════════════════════════════════════════════════════════════════
-const APP_VERSION = '0.5.5';
+const APP_VERSION = '0.5.6';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CORE/DI - ПРЕАМБУЛА
@@ -1603,32 +1603,16 @@ DI.register('Config', function () {
     aiCacheLimit: 300,
     aiEmbedTimeout: 15000,
     threshold: 0.8,
-    serendipity: 0.6,
+    serendipity: 0.2,
     vectorSimilarityThreshold: 0.98,
-    // РАСШИРЕННЫЙ список надёжных релеёв с разных континентов
-    relays: [
-      // Северная Америка
-      'wss://relay.primal.net',           // ✅ Стабильный, поддерживает эфемерные
-      'wss://nos.lol',                    // ✅ Стабильный, быстрая доставка
-      'wss://relay.nostr.band',           // ✅ Крупный поисковый релей
-      
-      // Европа
-      'wss://eden.nostr.land',            // ✅ Очень стабильный (Portugal)
-      'wss://relay.mostr.pub',            // ✅ Стабильный (Europe)
-      'wss://nostr.fmt.wiz.biz',          // ✅ Стабильный (Germany)
-      'wss://offchain.pub',               // ✅ Стабильный (EU)
-      
-      // Азия-Океания
-      'wss://relay.nostr.com.au',         // ✅ Австралия
-      'wss://nostr.oxtr.dev',             // ✅ Юго-Восточная Азия
-      
-      // Популярные (иногда нестабильны, но широкая аудитория)
-      'wss://relay.damus.io',             // ⚠️ Damus — иногда падает
-      'wss://relay.snort.social',         // ⚠️ Snort — иногда падает
-      
-      // Специализированные
-      'wss://purplepag.es',               // ✅ Для NIP-65 (relay list)
-    ],
+   relays: [
+     'wss://relay.primal.net',    // latency 295ms
+     'wss://nos.lol',              // latency 211ms — самый быстрый
+     'wss://relay.damus.io',       // latency 326ms
+     'wss://nostr.oxtr.dev',       // latency 341ms
+     'wss://relay.mostr.pub',      // latency 472ms
+     'wss://offchain.pub',         // latency 501ms
+   ],
     kNote: 1,
     kQuery: 21000,
     kAnswer: 21001,
