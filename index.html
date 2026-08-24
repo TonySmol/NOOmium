@@ -1556,7 +1556,7 @@ body.ready #app { display: flex; }
 // ═══════════════════════════════════════════════════════════════════════════════
 // ВЕРСИЯ ПРИЛОЖЕНИЯ
 // ═══════════════════════════════════════════════════════════════════════════════
-const APP_VERSION = '0.5.3';
+const APP_VERSION = '0.5.4';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CORE/DI - ПРЕАМБУЛА
@@ -4798,13 +4798,17 @@ DI.register('HeaderStatus', function (bus, I18n, Embedder) {
 // ─── UI/Composer ─── START ──────────────────────────────────────────────────
 /**
  * Поле ввода: счётчик, переключатель Личное/Мир, отправка.
- * ИСПРАВЛЕНО: добавлены лимиты длины поста + блокировка ввода через maxlength.
+ * ИСПРАВЛЕНО: 
+ * - Лимиты длины поста с цветовой и текстовой индикацией
+ * - Блокировка ввода через maxlength
+ * - Правильная обработка виртуальной клавиатуры (сжатие приложения)
  */
 DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils, Config) {
   let ta, cnt, sendBtn, toggle;
   let sending = false;
   let editingId = null;
   let unsubs = [];
+  let vvCleanup = null;
 
   function updateCounter() {
     if (!cnt || !ta) return;
@@ -4974,6 +4978,44 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
       });
   }
 
+  /**
+   * НОВОЕ: правильная обработка виртуальной клавиатуры.
+   * При открытии клавиатуры сжимаем #app до видимой области,
+   * чтобы композер оставался в потоке, а лента корректно скроллилась.
+   */
+  function setupKeyboardHandler() {
+    if (!window.visualViewport) return;
+    
+    const vv = window.visualViewport;
+    
+    const onResize = () => {
+      const app = document.getElementById('app');
+      if (!app) return;
+      
+      // Разница между полной высотой окна и видимой областью
+      const keyboardHeight = window.innerHeight - vv.height;
+      
+      if (keyboardHeight > 100) {
+        // Клавиатура открыта — сжимаем приложение до видимой области
+        app.style.height = vv.height + 'px';
+        app.style.maxHeight = vv.height + 'px';
+      } else {
+        // Клавиатура закрыта — возвращаем исходную высоту
+        app.style.height = '';
+        app.style.maxHeight = '';
+      }
+    };
+    
+    vv.addEventListener('resize', onResize);
+    vv.addEventListener('scroll', onResize);
+    
+    // Сохраняем функцию очистки для destroy()
+    vvCleanup = () => {
+      vv.removeEventListener('resize', onResize);
+      vv.removeEventListener('scroll', onResize);
+    };
+  }
+
   function init() {
     ta = document.getElementById('ed-ta');
     cnt = document.getElementById('ed-cnt');
@@ -4982,7 +5024,7 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
     
     if (!ta) return;
 
-    // НОВОЕ: блокировка ввода на уровне браузера
+    // Блокировка ввода на уровне браузера
     ta.setAttribute('maxlength', Config.get('maxPostLength', 2500));
 
     ta.addEventListener('input', () => {
@@ -4994,35 +5036,7 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
     });
 
     // НОВОЕ: обработка виртуальной клавиатуры
-    if (window.visualViewport) {
-      const vv = window.visualViewport;
-      const onVVResize = () => {
-        const composer = document.getElementById('composer');
-        if (!composer) return;
-        
-        // Высота, на которую клавиатура "съела" экран
-        const keyboardHeight = window.innerHeight - vv.height;
-        
-        if (keyboardHeight > 100) {
-          // Клавиатура открыта — поднимаем композер
-          composer.style.position = 'fixed';
-          composer.style.bottom = keyboardHeight + 'px';
-          composer.style.left = '14px';
-          composer.style.right = '14px';
-          composer.style.marginBottom = '0';
-        } else {
-          // Клавиатура закрыта — возвращаем как было
-          composer.style.position = '';
-          composer.style.bottom = '';
-          composer.style.left = '';
-          composer.style.right = '';
-          composer.style.marginBottom = '';
-        }
-      };
-      
-      vv.addEventListener('resize', onVVResize);
-      vv.addEventListener('scroll', onVVResize);
-    }
+    setupKeyboardHandler();
     
     ta.addEventListener('keydown', e => {
       if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
@@ -5067,6 +5081,12 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
       try { u(); } catch (_) {}
     });
     unsubs = [];
+    
+    // НОВОЕ: очистка обработчика клавиатуры
+    if (vvCleanup) {
+      try { vvCleanup(); } catch (_) {}
+      vvCleanup = null;
+    }
   }
 
   return { init, destroy, send, edit, cancelEdit };
