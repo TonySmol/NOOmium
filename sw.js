@@ -3,18 +3,26 @@ const ASSETS = [
   '.',
   './index.html',
   './manifest.json',
-  './icon-192.png',
-  './icon-512.png',
 ];
 
 // Установка: кэшируем основные ресурсы
 self.addEventListener('install', event => {
   event.waitUntil(
-    caches.open(CACHE_NAME).then(cache => {
-      return cache.addAll(ASSETS);
-    })
+    caches.open(CACHE_NAME)
+      .then(cache => {
+        // Кэшируем по одному, чтобы 404 не ронял весь addAll
+        const promises = ASSETS.map(url =>
+          cache.add(url).catch(err => {
+            console.warn('SW: не удалось закэшировать', url, err.message);
+          })
+        );
+        return Promise.all(promises);
+      })
+      .catch(err => {
+        console.warn('SW: ошибка установки кэша', err.message);
+      })
   );
-  self.skipWaiting(); // Активируем сразу, без ожидания
+  self.skipWaiting();
 });
 
 // Активация: удаляем старые кэши
@@ -26,17 +34,22 @@ self.addEventListener('activate', event => {
       );
     })
   );
-  self.clients.claim(); // Берём контроль над всеми клиентами
+  self.clients.claim();
 });
 
 // Перехват запросов: сеть с фолбэком на кэш
 self.addEventListener('fetch', event => {
-  // Игнорируем не-GET запросы
+  // Игнорируем не-GET запросы и не-HTTP
   if (event.request.method !== 'GET') return;
   
-  const url = new URL(event.request.url);
+  let url;
+  try {
+    url = new URL(event.request.url);
+  } catch (e) {
+    return;
+  }
   
-  // Для внешних ресурсов (nostr-tools, transformers): только сеть, без кэша
+  // Для внешних ресурсов (CDN, relays): только сеть
   if (url.origin !== self.location.origin) {
     return;
   }
@@ -45,18 +58,18 @@ self.addEventListener('fetch', event => {
   event.respondWith(
     fetch(event.request)
       .then(response => {
-        // Кэшируем успешные ответы
+        // Кэшируем только успешные ответы
         if (response.ok) {
           const clone = response.clone();
-          caches.open(CACHE_NAME).then(cache => {
-            cache.put(event.request, clone);
-          });
+          caches.open(CACHE_NAME)
+            .then(cache => cache.put(event.request, clone))
+            .catch(() => {});
         }
         return response;
       })
       .catch(() => {
         // Если сеть упала, берём из кэша
-        return caches.match(event.request);
+        return caches.match(event.request).then(r => r || Response.error());
       })
   );
 });
