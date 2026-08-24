@@ -1503,7 +1503,7 @@ body.ready #app { display: flex; }
 // ═══════════════════════════════════════════════════════════════════════════════
 // ВЕРСИЯ ПРИЛОЖЕНИЯ
 // ═══════════════════════════════════════════════════════════════════════════════
-const APP_VERSION = '0.3.2';
+const APP_VERSION = '0.3.3';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CORE/DI - ПРЕАМБУЛА
@@ -1591,6 +1591,10 @@ DI.register('Config', function () {
     premiumRelay: null,
     gpuRanking: false,
     cloudView: false,
+    // Лимиты длины поста
+    maxPostLength: 2500,      // жёсткий лимит, отправка блокируется
+    softLimit: 1200,          // начало предупреждения
+    hardLimit: 2000,          // начало серьёзного ухудшения
   });
 
   const migrations = {
@@ -1959,6 +1963,9 @@ DI.register('I18n', function (Config, bus) {
     'progress.subtitle': 'Один раз, чтобы искать по смыслу',
     'ed.placeholder': 'О чём думаешь?',
     'ed.chars': 'симв.',
+	'ed.limit.soft': 'Для точного поиска пиши короче',
+	'ed.limit.hard': 'Вектор обрезается, качество поиска низкое',
+	'ed.limit.max': 'Максимум {max} символов',
     'btn.private': 'Личное',
     'btn.public': 'Мир',
     'btn.send': 'Отправить',
@@ -1977,6 +1984,7 @@ DI.register('I18n', function (Config, bus) {
     'ctx.drift': 'дрейф от',
     'ctx.clear': 'снять',
     'sim.score': 'похожа на',
+	'sim.score.percent': 'похожа на {percent}%',
     'inf.resonance': 'резонанс',
     'inf.linked': 'по мотивам',
     'inf.bymotif': 'по мотивам',
@@ -2085,6 +2093,9 @@ DI.register('I18n', function (Config, bus) {
     'progress.subtitle': 'Once, to search by meaning',
     'ed.placeholder': 'What are you thinking?',
     'ed.chars': 'chars',
+	'ed.limit.soft': 'Shorter text = more precise search',
+	'ed.limit.hard': 'Vector will be truncated, search quality drops',
+	'ed.limit.max': 'Maximum {max} characters',
     'btn.private': 'Private',
     'btn.public': 'World',
     'btn.send': 'Send',
@@ -2103,6 +2114,7 @@ DI.register('I18n', function (Config, bus) {
     'ctx.drift': 'drift from',
     'ctx.clear': 'clear',
     'sim.score': 'similarity',
+	'sim.score.percent': 'similarity {percent}%',
     'inf.resonance': 'resonance',
     'inf.linked': 'inspired by',
     'inf.bymotif': 'inspired by',
@@ -4850,6 +4862,7 @@ DI.register('HeaderStatus', function (bus, I18n, Embedder) {
 /**
  * Поле ввода: счётчик, переключатель Личное/Мир, отправка.
  * Auto-resize для textarea.
+ * ИСПРАВЛЕНО: добавлены лимиты длины поста с цветовой и текстовой индикацией.
  */
 DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils) {
   let ta, cnt, sendBtn, toggle;
@@ -4858,8 +4871,71 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
   let unsubs = [];
 
   function updateCounter() {
-    if (cnt && ta) {
-      cnt.textContent = Utils.word('symbols', ta.value.length, I18n.getLang());
+    if (!cnt || !ta) return;
+    
+    const len = ta.value.length;
+    const max = Config.get('maxPostLength', 2500);
+    const soft = Config.get('softLimit', 1200);
+    const hard = Config.get('hardLimit', 2000);
+    
+    // Основной счётчик
+    cnt.textContent = Utils.word('symbols', len, I18n.getLang());
+    
+    // Цвет счётчика и подсказка
+    let color = 'var(--text-3)';
+    let hint = null;
+    
+    if (len >= max) {
+      color = 'var(--rose)';
+      hint = I18n.t('ed.limit.max', { max });
+    } else if (len >= hard) {
+      color = 'var(--rose)';
+      hint = I18n.t('ed.limit.hard');
+    } else if (len >= soft) {
+      color = 'var(--amber)';
+      hint = I18n.t('ed.limit.soft');
+    }
+    
+    cnt.style.color = color;
+    
+    // Показать подсказку под счётчиком
+    updateHint(hint);
+    
+    // Блокировка отправки при превышении жёсткого лимита
+    if (sendBtn) {
+      sendBtn.disabled = len >= max || sending;
+    }
+  }
+
+  // Новая функция для подсказки
+  function updateHint(text) {
+    let hintEl = document.getElementById('ed-hint');
+    
+    if (!text) {
+      if (hintEl) hintEl.remove();
+      return;
+    }
+    
+    if (!hintEl) {
+      hintEl = document.createElement('div');
+      hintEl.id = 'ed-hint';
+      hintEl.style.cssText = `
+        font-size: 11px;
+        color: var(--text-3);
+        padding-top: 4px;
+        transition: color 0.15s var(--ease);
+      `;
+      // Вставить после счётчика
+      cnt.parentNode.insertBefore(hintEl, cnt.nextSibling);
+    }
+    
+    hintEl.textContent = text;
+    
+    // Цвет подсказки в зависимости от зоны
+    if (text.includes(I18n.t('ed.limit.hard')) || text.includes(I18n.t('ed.limit.max'))) {
+      hintEl.style.color = 'var(--rose)';
+    } else {
+      hintEl.style.color = 'var(--amber)';
     }
   }
 
@@ -4915,6 +4991,13 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
     const text = ta.value.trim();
     if (!text) {
       Toast.show('warn', I18n.t('toast.empty'));
+      return;
+    }
+    
+    // Проверка лимита перед отправкой
+    const max = Config.get('maxPostLength', 2500);
+    if (text.length > max) {
+      Toast.show('err', I18n.t('ed.limit.max', { max }));
       return;
     }
     
@@ -5027,7 +5110,7 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
   }
 
   return { init, destroy, send, edit, cancelEdit };
-}, ['Context', 'Notes', 'Store', 'I18n', 'EventBus', 'Toast', 'Utils']);
+}, ['Context', 'Notes', 'Store', 'I18n', 'EventBus', 'Toast', 'Utils', 'Config']);
 // ─── UI/Composer ─── END ────────────────────────────────────────────────────
 
 // ─── UI/FeedView ─── START ──────────────────────────────────────────────────
@@ -5262,11 +5345,11 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, P
     // === ГРУППА 3: Info (sim%, время, карандаш) ===
     meta.appendChild(createSep());
 
-    // Сходство (score) в режиме ранжирования
+    // Сходство (score) в режиме ранжирования — ИСПРАВЛЕНО: теперь с текстом
     if (isRanked && typeof n.score === 'number') {
       const sim = document.createElement('span');
       sim.className = 'note-sim-info';
-      sim.textContent = Math.round(n.score * 100) + '%';
+      sim.textContent = I18n.t('sim.score.percent', { percent: Math.round(n.score * 100) });
       sim.title = I18n.t('sim.score');
       meta.appendChild(sim);
     }
