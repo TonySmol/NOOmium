@@ -34,14 +34,14 @@
   "screenshots": [
     {
       "src": "./screenshot-narrow.png",
-      "sizes": "750x1334",
+      "sizes": "512x512",
       "type": "image/png",
       "form_factor": "narrow",
       "label": "NOOmium на смартфоне"
     },
     {
       "src": "./screenshot-wide.png",
-      "sizes": "1280x720",
+      "sizes": "512x512",
       "type": "image/png",
       "form_factor": "wide",
       "label": "NOOmium на десктопе"
