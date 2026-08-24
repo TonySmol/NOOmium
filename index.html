@@ -1556,7 +1556,7 @@ body.ready #app { display: flex; }
 // ═══════════════════════════════════════════════════════════════════════════════
 // ВЕРСИЯ ПРИЛОЖЕНИЯ
 // ═══════════════════════════════════════════════════════════════════════════════
-const APP_VERSION = '0.5.4';
+const APP_VERSION = '0.5.5';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CORE/DI - ПРЕАМБУЛА
@@ -1589,7 +1589,7 @@ const DI = (() => {
 // ─── CORE/Config ─── START ──────────────────────────────────────────────────
 DI.register('Config', function () {
   const KEY = 'noomium:cfg';
-  const SCHEMA_VERSION = 3;
+  const SCHEMA_VERSION = 4; // ← повышено до 4 для миграции релеёв
 
   const defaults = Object.freeze({
     schemaVersion: SCHEMA_VERSION,
@@ -1602,15 +1602,32 @@ DI.register('Config', function () {
     dim: 384,
     aiCacheLimit: 300,
     aiEmbedTimeout: 15000,
-    threshold: 0.7,
-    serendipity: 0.3,
+    threshold: 0.8,
+    serendipity: 0.6,
     vectorSimilarityThreshold: 0.98,
+    // РАСШИРЕННЫЙ список надёжных релеёв с разных континентов
     relays: [
-      'wss://relay.primal.net',
-      'wss://relay.snort.social',
-      'wss://relay.damus.io',
-      'wss://nos.lol',
-      'wss://relay.nostr.band',
+      // Северная Америка
+      'wss://relay.primal.net',           // ✅ Стабильный, поддерживает эфемерные
+      'wss://nos.lol',                    // ✅ Стабильный, быстрая доставка
+      'wss://relay.nostr.band',           // ✅ Крупный поисковый релей
+      
+      // Европа
+      'wss://eden.nostr.land',            // ✅ Очень стабильный (Portugal)
+      'wss://relay.mostr.pub',            // ✅ Стабильный (Europe)
+      'wss://nostr.fmt.wiz.biz',          // ✅ Стабильный (Germany)
+      'wss://offchain.pub',               // ✅ Стабильный (EU)
+      
+      // Азия-Океания
+      'wss://relay.nostr.com.au',         // ✅ Австралия
+      'wss://nostr.oxtr.dev',             // ✅ Юго-Восточная Азия
+      
+      // Популярные (иногда нестабильны, но широкая аудитория)
+      'wss://relay.damus.io',             // ⚠️ Damus — иногда падает
+      'wss://relay.snort.social',         // ⚠️ Snort — иногда падает
+      
+      // Специализированные
+      'wss://purplepag.es',               // ✅ Для NIP-65 (relay list)
     ],
     kNote: 1,
     kQuery: 21000,
@@ -1648,15 +1665,23 @@ DI.register('Config', function () {
     gpuRanking: false,
     cloudView: false,
     // Лимиты длины поста
-    maxPostLength: 2500,      // жёсткий лимит, отправка блокируется
-    softLimit: 1200,          // начало предупреждения
-    hardLimit: 2000,          // начало серьёзного ухудшения
+    maxPostLength: 2500,
+    softLimit: 1200,
+    hardLimit: 2000,
   });
 
   const migrations = {
     1: s => s,
     2: s => {
       s.relays = defaults.relays.slice();
+      return s;
+    },
+    // НОВАЯ миграция с версии 2/3 на 4: заменяем старый короткий список на расширенный
+    3: s => {
+      // Если у пользователя кастомный список из 1-2 релеёв — заменяем на расширенный
+      if (!Array.isArray(s.relays) || s.relays.length < 5) {
+        s.relays = defaults.relays.slice();
+      }
       return s;
     },
   };
