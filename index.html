@@ -1556,7 +1556,7 @@ body.ready #app { display: flex; }
 // ═══════════════════════════════════════════════════════════════════════════════
 // ВЕРСИЯ ПРИЛОЖЕНИЯ
 // ═══════════════════════════════════════════════════════════════════════════════
-const APP_VERSION = '0.5.9';
+const APP_VERSION = '0.5.10';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CORE/DI - ПРЕАМБУЛА
@@ -2841,7 +2841,7 @@ self.onmessage = async function (e) {
   
   if (msg.type === 'embed') {
     try {
-      const out = await extractor(msg.text, { pooling: 'mean', normalize: true });
+      const out = await extractor(msg.text, { pooling: 'cls', normalize: true });
       self.postMessage({ 
         type: 'result', 
         id: msg.id, 
