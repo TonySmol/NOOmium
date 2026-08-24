@@ -6,11 +6,25 @@
 <meta name="theme-color" content="#0a0a0b">
 <title>NOOmium</title>
 
+<!-- Иконка для вкладки браузера (SVG, вшито) -->
+<link rel="icon" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAzMiAzMiI+PHJlY3Qgd2lkdGg9IjMyIiBoZWlnaHQ9IjMyIiByeD0iNyIgZmlsbD0iIzBhMGExIi8+PHRleHQgeD0iNTAlIiB5PSI1OCUiIGZvbnQtZmFtaWx5PSJzYW5zLXNlcmlmIiBmb250LXdlaWdodD0iNzAwIiBmb250LXNpemU9IjE4IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjZmFmYWZhIj5OPHRzcGFuIGZpbGw9IiNmNTllMGIiPuKApTwvdHNwYW4+PC90ZXh0Pjwvc3ZnPg==">
+
+<!-- Для Apple устройств (iOS не любит SVG, но хотя бы не 404) -->
+<link rel="apple-touch-icon" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxODAgMTgwIj48cmVjdCB3aWR0aD0iMTgwIiBoZWlnaHQ9IjE4MCIgcng9IjQwIiBmaWxsPSIjMGEwYTBiIi8+PHRleHQgeD0iNTAlIiB5PSI1OCUiIGZvbnQtZmFtaWx5PSJzYW5zLXNlcmlmIiBmb250LXdlaWdodD0iNzAwIiBmb250LXNpemU9IjEwMCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iI2ZhZmFmYSI+Tjx0c3BhbiBmaWxsPSIjZjU5ZTBiIj7igLk8L3RzcGFuPjwvdGV4dD48L3N2Zz4=">
+
 <!-- Манифест для PWA -->
 <link rel="manifest" href="manifest.json">
 
-<!-- Telegram Web App API -->
-<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<!-- Telegram Web App API (с обработкой ошибок) -->
+<script>
+  // Телеграм скрипт — оборачиваем в try/catch, чтобы не падал при недоступности
+  try {
+    var s = document.createElement('script');
+    s.src = 'https://telegram.org/js/telegram-web-app.js';
+    s.onerror = function() { console.warn('Telegram API недоступен, работаем как обычный сайт'); };
+    document.head.appendChild(s);
+  } catch (e) {}
+</script>
 <style>
 /* ═══════════════════════════════════════════════════════════════════════════════
    ЦВЕТОВАЯ СИСТЕМА (DARK / LIGHT)
