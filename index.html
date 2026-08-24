@@ -6,27 +6,17 @@
 <meta name="theme-color" content="#0a0a0b">
 <title>NOOmium</title>
 
-<!-- Favicon -->
-<link rel="icon" type="image/png" sizes="32x32" href="icon-192.png">
-<link rel="apple-touch-icon" sizes="192x192" href="icon-192.png">
+<!-- ═══ PWA: манифест и иконки ═══ -->
+<link rel="manifest" href="./manifest.json">
+<link rel="icon" type="image/png" sizes="192x192" href="./icon-192.png">
+<link rel="apple-touch-icon" sizes="192x192" href="./icon-192.png">
 
-<!-- Мета-теги для iOS (установка на главный экран) -->
+<!-- ═══ iOS PWA meta-теги ═══ -->
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="NOOmium">
+<meta name="mobile-web-app-capable" content="yes">
 
-<!-- Манифест для PWA -->
-<link rel="manifest" href="manifest.json">
-
-<!-- Telegram Web App API (с обработкой ошибок) -->
-<script>
-  try {
-    var s = document.createElement('script');
-    s.src = 'https://telegram.org/js/telegram-web-app.js';
-    s.onerror = function() { console.warn('Telegram API недоступен, работаем как обычный сайт'); };
-    document.head.appendChild(s);
-  } catch (e) {}
-</script>
 <style>
 /* ═══════════════════════════════════════════════════════════════════════════════
    ЦВЕТОВАЯ СИСТЕМА (DARK / LIGHT)
@@ -1519,23 +1509,54 @@ body.ready #app { display: flex; }
 <!-- ПРОСМОТР ЗАМЕТКИ -->
 <div id="noteview" role="dialog" aria-modal="true"></div>
 
+<!-- ═══ РЕГИСТРАЦИЯ SERVICE WORKER (отдельно от модуля, чтобы работал всегда) ═══ -->
 <script>
-  // Регистрация Service Worker
   if ('serviceWorker' in navigator) {
     window.addEventListener('load', () => {
       navigator.serviceWorker.register('./sw.js')
-        .then(reg => console.log('SW registered:', reg.scope))
-        .catch(err => console.warn('SW registration failed:', err));
+        .then(reg => {
+          console.log('[SW] зарегистрирован:', reg.scope);
+          // Если есть ожидающее обновление — активируем
+          reg.addEventListener('updatefound', () => {
+            const newWorker = reg.installing;
+            if (newWorker) {
+              newWorker.addEventListener('statechange', () => {
+                if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
+                  newWorker.postMessage('SKIP_WAITING');
+                }
+              });
+            }
+          });
+        })
+        .catch(err => console.warn('[SW] регистрация упала:', err));
     });
   }
 </script>
 
+<!-- ═══ TELEGRAM WEB APP API (безопасная загрузка) ═══ -->
+<script>
+  (function () {
+    try {
+      var s = document.createElement('script');
+      s.src = 'https://telegram.org/js/telegram-web-app.js';
+      s.async = true;
+      s.onerror = function () {
+        console.warn('[TG] API недоступен, работаем как обычный сайт');
+      };
+      document.head.appendChild(s);
+    } catch (e) {
+      console.warn('[TG] не удалось загрузить скрипт:', e);
+    }
+  })();
+</script>
+
 <script type="module">
 'use strict';
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // ВЕРСИЯ ПРИЛОЖЕНИЯ
 // ═══════════════════════════════════════════════════════════════════════════════
-const APP_VERSION = '0.4.1';
+const APP_VERSION = '0.5.0';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CORE/DI - ПРЕАМБУЛА
@@ -1906,9 +1927,6 @@ DI.register('Utils', function () {
 // ─── CORE/Utils ─── END ─────────────────────────────────────────────────────
 
 // ─── CORE/I18n ─── START ────────────────────────────────────────────────────
-/**
- * Интернационализация. Единый словарь ru/en для всего приложения.
- */
 DI.register('I18n', function (Config, bus) {
   const dicts = Object.create(null);
   const listeners = [];
@@ -1995,9 +2013,9 @@ DI.register('I18n', function (Config, bus) {
     'progress.subtitle': 'Один раз, чтобы искать по смыслу',
     'ed.placeholder': 'О чём думаешь?',
     'ed.chars': 'симв.',
-	'ed.limit.soft': 'Для точного поиска пиши короче',
-	'ed.limit.hard': 'Вектор обрезается, качество поиска низкое',
-	'ed.limit.max': 'Максимум {max} символов',
+    'ed.limit.soft': 'Для точного поиска пиши короче',
+    'ed.limit.hard': 'Вектор обрезается, качество поиска низкое',
+    'ed.limit.max': 'Максимум {max} символов',
     'btn.private': 'Личное',
     'btn.public': 'Мир',
     'btn.send': 'Отправить',
@@ -2016,7 +2034,7 @@ DI.register('I18n', function (Config, bus) {
     'ctx.drift': 'дрейф от',
     'ctx.clear': 'снять',
     'sim.score': 'похожа на',
-	'sim.score.percent': 'похожа на {percent}%',
+    'sim.score.percent': 'похожа на {percent}%',
     'inf.resonance': 'резонанс',
     'inf.linked': 'по мотивам',
     'inf.bymotif': 'по мотивам',
@@ -2052,9 +2070,9 @@ DI.register('I18n', function (Config, bus) {
     'btn.edit': 'Развить',
     'btn.del': 'Удалить',
     'btn.copy': 'Копия',
-	'btn.pin': 'Пин',
-	'btn.pin.aria': 'Закрепить для поиска',
-	'toast.pinned': 'закреплено',
+    'btn.pin': 'Пин',
+    'btn.pin.aria': 'Закрепить для поиска',
+    'toast.pinned': 'закреплено',
     'btn.cancel': 'Отмена',
     'btn.close': 'Закрыть',
     'btn.toggle.priv': 'Скрыть',
@@ -2125,9 +2143,9 @@ DI.register('I18n', function (Config, bus) {
     'progress.subtitle': 'Once, to search by meaning',
     'ed.placeholder': 'What are you thinking?',
     'ed.chars': 'chars',
-	'ed.limit.soft': 'Shorter text = more precise search',
-	'ed.limit.hard': 'Vector will be truncated, search quality drops',
-	'ed.limit.max': 'Maximum {max} characters',
+    'ed.limit.soft': 'Shorter text = more precise search',
+    'ed.limit.hard': 'Vector will be truncated, search quality drops',
+    'ed.limit.max': 'Maximum {max} characters',
     'btn.private': 'Private',
     'btn.public': 'World',
     'btn.send': 'Send',
@@ -2146,7 +2164,7 @@ DI.register('I18n', function (Config, bus) {
     'ctx.drift': 'drift from',
     'ctx.clear': 'clear',
     'sim.score': 'similarity',
-	'sim.score.percent': 'similarity {percent}%',
+    'sim.score.percent': 'similarity {percent}%',
     'inf.resonance': 'resonance',
     'inf.linked': 'inspired by',
     'inf.bymotif': 'inspired by',
@@ -2182,9 +2200,9 @@ DI.register('I18n', function (Config, bus) {
     'btn.edit': 'Develop',
     'btn.del': 'Delete',
     'btn.copy': 'Copy',
-	'btn.pin': 'Pin',
-	'btn.pin.aria': 'Pin for search',
-	'toast.pinned': 'pinned',
+    'btn.pin': 'Pin',
+    'btn.pin.aria': 'Pin for search',
+    'toast.pinned': 'pinned',
     'btn.cancel': 'Cancel',
     'btn.close': 'Close',
     'btn.toggle.priv': 'Hide',
@@ -2325,10 +2343,6 @@ DI.register('Store', function () {
 // ─── CORE/Store ─── END ─────────────────────────────────────────────────────
 
 // ─── DATA/Vec ─── START ─────────────────────────────────────────────────────
-/**
- * Векторная математика: кодирование для Nostr-тегов, косинусное сходство,
- * нормализация и k-means для центроидов.
- */
 DI.register('Vec', function () {
   const f32 = v => (v instanceof Float32Array ? v : Float32Array.from(v || []));
 
@@ -2461,15 +2475,6 @@ DI.register('Vec', function () {
 // ─── DATA/Vec ─── END ───────────────────────────────────────────────────────
 
 // ─── DATA/DB ─── START ──────────────────────────────────────────────────────
-/**
- * Персистентное хранилище: IndexedDB с прозрачным in-memory fallback.
- * 
- * Два объектных хранилища:
- *   notes — заметки пользователя {id,text,vector,shared,parentId?,parentPubkey?,createdAt,updatedAt,eventId?}
- *   cache — принятые из сети заметки (их id = Nostr eventId)
- * 
- * Мутации notes эмитят 'db:change', мутации cache — 'db:cache'
- */
 DI.register('DB', function (Config, bus, Logger) {
   let db = null;
   let mem = null;
@@ -2754,13 +2759,6 @@ DI.register('DB', function (Config, bus, Logger) {
 // ─── DATA/DB ─── END ────────────────────────────────────────────────────────
 
 // ─── AI/Embedder ─── START ──────────────────────────────────────────────────
-/**
- * Эмбеддинги в Web Worker (transformers.js, ленивая загрузка модели).
- * 
- * Режимы: 'loading' → 'model' (успех) или 'demo' (fallback на hash-эмбеддинг).
- * В 'demo' и до вызова load() embed() мгновенно возвращает детерминированный
- * hash-вектор — приложение работает всегда, просто поиск грубее.
- */
 DI.register('Embedder', function (Config, bus, Logger) {
   const workerCode = `
 let extractor = null;
@@ -3085,17 +3083,7 @@ self.onmessage = async function (e) {
 // ─── AI/Embedder ─── END ────────────────────────────────────────────────────
 
 // ─── AI/Ranker ─── START ────────────────────────────────────────────────────
-/**
- * Ранжирование по векторному сходству.
- * 
- * Интерфейс Promise-based и стабилен: сейчас cosineBatch считается синхронно,
- * позже его можно заменить на GPU/Worker-реализацию (Config.gpuRanking),
- * не трогая вызывающий код.
- */
 DI.register('Ranker', function (Vec, Config) {
-  /**
-   * Скорит массив элементов против вектора запроса, сортирует по убыванию.
-   */
   function cosineBatch(queryVector, items, signal) {
     if (!queryVector || !items || !items.length) {
       return Promise.resolve([]);
@@ -3117,10 +3105,6 @@ DI.register('Ranker', function (Vec, Config) {
     return Promise.resolve(out);
   }
 
-  /**
-   * Делит скорённые элементы на relevant (≥ threshold) и seren
-   * (threshold−serendipity ≤ score < threshold). Всё, что ниже, — шум.
-   */
   function split(scored) {
     const threshold = Config.get('threshold', 0.7);
     const serenMin = threshold - Config.get('serendipity', 0.3);
@@ -3137,9 +3121,6 @@ DI.register('Ranker', function (Vec, Config) {
     return { relevant, seren };
   }
 
-  /**
-   * «Это почти тот же вектор?» — для дедупликации запросов в сеть.
-   */
   function isSimilar(a, b) {
     return Vec.cosine(a, b) >= Config.get('vectorSimilarityThreshold', 0.98);
   }
@@ -3149,14 +3130,6 @@ DI.register('Ranker', function (Vec, Config) {
 // ─── AI/Ranker ─── END ──────────────────────────────────────────────────────
 
 // ─── NET/Protocol ─── START ─────────────────────────────────────────────────
-/**
- * Контракт событий NOOmium поверх Nostr. Чистые функции encode/decode/validate.
- * 
- *   NOTE   = kind 1 (regular): content = текст; теги ['t',room], ['v',b64-вектор], ['parent',id,pubkey]?
- *   QUERY  = kind 21000 (ephemeral): content = JSON {vector, maxResponses, window}
- *   ANSWER = kind 21001 (ephemeral): content = JSON {noteId, text, vector, score}; тег ['e', queryId]
- *   DELETE = kind 5 (NIP-09): теги ['e', eventId...] — просьба релеям удалить события
- */
 DI.register('Protocol', function (Config, Vec) {
   function findTag(tags, name) {
     if (!Array.isArray(tags)) return null;
@@ -3322,13 +3295,6 @@ DI.register('Protocol', function (Config, Vec) {
 // ─── NET/Protocol ─── END ───────────────────────────────────────────────────
 
 // ─── NET/Nostr ─── START ────────────────────────────────────────────────────
-/**
- * Транспорт Nostr: динамический импорт nostr-tools, ключи, SimplePool,
- * публикация/подписка. Низкий уровень — оркестрирует NetService.
- * 
- * Публикация порелейная (ensureRelay → relay.publish): переживает отказ
- * отдельных рэлеев, резолвится по первому принявшему.
- */
 DI.register('Nostr', function (Config, bus, Logger) {
   const CDN = 'https://cdn.jsdelivr.net/npm/nostr-tools@2.7.2/+esm';
   const SK_KEY = 'noomium:sk';
@@ -3478,20 +3444,6 @@ DI.register('Nostr', function (Config, bus, Logger) {
 // ─── NET/Nostr ─── END ──────────────────────────────────────────────────────
 
 // ─── NET/NetService ─── START ───────────────────────────────────────────────
-/**
- * Оркестратор децентрализованного обмена.
- * 
- *  - Подписка на комнату: заметки (kind 1), запросы (21000), ответы (21001), удаления (kind 5, NIP-09)
- *  - Анонсирует открытые заметки; после анонса сохраняет eventId
- *  - На чужой запрос: центроидный префильтр → ранжирование → top-N ответов
- *  - На пин шлёт запрос и собирает ответы в кеш
- *  - loadHistory: расширяет окно подписки (история сети)
- *  - forgetNote: при удалении/снятии публикации шлёт kind 5 (NIP-09)
- * 
- * ИСПРАВЛЕНО: при публикации родителя все его локальные дочки мигрируют
- * parentId с локального ID на eventId — иначе на других устройствах они
- * отображаются как orphan.
- */
 DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Config, Logger, bus) {
   let started = false;
   let subscription = null;
@@ -3689,10 +3641,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     notifyPeers();
   }
 
-  /**
-   * Мигрирует parentId у дочек с локального ID на eventId родителя.
-   * Вызывается после успешной публикации родителя.
-   */
   function migrateChildrenParentId(oldParentId, newParentId) {
     if (!oldParentId || !newParentId || oldParentId === newParentId) return;
     
@@ -3721,7 +3669,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
             if (cur && cur.eventId !== ev.id) {
               cur.eventId = ev.id;
               DB.put(cur);
-              // Мигрируем parentId у дочек с локального на eventId
               migrateChildrenParentId(cur.id, cur.eventId);
             }
           });
@@ -3918,10 +3865,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
 // ─── NET/NetService ─── END ─────────────────────────────────────────────────
 
 // ─── DOMAIN/Notes ─── START ─────────────────────────────────────────────────
-/**
- * Жизненный цикл заметок: создание, правка, удаление, переключение видимости.
- * Вектор считается при каждом сохранении текста.
- */
 DI.register('Notes', function (DB, Embedder, bus, Logger, Utils) {
   function emit(event, payload) {
     try { bus.emit(event, payload); } catch (_) {}
@@ -3951,7 +3894,7 @@ DI.register('Notes', function (DB, Embedder, bus, Logger, Utils) {
 
   function edit(id, newText) {
     const t = (newText || '').trim();
-    if (!t) return Promise.resolve(null); // Унифицировано с create
+    if (!t) return Promise.resolve(null);
     
     return DB.get(id).then(note => {
       if (!note) return null;
@@ -4002,17 +3945,6 @@ DI.register('Notes', function (DB, Embedder, bus, Logger, Utils) {
 // ─── DOMAIN/Notes ─── END ───────────────────────────────────────────────────
 
 // ─── DOMAIN/Context ─── START ───────────────────────────────────────────────
-/**
- * Сердце режимов. Управляет активным контекстом, по которому Feed ранжирует ленту.
- * 
- * Источники и приоритеты:
- *  - pin    — закреплена заметка, ввод пуст: контекст = пин
- *  - drift  — есть и пин, и ввод: контекст ВЕДЁТ введённый текст (дрейф от пина)
- *  - input  — только ввод: контекст = ввод
- *  - none   — просмотр
- * 
- * Подписывается на 'note:pin' из NoteView — для бесшовного пина из полного просмотра.
- */
 DI.register('Context', function (Store, Embedder, Config, Utils, bus) {
   let inputText = '';
   let inputVector = null;
@@ -4123,7 +4055,6 @@ DI.register('Context', function (Store, Embedder, Config, Utils, bus) {
     },
 
     init() {
-      // Подписка на событие пина из NoteView
       bus.on('note:pin', note => {
         if (note) this.setPin(note);
       });
@@ -4133,13 +4064,6 @@ DI.register('Context', function (Store, Embedder, Config, Utils, bus) {
 // ─── DOMAIN/Context ─── END ─────────────────────────────────────────────────
 
 // ─── DOMAIN/Feed ─── START ──────────────────────────────────────────────────
-/**
- * Готовит данные ленты под текущий режим.
- * 
- *  - view  (контекста нет): свежая хронология — свои + сетевые заметки, feed[]
- *  - author (контекст есть): ранжирование по вектору контекста → lists
- *    {local: свои релевантные, world: чужие релевантные, seren: озарения}
- */
 DI.register('Feed', function (DB, Ranker, Store, bus, Logger) {
   let seq = 0;
   let unsubs = [];
@@ -4230,14 +4154,6 @@ DI.register('Feed', function (DB, Ranker, Store, bus, Logger) {
 // ─── DOMAIN/Feed ─── END ────────────────────────────────────────────────────
 
 // ─── DOMAIN/Provenance ─── START ────────────────────────────────────────────
-/**
- * Граф «по мотивам»: parent-связи между заметками (свои + сетевые).
- * КЭШИРОВАНИЕ: ancestors() кэширует результат на 5 секунд.
- * 
- * ИСПРАВЛЕНО: улучшенная функция поиска родителя с учётом локальных ID и eventId.
- * Это решает проблему orphan на других устройствах, когда дочка ссылается на
- * локальный ID родителя, а родитель известен только по сетевому eventId.
- */
 DI.register('Provenance', function (DB) {
   const ancestorsCache = new Map();
   const CACHE_TTL = 5000;
@@ -4278,10 +4194,6 @@ DI.register('Provenance', function (DB) {
     });
   }
 
-  /**
-   * Ищет цепочку предков заметки.
-   * Учитывает как локальные ID, так и eventId для корректной работы между устройствами.
-   */
   function ancestors(id) {
     if (!id) return Promise.resolve([]);
     
@@ -4291,7 +4203,6 @@ DI.register('Provenance', function (DB) {
     }
     
     return loadAll().then(all => {
-      // Строим маппинг: id/eventId → заметка
       const byId = new Map();
       
       all.forEach(n => {
@@ -4300,22 +4211,14 @@ DI.register('Provenance', function (DB) {
         if (n.eventId) byId.set(n.eventId, n);
       });
       
-      /**
-       * Ищет заметку по targetId с учётом рассинхронизации ID между устройствами.
-       * Сценарий: на устройстве А дочка имеет parentId = локальный_ID родителя,
-       * а на устройстве Б родитель известен только по eventId.
-       */
       function findNote(targetId) {
         if (!targetId) return null;
         
-        // Прямой поиск: id или eventId совпадает
         if (byId.has(targetId)) return byId.get(targetId);
         
-        // Обратный поиск: ищем локальную заметку с таким id, которая уже опубликована
         const localPublished = all.find(n => n && n.id === targetId && n.eventId);
         if (localPublished) return localPublished;
         
-        // Ищем сетевую заметку с таким eventId, если targetId похож на eventId
         const byEvent = all.find(n => n && n.eventId === targetId);
         if (byEvent) return byEvent;
         
@@ -4327,7 +4230,7 @@ DI.register('Provenance', function (DB) {
       let current = findNote(id);
       
       while (current && current.parentId) {
-        if (seen.has(current.parentId)) break; // Защита от циклов
+        if (seen.has(current.parentId)) break;
         seen.add(current.parentId);
         
         const parent = findNote(current.parentId);
@@ -4351,12 +4254,6 @@ DI.register('Provenance', function (DB) {
 // ─── DOMAIN/Provenance ─── END ──────────────────────────────────────────────
 
 // ─── DOMAIN/Influence ─── START ─────────────────────────────────────────────
-/**
- * Резонанс заметки: сколько уникальных авторов породило её прямых детей.
- * Sybil-resistant: один человек не накрутит себе много, сколько бы детей ни создал.
- * 
- * ОПТИМИЗАЦИЯ: Инкрементальное обновление при создании/удалении заметок.
- */
 DI.register('Influence', function (DB, bus, Logger) {
   const resonanceMap = new Map();
   let seq = 0;
@@ -4404,7 +4301,7 @@ DI.register('Influence', function (DB, bus, Logger) {
   function init() {
     bus.on('note:created', updateForNote);
     bus.on('note:updated', updateForNote);
-    bus.on('note:deleted', () => rebuild()); // Удаление требует полного пересчета
+    bus.on('note:deleted', () => rebuild());
     bus.on('db:change', () => rebuild());
     bus.on('db:cache', () => rebuild());
     
@@ -4416,10 +4313,6 @@ DI.register('Influence', function (DB, bus, Logger) {
 // ─── DOMAIN/Influence ─── END ───────────────────────────────────────────────
 
 // ─── DOMAIN/NoteActions ─── START ───────────────────────────────────────────
-/**
- * Общие действия над заметкой: удалить, переключить видимость, копировать.
- * Единая точка, чтобы FeedView / NoteView / BaseView не дублировали логику.
- */
 DI.register('NoteActions', function (Notes, Modal, Toast, I18n) {
   function remove(id) {
     if (!id) return;
@@ -4472,11 +4365,6 @@ DI.register('NoteActions', function (Notes, Modal, Toast, I18n) {
 // ─── DOMAIN/NoteActions ─── END ─────────────────────────────────────────────
 
 // ─── UI/Onboarding ─── START ────────────────────────────────────────────────
-/**
- * Онбординг и справка «Как это работает».
- *  - init(): при первом запуске (Config.onboarded=false) показывает гайд
- *  - showHelp(): открывает гайд из меню
- */
 DI.register('Onboarding', function (Config, Modal, I18n, Embedder) {
   function buildBody(firstRun) {
     const el = document.createElement('div');
@@ -4560,12 +4448,6 @@ DI.register('Onboarding', function (Config, Modal, I18n, Embedder) {
 // ─── UI/Onboarding ─── END ──────────────────────────────────────────────────
 
 // ─── UI/Modal ─── START ─────────────────────────────────────────────────────
-/**
- * Модальное окно на готовой разметке (#overlay > #modal).
- *  - open({title, body, buttons}) — произвольное окно
- *  - confirm(title, text, onOk, okText?) — подтверждение
- *  - close() — закрыть (также работают Escape и клик по подложке)
- */
 DI.register('Modal', function (I18n) {
   let overlay, modal, titleEl, bodyEl, footEl, closeBtn;
   let escHandler = null;
@@ -4678,6 +4560,7 @@ DI.register('Modal', function (I18n) {
 // ─── UI/Toast ─── START ─────────────────────────────────────────────────────
 /**
  * Всплывающие уведомления. Держит не более toastMaxVisible, старые вытесняет.
+ * НОВОЕ: haptic feedback для Telegram Mini Apps.
  */
 DI.register('Toast', function (Config) {
   const ICONS = { ok: '✓', err: '✕', warn: '!', info: '◆' };
@@ -4689,21 +4572,23 @@ DI.register('Toast', function (Config) {
   };
   let container = null;
 
-function show(type, msg, ms) {
-  if (!container) container = document.getElementById('toasts');
-  if (!container) return;
-  
-  // Haptic feedback в Telegram
-  try {
-    const TelegramAdapter = DI.resolve('TelegramAdapter');
-    if (TelegramAdapter && TelegramAdapter.isTelegram()) {
-      if (type === 'ok') TelegramAdapter.hapticFeedback('success');
-      else if (type === 'err') TelegramAdapter.hapticFeedback('error');
-      else TelegramAdapter.hapticFeedback('light');
-    }
-  } catch (_) {}
+  function haptic(type) {
+    try {
+      const tg = DI.resolve('TelegramAdapter');
+      if (tg && tg.isTelegram()) {
+        if (type === 'ok') tg.hapticFeedback('success');
+        else if (type === 'err') tg.hapticFeedback('error');
+        else tg.hapticFeedback('light');
+      }
+    } catch (_) {}
+  }
+
+  function show(type, msg, ms) {
+    if (!container) container = document.getElementById('toasts');
+    if (!container) return;
     
     const cls = ICONS[type] ? type : 'info';
+    haptic(type);
 
     const el = document.createElement('div');
     el.className = 'toast ' + cls;
@@ -4741,9 +4626,6 @@ function show(type, msg, ms) {
 // ─── UI/Toast ─── END ───────────────────────────────────────────────────────
 
 // ─── UI/Progress ─── START ──────────────────────────────────────────────────
-/**
- * Полноэкранный оверлей загрузки модели.
- */
 DI.register('Progress', function (bus) {
   let overlay, fill, pctEl, infoEl;
   let showTimer = null;
@@ -4821,9 +4703,6 @@ DI.register('Progress', function (bus) {
 // ─── UI/Progress ─── END ────────────────────────────────────────────────────
 
 // ─── UI/HeaderStatus ─── START ──────────────────────────────────────────────
-/**
- * Индикаторы в шапке: сеть и ИИ.
- */
 DI.register('HeaderStatus', function (bus, I18n, Embedder) {
   let netDot, netTxt, aiDot, aiTxt;
   let unsubs = [];
@@ -4903,8 +4782,7 @@ DI.register('HeaderStatus', function (bus, I18n, Embedder) {
 // ─── UI/Composer ─── START ──────────────────────────────────────────────────
 /**
  * Поле ввода: счётчик, переключатель Личное/Мир, отправка.
- * Auto-resize для textarea.
- * ИСПРАВЛЕНО: добавлены лимиты длины поста с цветовой и текстовой индикацией.
+ * ИСПРАВЛЕНО: добавлены лимиты длины поста + блокировка ввода через maxlength.
  */
 DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils, Config) {
   let ta, cnt, sendBtn, toggle;
@@ -4920,10 +4798,8 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
     const soft = Config.get('softLimit', 1200);
     const hard = Config.get('hardLimit', 2000);
     
-    // Основной счётчик
     cnt.textContent = Utils.word('symbols', len, I18n.getLang());
     
-    // Цвет счётчика и подсказка
     let color = 'var(--text-3)';
     let hint = null;
     
@@ -4939,17 +4815,13 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
     }
     
     cnt.style.color = color;
-    
-    // Показать подсказку под счётчиком
     updateHint(hint);
     
-    // Блокировка отправки при превышении жёсткого лимита
     if (sendBtn) {
       sendBtn.disabled = len >= max || sending;
     }
   }
 
-  // Новая функция для подсказки
   function updateHint(text) {
     let hintEl = document.getElementById('ed-hint');
     
@@ -4967,13 +4839,11 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
         padding-top: 4px;
         transition: color 0.15s var(--ease);
       `;
-      // Вставить после счётчика
       cnt.parentNode.insertBefore(hintEl, cnt.nextSibling);
     }
     
     hintEl.textContent = text;
     
-    // Цвет подсказки в зависимости от зоны
     if (text.includes(I18n.t('ed.limit.hard')) || text.includes(I18n.t('ed.limit.max'))) {
       hintEl.style.color = 'var(--rose)';
     } else {
@@ -5036,7 +4906,6 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
       return;
     }
     
-    // Проверка лимита перед отправкой
     const max = Config.get('maxPostLength', 2500);
     if (text.length > max) {
       Toast.show('err', I18n.t('ed.limit.max', { max }));
@@ -5097,8 +4966,10 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
     
     if (!ta) return;
 
+    // НОВОЕ: блокировка ввода на уровне браузера
+    ta.setAttribute('maxlength', Config.get('maxPostLength', 2500));
+
     ta.addEventListener('input', () => {
-      // Auto-resize
       ta.style.height = 'auto';
       ta.style.height = Math.min(ta.scrollHeight, 120) + 'px';
       
@@ -5156,14 +5027,6 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
 // ─── UI/Composer ─── END ────────────────────────────────────────────────────
 
 // ─── UI/FeedView ─── START ──────────────────────────────────────────────────
-/**
- * Рендер ленты и хром режимов.
- * 
- * Порядок в мета-блоке карточки:
- * [тег] | [↳ если есть] [◆ если есть] | [sim% если ранжирование] [время] [✎ если своя]
- * 
- * Группы разделены вертикальной чертой для читаемости.
- */
 DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, Provenance, Modal, NetService) {
   let feedEl, emptyEl, emptyT, segBar, ctxBanner, ctxSrc, ctxTxt, ctxX;
   let cLocal, cWorld, cSeren, histBtn;
@@ -5302,7 +5165,6 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, P
     }).catch(() => {});
   }
 
-  // Вертикальный разделитель между группами элементов
   function createSep() {
     const sep = document.createElement('span');
     sep.className = 'note-meta-sep';
@@ -5315,17 +5177,14 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, P
     el.style.animationDelay = Math.min(i * 25, 300) + 'ms';
     el.dataset.id = n.id;
 
-    // Текст заметки
     const txt = document.createElement('div');
     txt.className = 'note-txt';
     txt.textContent = n.text || '';
     el.appendChild(txt);
 
-    // Мета-блок
     const meta = document.createElement('div');
     meta.className = 'note-meta';
 
-    // === ГРУППА 1: Тег (личное/мир или автор) ===
     const tag = document.createElement('span');
     if (n.own) {
       tag.className = 'note-tag ' + (n.shared ? 'world' : 'priv');
@@ -5336,7 +5195,6 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, P
     }
     meta.appendChild(tag);
 
-    // === ГРУППА 2: Навигация (стрелка + ромб) ===
     const hasNav = !!n.parentId;
     const res = Influence.resonance(n.id) + Influence.resonance(n.eventId);
     const hasResonance = res > 0;
@@ -5344,7 +5202,6 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, P
     if (hasNav || hasResonance) {
       meta.appendChild(createSep());
 
-      // Стрелка "по мотивам" (если есть родитель)
       if (n.parentId) {
         const link = document.createElement('button');
         link.className = 'note-parent';
@@ -5367,7 +5224,6 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, P
         meta.appendChild(link);
       }
 
-      // Ромб (резонанс)
       if (hasResonance) {
         const r = document.createElement('button');
         r.className = 'note-sim';
@@ -5384,10 +5240,8 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, P
       }
     }
 
-    // === ГРУППА 3: Info (sim%, время, карандаш) ===
     meta.appendChild(createSep());
 
-    // Сходство (score) в режиме ранжирования — ИСПРАВЛЕНО: теперь с текстом
     if (isRanked && typeof n.score === 'number') {
       const sim = document.createElement('span');
       sim.className = 'note-sim-info';
@@ -5396,13 +5250,11 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, P
       meta.appendChild(sim);
     }
 
-    // Относительное время
     const date = document.createElement('span');
     date.className = 'note-date';
     date.textContent = Utils.fmtRelativeTime(n.createdAt, I18n.getLang(), I18n.t);
     meta.appendChild(date);
 
-    // Кнопка ✎ (карандаш) для своих заметок
     if (n.own) {
       const openBtn = document.createElement('button');
       openBtn.className = 'na';
@@ -5534,9 +5386,6 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, P
 // ─── UI/FeedView ─── END ────────────────────────────────────────────────────
 
 // ─── UI/BaseView ─── START ──────────────────────────────────────────────────
-/**
- * Экран «База»: список своих заметок, статистика, поиск, сортировка.
- */
 DI.register('BaseView', function (Store, DB, I18n, Utils, Config, bus) {
   let listEl, statsTotal, statsOpen, statsPriv, qEl, sortEl;
   let unsubs = [];
@@ -5663,13 +5512,6 @@ DI.register('BaseView', function (Store, DB, I18n, Utils, Config, bus) {
 // ─── UI/BaseView ─── END ────────────────────────────────────────────────────
 
 // ─── UI/NoteView ─── START ──────────────────────────────────────────────────
-/**
- * Полноэкранный просмотр заметки (#noteview).
- * Inline-редактирование с индикатором сохранения.
- * 
- * ИСПРАВЛЕНО: кнопка "Копия" заменена на "Пин" — при клике закрывает окно
- * и закрепляет заметку как контекст для поиска подобного в ленте.
- */
 DI.register('NoteView', function (DB, Notes, NoteActions, I18n, Utils, Toast, bus) {
   let root = null;
   let currentId = null;
@@ -5774,10 +5616,6 @@ DI.register('NoteView', function (DB, Notes, NoteActions, I18n, Utils, Toast, bu
     });
   }
 
-  /**
-   * Закрепляет заметку как контекст и закрывает окно.
-   * После возврата в ленту пользователь увидит похожие мысли.
-   */
   function pinAndClose() {
     if (!currentNote) {
       close();
@@ -5828,7 +5666,6 @@ DI.register('NoteView', function (DB, Notes, NoteActions, I18n, Utils, Toast, bu
       top.appendChild(tog);
     }
 
-    // Кнопка "Пин" (вместо "Копия")
     const pinBtn = document.createElement('button');
     pinBtn.className = 'nv-act';
     pinBtn.textContent = '◈ ' + I18n.t('btn.pin');
@@ -5920,9 +5757,6 @@ DI.register('NoteView', function (DB, Notes, NoteActions, I18n, Utils, Toast, bu
     bus.on('note:open', p => {
       if (p && p.id) open(p.id);
     });
-    
-    // Слушаем событие пина — Context модуль подпишется
-    // NoteView эмитит 'note:pin', Context ловит и делает setPin
   }
 
   function destroy() {
@@ -5935,8 +5769,8 @@ DI.register('NoteView', function (DB, Notes, NoteActions, I18n, Utils, Toast, bu
 
 // ─── UI/MenuView ─── START ──────────────────────────────────────────────────
 /**
- * Меню (кнопка #btn-menu) и переключение экранов Поток/База.
- * Использует CSS-классы вместо inline-стилей.
+ * Меню и переключение экранов.
+ * НОВОЕ: fullReset теперь очищает и Service Worker кэш.
  */
 DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboarding, DB, Embedder, Nostr) {
   let unsubs = [];
@@ -5995,10 +5829,18 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboar
         try { localStorage.clear(); } catch (_) {}
         try { sessionStorage.clear(); } catch (_) {}
         
+        // НОВОЕ: очистка всех кэшей, включая Service Worker
         if (window.caches) {
           caches.keys().then(names => {
             names.forEach(name => caches.delete(name));
           }).catch(() => {});
+        }
+        
+        // НОВОЕ: просим SW принудительно пересоздать кэш
+        if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
+          try {
+            navigator.serviceWorker.controller.postMessage('CLEAR_CACHE');
+          } catch (_) {}
         }
         
         Toast.show('ok', I18n.t('menu.fullreset.done'));
@@ -6140,15 +5982,14 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboar
 
 // ─── PLATFORM/TelegramAdapter ─── START ─────────────────────────────────────
 /**
- * Адаптер для работы в Telegram Mini App.
- * Определяет, открыто ли приложение в Telegram, и применяет тему/кнопки.
+ * НОВЫЙ МОДУЛЬ: интеграция с Telegram Mini Apps.
+ * Определяет, открыто ли приложение в Telegram, применяет тему, даёт haptic.
  */
 DI.register('TelegramAdapter', function (Config, bus, Logger) {
   let tg = null;
   let isActive = false;
 
   function init() {
-    // Проверяем, открыто ли в Telegram
     if (!window.Telegram || !window.Telegram.WebApp) {
       Logger.info('TelegramAdapter: не в Telegram, пропускаем');
       return;
@@ -6156,7 +5997,6 @@ DI.register('TelegramAdapter', function (Config, bus, Logger) {
 
     tg = window.Telegram.WebApp;
     
-    // Инициализируем
     try {
       tg.ready();
       tg.expand();
@@ -6167,15 +6007,12 @@ DI.register('TelegramAdapter', function (Config, bus, Logger) {
       return;
     }
 
-    // Применяем тему из Telegram
     applyTheme();
 
-    // Слушаем изменение темы
     tg.onEvent('themeChanged', () => {
       applyTheme();
     });
 
-    // Устанавливаем цвет заголовка
     try {
       tg.setHeaderColor(tg.colorScheme === 'dark' ? '#0a0a0b' : '#fafafa');
       tg.setBackgroundColor(tg.colorScheme === 'dark' ? '#0a0a0b' : '#fafafa');
@@ -6244,10 +6081,10 @@ DI.register('TelegramAdapter', function (Config, bus, Logger) {
   return { init, isTelegram, hapticFeedback, showAlert, showConfirm };
 }, ['Config', 'EventBus', 'Logger']);
 // ─── PLATFORM/TelegramAdapter ─── END ───────────────────────────────────────
-	
+
 // ─── BOOT ─── START ─────────────────────────────────────────────────────────
 /**
- * Точка входа. Резолвит и инициализирует все модули в правильном порядке.
+ * Точка входа. НОВОЕ: инициализирует TelegramAdapter до Context.
  */
 DI.register('Boot', function () {
   function mount() {
@@ -6257,16 +6094,16 @@ DI.register('Boot', function () {
     DI.resolve('I18n').init();
 
     // 2. Подписчики событий (без DOM)
-	DI.resolve('Progress').init();
-	DI.resolve('HeaderStatus').init();
-	DI.resolve('Feed').init();
-	DI.resolve('Influence').init();
-
-	// Telegram адаптер (должен быть до Context, чтобы тема применилась)
-	DI.resolve('TelegramAdapter').init();
-
-	// Context.init подписывается на 'note:pin' от NoteView
-	DI.resolve('Context').init();
+    DI.resolve('Progress').init();
+    DI.resolve('HeaderStatus').init();
+    DI.resolve('Feed').init();
+    DI.resolve('Influence').init();
+    
+    // НОВОЕ: Telegram адаптер ДО Context, чтобы тема применилась вовремя
+    DI.resolve('TelegramAdapter').init();
+    
+    // Context.init подписывается на 'note:pin' от NoteView
+    DI.resolve('Context').init();
 
     // 3. DOM-модули
     DI.resolve('Composer').init();
