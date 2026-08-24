@@ -1556,7 +1556,7 @@ body.ready #app { display: flex; }
 // ═══════════════════════════════════════════════════════════════════════════════
 // ВЕРСИЯ ПРИЛОЖЕНИЯ
 // ═══════════════════════════════════════════════════════════════════════════════
-const APP_VERSION = '0.5.2';
+const APP_VERSION = '0.5.3';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CORE/DI - ПРЕАМБУЛА
@@ -4759,6 +4759,20 @@ DI.register('HeaderStatus', function (bus, I18n, Embedder) {
   function init() {
     bind();
     
+    // НОВОЕ: клик по статусу сети для переподключения
+    if (netTxt) {
+      netTxt.style.cursor = 'pointer';
+      netTxt.addEventListener('click', () => {
+        try {
+          const NetService = DI.resolve('NetService');
+          if (NetService) {
+            NetService.stop();
+            setTimeout(() => NetService.start(), 500);
+          }
+        } catch (_) {}
+      });
+    }
+    
     unsubs.push(bus.on('ai:status', e => setAI(e.mode, e.percent)));
     unsubs.push(bus.on('net:status', e => setNet(e.status)));
     
@@ -4770,7 +4784,6 @@ DI.register('HeaderStatus', function (bus, I18n, Embedder) {
     setAI(Embedder.getMode());
     setNet('disconnected');
   }
-
   function destroy() {
     unsubs.forEach(u => {
       try { u(); } catch (_) {}
@@ -4979,6 +4992,37 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
       updateCounter();
       Context.setInput(ta.value);
     });
+
+    // НОВОЕ: обработка виртуальной клавиатуры
+    if (window.visualViewport) {
+      const vv = window.visualViewport;
+      const onVVResize = () => {
+        const composer = document.getElementById('composer');
+        if (!composer) return;
+        
+        // Высота, на которую клавиатура "съела" экран
+        const keyboardHeight = window.innerHeight - vv.height;
+        
+        if (keyboardHeight > 100) {
+          // Клавиатура открыта — поднимаем композер
+          composer.style.position = 'fixed';
+          composer.style.bottom = keyboardHeight + 'px';
+          composer.style.left = '14px';
+          composer.style.right = '14px';
+          composer.style.marginBottom = '0';
+        } else {
+          // Клавиатура закрыта — возвращаем как было
+          composer.style.position = '';
+          composer.style.bottom = '';
+          composer.style.left = '';
+          composer.style.right = '';
+          composer.style.marginBottom = '';
+        }
+      };
+      
+      vv.addEventListener('resize', onVVResize);
+      vv.addEventListener('scroll', onVVResize);
+    }
     
     ta.addEventListener('keydown', e => {
       if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
