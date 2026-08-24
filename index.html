@@ -1556,7 +1556,7 @@ body.ready #app { display: flex; }
 // ═══════════════════════════════════════════════════════════════════════════════
 // ВЕРСИЯ ПРИЛОЖЕНИЯ
 // ═══════════════════════════════════════════════════════════════════════════════
-const APP_VERSION = '0.5.6';
+const APP_VERSION = '0.5.7';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CORE/DI - ПРЕАМБУЛА
@@ -1605,14 +1605,17 @@ DI.register('Config', function () {
     threshold: 0.8,
     serendipity: 0.2,
     vectorSimilarityThreshold: 0.98,
-   relays: [
-     'wss://relay.primal.net',    // latency 295ms
-     'wss://nos.lol',              // latency 211ms — самый быстрый
-     'wss://relay.damus.io',       // latency 326ms
-     'wss://nostr.oxtr.dev',       // latency 341ms
-     'wss://relay.mostr.pub',      // latency 472ms
-     'wss://offchain.pub',         // latency 501ms
-   ],
+relays: [
+  // Топ-3: лучшие по всем показателям
+  'wss://relay.damus.io',       // 91/100, lat 285ms, ✓ EPH
+  'wss://relay.primal.net',     // 90/100, lat 224ms
+  'wss://offchain.pub',         // 90/100, lat 497ms, ✓ DEL
+  
+  // Запасные: быстрые и рабочие
+  'wss://nos.lol',              // 81/100, lat 194ms (самый быстрый)
+  'wss://nostr.oxtr.dev',       // 81/100, lat 159ms
+  'wss://relay.mostr.pub',      // 81/100, lat 507ms
+],
     kNote: 1,
     kQuery: 21000,
     kAnswer: 21001,
