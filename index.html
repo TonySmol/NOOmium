@@ -4864,7 +4864,7 @@ DI.register('HeaderStatus', function (bus, I18n, Embedder) {
  * Auto-resize для textarea.
  * ИСПРАВЛЕНО: добавлены лимиты длины поста с цветовой и текстовой индикацией.
  */
-DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils) {
+DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils, Config) {
   let ta, cnt, sendBtn, toggle;
   let sending = false;
   let editingId = null;
