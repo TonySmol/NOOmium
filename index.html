@@ -1590,7 +1590,7 @@ body.ready #app { display: flex; }
 // ═══════════════════════════════════════════════════════════════════════════════
 // ВЕРСИЯ ПРИЛОЖЕНИЯ
 // ═══════════════════════════════════════════════════════════════════════════════
-const APP_VERSION = '0.5.17';
+const APP_VERSION = '0.5.18';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CORE/DI - ПРЕАМБУЛА
@@ -5276,7 +5276,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
   function renderChildrenModal(children) {
     const body = document.createElement('div');
     body.style.cssText = 'display:flex;flex-direction:column;gap:8px;';
-    
+
     if (!children.length) {
       const empty = document.createElement('div');
       empty.style.cssText = 'color:var(--text-3);font-size:13px;text-align:center;padding:12px;';
@@ -5288,54 +5288,16 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
         item.className = 'nv-act';
         item.style.cssText = 'text-align:left;justify-content:flex-start;white-space:normal;height:auto;min-height:40px;width:100%;';
         item.textContent = (c.text || '').slice(0, 140);
-        
+
         item.addEventListener('click', () => {
           Modal.close();
           try { bus.emit('note:open', { id: c.id }); } catch (_) {}
         });
-        
+
         body.appendChild(item);
       });
     }
-        // Переключатель режима отображения
-    const displayGroup = document.createElement('div');
-    displayGroup.style.cssText = 'display:flex;flex-direction:column;gap:8px;padding-top:8px;border-top:1px solid var(--line);';
 
-    const displayLabel = document.createElement('span');
-    displayLabel.style.cssText = 'font-size:13px;font-weight:600;color:var(--text);';
-    displayLabel.textContent = I18n.t('ranking.display');
-
-    const displayToggle = document.createElement('div');
-    displayToggle.style.cssText = 'display:flex;gap:6px;';
-
-    const currentDisplay = Config.get('similarityDisplay', 'signal');
-
-    ['signal', 'percent'].forEach(mode => {
-      const btn = document.createElement('button');
-      btn.className = 'nv-act' + (mode === currentDisplay ? ' active' : '');
-      btn.style.cssText += 'flex:1;font-size:12px;';
-      btn.textContent = I18n.t('ranking.display.' + mode);
-      if (mode === currentDisplay) {
-        btn.style.borderColor = 'var(--amber)';
-        btn.style.color = 'var(--amber)';
-      }
-      btn.addEventListener('click', () => {
-        displayToggle.querySelectorAll('.nv-act').forEach(b => {
-          b.classList.remove('active');
-          b.style.borderColor = '';
-          b.style.color = '';
-        });
-        btn.classList.add('active');
-        btn.style.borderColor = 'var(--amber)';
-        btn.style.color = 'var(--amber)';
-        Config.set('similarityDisplay', mode);
-      });
-      displayToggle.appendChild(btn);
-    });
-
-    displayGroup.appendChild(displayLabel);
-    displayGroup.appendChild(displayToggle);
-    body.appendChild(displayGroup);
     Modal.open({
       title: I18n.t('inf.children') + (children.length ? ' · ' + children.length : ''),
       body: body,
@@ -6033,9 +5995,8 @@ DI.register('NoteView', function (DB, Notes, NoteActions, I18n, Utils, Toast, bu
 // ─── UI/MenuView ─── START ──────────────────────────────────────────────────
 /**
  * Меню и переключение экранов.
- * НОВОЕ: 
- * - Исправлен баг с `indexedDB.databases` в Safari (проверка typeof === 'function')
- * - Добавлено модальное окно настроек ранжирования с ползунками
+ * - Настройки ранжирования: ползунки + режим отображения сходства.
+ * - Исправлен баг с `indexedDB.databases` в Safari.
  */
 DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboarding, DB, Embedder, Nostr) {
   let unsubs = [];
@@ -6047,37 +6008,33 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboar
 
   function setView(view) {
     Store.setState({ view });
-    
+
     const isBase = view === 'base';
-    
+
     ['ctx-banner', 'seg', 'feed-wrap', 'btn-history', 'composer'].forEach(id => {
       const el = document.getElementById(id);
       if (el) el.classList.toggle('hidden', isBase);
     });
-    
+
     const base = document.getElementById('base');
     if (base) base.classList.toggle('on', isBase);
-    
+
     try { bus.emit('view:changed', { view }); } catch (_) {}
-    
+
     viewSync();
   }
 
   function viewSync() {
     const view = Store.get('view');
-    
+
     document.querySelectorAll('.tab-b').forEach(b =>
       b.classList.toggle('on', b.getAttribute('data-v') === view)
     );
-    
+
     const bb = document.getElementById('btn-base');
     if (bb) bb.classList.toggle('active', view === 'base');
   }
 
-  /**
-   * Модальное окно настроек ранжирования.
-   * Три ползунка: порог релевантности, диапазон озарений, порог дубликатов.
-   */
   function openRankingSettings() {
     const body = document.createElement('div');
     body.style.cssText = 'display:flex;flex-direction:column;gap:20px;padding:4px 0;';
@@ -6085,21 +6042,27 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboar
     const sliders = [
       {
         key: 'threshold',
-        min: 0.50, max: 0.95, step: 0.01,
+        min: 0.70,
+        max: 0.95,
+        step: 0.01,
         label: I18n.t('ranking.threshold'),
         hint: I18n.t('ranking.threshold.hint'),
         color: 'var(--amber)',
       },
       {
         key: 'serendipity',
-        min: 0.05, max: 0.30, step: 0.01,
+        min: 0.03,
+        max: 0.15,
+        step: 0.01,
         label: I18n.t('ranking.serendipity'),
         hint: I18n.t('ranking.serendipity.hint'),
         color: 'var(--teal)',
       },
       {
         key: 'vectorSimilarityThreshold',
-        min: 0.90, max: 0.99, step: 0.01,
+        min: 0.88,
+        max: 0.99,
+        step: 0.01,
         label: I18n.t('ranking.similarity'),
         hint: I18n.t('ranking.similarity.hint'),
         color: 'var(--rose)',
@@ -6108,71 +6071,122 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboar
 
     const valueEls = {};
 
-    sliders.forEach(({ key, min, max, step, label, hint, color }) => {
-      const current = Config.get(key, min);
-      
+    sliders.forEach(cfg => {
+      const current = Number(Config.get(cfg.key, cfg.min));
+      const safe = Number.isFinite(current) ? current : cfg.min;
+
       const group = document.createElement('div');
       group.style.cssText = 'display:flex;flex-direction:column;gap:8px;';
-      
+
       const labelRow = document.createElement('div');
       labelRow.style.cssText = 'display:flex;justify-content:space-between;align-items:center;';
-      
+
       const lbl = document.createElement('span');
       lbl.style.cssText = 'font-size:13px;font-weight:600;color:var(--text);';
-      lbl.textContent = label;
-      
+      lbl.textContent = cfg.label;
+
       const val = document.createElement('span');
-      val.style.cssText = `font:600 13px var(--mono);color:${color};`;
-      val.textContent = current.toFixed(2);
-      
+      val.style.cssText = 'font:600 13px var(--mono);color:' + cfg.color + ';';
+      val.textContent = safe.toFixed(2);
+
       labelRow.appendChild(lbl);
       labelRow.appendChild(val);
-      
+
       const slider = document.createElement('input');
       slider.type = 'range';
-      slider.min = String(min);
-      slider.max = String(max);
-      slider.step = String(step);
-      slider.value = String(current);
-      slider.style.cssText = `
-        width:100%;
-        accent-color:${color};
-        height:6px;
-        cursor:pointer;
-      `;
-      
+      slider.min = String(cfg.min);
+      slider.max = String(cfg.max);
+      slider.step = String(cfg.step);
+      slider.value = String(safe);
+      slider.style.cssText = 'width:100%;accent-color:' + cfg.color + ';height:6px;cursor:pointer;';
+
       const hintEl = document.createElement('div');
       hintEl.style.cssText = 'font-size:11px;color:var(--text-3);line-height:1.4;';
-      hintEl.textContent = hint;
-      
+      hintEl.textContent = cfg.hint;
+
       slider.addEventListener('input', () => {
         const v = parseFloat(slider.value);
-        val.textContent = v.toFixed(2);
+        val.textContent = Number.isFinite(v) ? v.toFixed(2) : cfg.min.toFixed(2);
       });
-      
-      valueEls[key] = { slider, val };
-      
+
+      valueEls[cfg.key] = { slider, val };
+
       group.appendChild(labelRow);
       group.appendChild(slider);
       group.appendChild(hintEl);
       body.appendChild(group);
     });
 
+    // Режим отображения сходства: signal / percent
+    let pendingDisplay = Config.get('similarityDisplay', 'signal');
+    if (pendingDisplay !== 'signal' && pendingDisplay !== 'percent') {
+      pendingDisplay = 'signal';
+    }
+
+    const displayGroup = document.createElement('div');
+    displayGroup.style.cssText = 'display:flex;flex-direction:column;gap:8px;padding-top:10px;border-top:1px solid var(--line);';
+
+    const displayLabel = document.createElement('span');
+    displayLabel.style.cssText = 'font-size:13px;font-weight:600;color:var(--text);';
+    displayLabel.textContent = I18n.t('ranking.display');
+
+    const displayToggle = document.createElement('div');
+    displayToggle.style.cssText = 'display:flex;gap:6px;';
+
+    function paintDisplayButtons() {
+      displayToggle.querySelectorAll('button').forEach(btn => {
+        const mode = btn.getAttribute('data-display-mode');
+        const on = mode === pendingDisplay;
+
+        btn.classList.toggle('active', on);
+        btn.style.borderColor = on ? 'var(--amber)' : '';
+        btn.style.color = on ? 'var(--amber)' : '';
+      });
+    }
+
+    ['signal', 'percent'].forEach(mode => {
+      const btn = document.createElement('button');
+      btn.className = 'nv-act';
+      btn.setAttribute('data-display-mode', mode);
+      btn.style.cssText = 'flex:1;font-size:12px;';
+      btn.textContent = I18n.t('ranking.display.' + mode);
+
+      btn.addEventListener('click', () => {
+        pendingDisplay = mode;
+        paintDisplayButtons();
+      });
+
+      displayToggle.appendChild(btn);
+    });
+
+    paintDisplayButtons();
+
+    displayGroup.appendChild(displayLabel);
+    displayGroup.appendChild(displayToggle);
+    body.appendChild(displayGroup);
+
     Modal.open({
       title: I18n.t('menu.ranking'),
       body,
       buttons: [
-        { text: I18n.t('btn.cancel'), onClick: () => Modal.close() },
+        {
+          text: I18n.t('btn.cancel'),
+          onClick: () => Modal.close(),
+        },
         {
           text: I18n.t('btn.save'),
           primary: true,
           onClick: () => {
-            sliders.forEach(({ key }) => {
-              const v = parseFloat(valueEls[key].slider.value);
-              Config.set(key, v);
+            sliders.forEach(cfg => {
+              const v = parseFloat(valueEls[cfg.key].slider.value);
+              if (Number.isFinite(v)) Config.set(cfg.key, v);
             });
-            Toast.show('ok', I18n.t('ranking.saved'));
+
+            Config.set('similarityDisplay', pendingDisplay);
+
             try { bus.emit('db:change'); } catch (_) {}
+
+            Toast.show('ok', I18n.t('ranking.saved'));
             Modal.close();
           },
         },
@@ -6181,11 +6195,22 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboar
           danger: true,
           onClick: () => {
             const d = Config.defaults();
-            sliders.forEach(({ key }) => {
-              Config.set(key, d[key]);
-              valueEls[key].slider.value = String(d[key]);
-              valueEls[key].val.textContent = d[key].toFixed(2);
+
+            sliders.forEach(cfg => {
+              const def = Number(d[cfg.key]);
+              const safe = Number.isFinite(def) ? def : cfg.min;
+
+              Config.set(cfg.key, safe);
+              valueEls[cfg.key].slider.value = String(safe);
+              valueEls[cfg.key].val.textContent = safe.toFixed(2);
             });
+
+            pendingDisplay = d.similarityDisplay === 'percent' ? 'percent' : 'signal';
+            Config.set('similarityDisplay', pendingDisplay);
+            paintDisplayButtons();
+
+            try { bus.emit('db:change'); } catch (_) {}
+
             Toast.show('ok', I18n.t('ranking.reset'));
           },
         },
@@ -6193,18 +6218,14 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboar
     });
   }
 
-  /**
-   * Полный сброс. ИСПРАВЛЕНО: проверка `typeof indexedDB.databases === 'function'`
-   * для совместимости с Safari, где `databases` может отсутствовать.
-   */
   function fullReset() {
     Modal.confirm(
       I18n.t('menu.fullreset'),
       I18n.t('menu.fullreset.confirm'),
       () => {
         try { Nostr.close(); } catch (_) {}
-        
-        // ИСПРАВЛЕНИЕ: в Safari `indexedDB.databases` может быть не функцией
+
+        // Safari-safe: `indexedDB.databases` может отсутствовать или не быть функцией
         if (window.indexedDB && typeof indexedDB.databases === 'function') {
           indexedDB.databases().then(dbs => {
             dbs.forEach(dbInfo => {
@@ -6214,31 +6235,28 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboar
             });
           }).catch(() => {});
         } else if (window.indexedDB) {
-          // Fallback для браузеров без `databases()` API
           try {
             indexedDB.deleteDatabase(Config.get('dbName', 'noomium_v2'));
           } catch (_) {}
         }
-        
+
         try { localStorage.clear(); } catch (_) {}
         try { sessionStorage.clear(); } catch (_) {}
-        
-        // Очистка всех кэшей, включая Service Worker
+
         if (window.caches) {
           caches.keys().then(names => {
             names.forEach(name => caches.delete(name));
           }).catch(() => {});
         }
-        
-        // Просим SW принудительно пересоздать кэш
+
         if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
           try {
             navigator.serviceWorker.controller.postMessage('CLEAR_CACHE');
           } catch (_) {}
         }
-        
+
         Toast.show('ok', I18n.t('menu.fullreset.done'));
-        
+
         setTimeout(() => {
           window.location.reload();
         }, 1500);
@@ -6280,7 +6298,6 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboar
     });
     body.appendChild(langBtn);
 
-    // НОВОЕ: Настройки ранжирования
     const rankingBtn = document.createElement('button');
     rankingBtn.className = 'nv-act';
     rankingBtn.textContent = '⚙ ' + I18n.t('menu.ranking');
@@ -6355,21 +6372,21 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboar
 
     unsubs.push(Store.subscribe(s => s.view, viewSync));
     unsubs.push(bus.on('i18n:change', viewSync));
-    
+
     unsubs.push(bus.on('db:change', () => {
       try {
         const Provenance = DI.resolve('Provenance');
         if (Provenance && Provenance.clearCache) Provenance.clearCache();
       } catch (_) {}
     }));
-    
+
     unsubs.push(bus.on('db:cache', () => {
       try {
         const Provenance = DI.resolve('Provenance');
         if (Provenance && Provenance.clearCache) Provenance.clearCache();
       } catch (_) {}
     }));
-    
+
     viewSync();
   }
 
