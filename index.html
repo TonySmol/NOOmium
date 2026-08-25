@@ -2778,7 +2778,7 @@ DI.register('DB', function (Config, bus, Logger) {
 }, ['Config', 'EventBus', 'Logger']);
 // ─── DATA/DB ─── END ────────────────────────────────────────────────────────
 
-/ ─── AI/Embedder ─── START ──────────────────────────────────────────────────
+// ─── AI/Embedder ─── START ──────────────────────────────────────────────────
 DI.register('Embedder', function (Config, bus, Logger) {
   const workerCode = `
 let extractor = null;
