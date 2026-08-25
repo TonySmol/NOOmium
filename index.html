@@ -1556,7 +1556,7 @@ body.ready #app { display: flex; }
 // ═══════════════════════════════════════════════════════════════════════════════
 // ВЕРСИЯ ПРИЛОЖЕНИЯ
 // ═══════════════════════════════════════════════════════════════════════════════
-const APP_VERSION = '0.5.14';
+const APP_VERSION = '0.5.15';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CORE/DI - ПРЕАМБУЛА
@@ -1603,8 +1603,8 @@ DI.register('Config', function () {
     aiCacheLimit: 300,
     aiEmbedTimeout: 15000,
     // НОВОЕ: оптимизированные пороги для Granite R2 (реальный диапазон 0.55-0.93)
-    threshold: 0.70,
-    serendipity: 0.12,
+    threshold: 0.81,
+    serendipity: 0.7,
     vectorSimilarityThreshold: 0.95,
     relays: [
       'wss://relay.damus.io',
