@@ -5227,7 +5227,7 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
 // ─── UI/Composer ─── END ────────────────────────────────────────────────────
 
 // ─── UI/FeedView ─── START ──────────────────────────────────────────────────
-DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, Provenance, Modal, NetService) {
+DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Influence, Provenance, Modal, NetService) {
   let feedEl, emptyEl, emptyT, segBar, ctxBanner, ctxSrc, ctxTxt, ctxX;
   let cLocal, cWorld, cSeren, histBtn;
   let unsubs = [];
