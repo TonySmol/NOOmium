@@ -1556,7 +1556,7 @@ body.ready #app { display: flex; }
 // ═══════════════════════════════════════════════════════════════════════════════
 // ВЕРСИЯ ПРИЛОЖЕНИЯ
 // ═══════════════════════════════════════════════════════════════════════════════
-const APP_VERSION = '0.5.15';
+const APP_VERSION = '0.5.16';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CORE/DI - ПРЕАМБУЛА
@@ -1589,7 +1589,7 @@ const DI = (() => {
 // ─── CORE/Config ─── START ──────────────────────────────────────────────────
 DI.register('Config', function () {
   const KEY = 'noomium:cfg';
-  const SCHEMA_VERSION = 6; // ← повышено до 6 для новых параметров ранжирования
+  const SCHEMA_VERSION = 6; // 
 
   const defaults = Object.freeze({
     schemaVersion: SCHEMA_VERSION,
@@ -1602,9 +1602,9 @@ DI.register('Config', function () {
     dim: 384,
     aiCacheLimit: 300,
     aiEmbedTimeout: 15000,
-    // НОВОЕ: оптимизированные пороги для Granite R2 (реальный диапазон 0.55-0.93)
+    // НОВОЕ: оптимизированные пороги для Granite R2
     threshold: 0.81,
-    serendipity: 0.7,
+    serendipity: 0.07,
     vectorSimilarityThreshold: 0.95,
     relays: [
       'wss://relay.damus.io',
