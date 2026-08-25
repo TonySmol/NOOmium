@@ -1556,7 +1556,7 @@ body.ready #app { display: flex; }
 // ═══════════════════════════════════════════════════════════════════════════════
 // ВЕРСИЯ ПРИЛОЖЕНИЯ
 // ═══════════════════════════════════════════════════════════════════════════════
-const APP_VERSION = '0.5.15';
+const APP_VERSION = '0.5.11';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CORE/DI - ПРЕАМБУЛА
@@ -1589,7 +1589,7 @@ const DI = (() => {
 // ─── CORE/Config ─── START ──────────────────────────────────────────────────
 DI.register('Config', function () {
   const KEY = 'noomium:cfg';
-  const SCHEMA_VERSION = 4; // ← повышено до 4 для миграции релеёв
+  const SCHEMA_VERSION = 5; // ← повышено до 5 для миграции модели
 
   const defaults = Object.freeze({
     schemaVersion: SCHEMA_VERSION,
@@ -1598,24 +1598,24 @@ DI.register('Config', function () {
     lang: null,
     onboarded: false,
     logLevel: 'info',
-    model: 'ibm-granite/granite-embedding-97m-multilingual-r2',
+    model: 'onnx-community/granite-embedding-97m-multilingual-r2-ONNX', // ← ГРАНИТ!
     dim: 384,
     aiCacheLimit: 300,
     aiEmbedTimeout: 15000,
     threshold: 0.65,
     serendipity: 0.25,
     vectorSimilarityThreshold: 0.98,
-relays: [
-  // Топ-3: лучшие по всем показателям
-  'wss://relay.damus.io',       // 91/100, lat 285ms, ✓ EPH
-  'wss://relay.primal.net',     // 90/100, lat 224ms
-  'wss://offchain.pub',         // 90/100, lat 497ms, ✓ DEL
-  
-  // Запасные: быстрые и рабочие
-  'wss://nos.lol',              // 81/100, lat 194ms (самый быстрый)
-  'wss://nostr.oxtr.dev',       // 81/100, lat 159ms
-  'wss://relay.mostr.pub',      // 81/100, lat 507ms
-],
+    relays: [
+      // Топ-3: лучшие по всем показателям
+      'wss://relay.damus.io',       // 91/100, lat 285ms, ✓ EPH
+      'wss://relay.primal.net',     // 90/100, lat 224ms
+      'wss://offchain.pub',         // 90/100, lat 497ms, ✓ DEL
+      
+      // Запасные: быстрые и рабочие
+      'wss://nos.lol',              // 81/100, lat 194ms (самый быстрый)
+      'wss://nostr.oxtr.dev',       // 81/100, lat 159ms
+      'wss://relay.mostr.pub',      // 81/100, lat 507ms
+    ],
     kNote: 1,
     kQuery: 21000,
     kAnswer: 21001,
@@ -1663,11 +1663,16 @@ relays: [
       s.relays = defaults.relays.slice();
       return s;
     },
-    // НОВАЯ миграция с версии 2/3 на 4: заменяем старый короткий список на расширенный
     3: s => {
-      // Если у пользователя кастомный список из 1-2 релеёв — заменяем на расширенный
       if (!Array.isArray(s.relays) || s.relays.length < 5) {
         s.relays = defaults.relays.slice();
+      }
+      return s;
+    },
+    4: s => {
+      // Миграция с MiniLM на Granite R2
+      if (s.model === 'Xenova/paraphrase-multilingual-MiniLM-L12-v2') {
+        s.model = defaults.model;
       }
       return s;
     },
@@ -2773,7 +2778,7 @@ DI.register('DB', function (Config, bus, Logger) {
 }, ['Config', 'EventBus', 'Logger']);
 // ─── DATA/DB ─── END ────────────────────────────────────────────────────────
 
-// ─── AI/Embedder ─── START ──────────────────────────────────────────────────
+/ ─── AI/Embedder ─── START ──────────────────────────────────────────────────
 DI.register('Embedder', function (Config, bus, Logger) {
   const workerCode = `
 let extractor = null;
@@ -2789,35 +2794,34 @@ self.onmessage = async function (e) {
       mod.env.allowLocalModels = false;
       mod.env.useBrowserCache = true;
       
-extractor = await mod.pipeline('feature-extraction', msg.model, {
-  model_file_name: 'onnx/model_quint8_avx2.onnx',
-  dtype: 'q8',
-  progress_callback: function (p) {
-    if (p.status === 'progress') {
-      const fileName = p.file || p.name || 'unknown';
-      files.set(fileName, { 
-        loaded: p.loaded || 0, 
-        total: p.total || 0,
-        file: fileName
+      extractor = await mod.pipeline('feature-extraction', msg.model, {
+        dtype: 'q8',
+        progress_callback: function (p) {
+          if (p.status === 'progress') {
+            const fileName = p.file || p.name || 'unknown';
+            files.set(fileName, { 
+              loaded: p.loaded || 0, 
+              total: p.total || 0,
+              file: fileName
+            });
+            
+            let totalLoaded = 0, totalSize = 0;
+            files.forEach(f => { 
+              totalLoaded += f.loaded; 
+              if (f.total > 0) totalSize += f.total; 
+            });
+            
+            const pct = totalSize > 0 ? (totalLoaded / totalSize) * 100 : 0;
+            self.postMessage({ 
+              type: 'progress', 
+              pct,
+              loadedMB: (totalLoaded / 1024 / 1024).toFixed(1),
+              totalMB: totalSize > 0 ? (totalSize / 1024 / 1024).toFixed(1) : null,
+              model: msg.model
+            });
+          }
+        }
       });
-      
-      let totalLoaded = 0, totalSize = 0;
-      files.forEach(f => { 
-        totalLoaded += f.loaded; 
-        if (f.total > 0) totalSize += f.total; 
-      });
-      
-      const pct = totalSize > 0 ? (totalLoaded / totalSize) * 100 : 0;
-      self.postMessage({ 
-        type: 'progress', 
-        pct,
-        loadedMB: (totalLoaded / 1024 / 1024).toFixed(1),
-        totalMB: totalSize > 0 ? (totalSize / 1024 / 1024).toFixed(1) : null,
-        model: msg.model
-      });
-    }
-  }
-});
       
       ready = true;
       self.postMessage({ type: 'ready' });
@@ -3026,7 +3030,7 @@ extractor = await mod.pipeline('feature-extraction', msg.model, {
 
       worker.postMessage({
         type: 'load',
-        model: Config.get('model', 'Xenova/paraphrase-multilingual-MiniLM-L12-v2'),
+        model: Config.get('model', 'onnx-community/granite-embedding-97m-multilingual-r2-ONNX'),
       });
     });
   }
