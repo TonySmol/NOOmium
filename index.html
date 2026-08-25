@@ -1556,7 +1556,7 @@ body.ready #app { display: flex; }
 // ═══════════════════════════════════════════════════════════════════════════════
 // ВЕРСИЯ ПРИЛОЖЕНИЯ
 // ═══════════════════════════════════════════════════════════════════════════════
-const APP_VERSION = '0.5.14';
+const APP_VERSION = '0.5.15';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CORE/DI - ПРЕАМБУЛА
@@ -2789,8 +2789,9 @@ self.onmessage = async function (e) {
       mod.env.allowLocalModels = false;
       mod.env.useBrowserCache = true;
       
-      extractor = await mod.pipeline('feature-extraction', msg.model, {
-  quantized: false,  // Загружаем полную версию model.onnx
+extractor = await mod.pipeline('feature-extraction', msg.model, {
+  model_file_name: 'onnx/model_quint8_avx2.onnx',
+  dtype: 'q8',
   progress_callback: function (p) {
     if (p.status === 'progress') {
       const fileName = p.file || p.name || 'unknown';
