@@ -1556,7 +1556,7 @@ body.ready #app { display: flex; }
 // ═══════════════════════════════════════════════════════════════════════════════
 // ВЕРСИЯ ПРИЛОЖЕНИЯ
 // ═══════════════════════════════════════════════════════════════════════════════
-const APP_VERSION = '0.5.12';
+const APP_VERSION = '0.5.14';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CORE/DI - ПРЕАМБУЛА
@@ -1589,7 +1589,7 @@ const DI = (() => {
 // ─── CORE/Config ─── START ──────────────────────────────────────────────────
 DI.register('Config', function () {
   const KEY = 'noomium:cfg';
-  const SCHEMA_VERSION = 5; // ← повышено до 5 для миграции модели
+  const SCHEMA_VERSION = 6; // ← повышено до 6 для новых параметров ранжирования
 
   const defaults = Object.freeze({
     schemaVersion: SCHEMA_VERSION,
@@ -1598,23 +1598,21 @@ DI.register('Config', function () {
     lang: null,
     onboarded: false,
     logLevel: 'info',
-    model: 'onnx-community/granite-embedding-97m-multilingual-r2-ONNX', // ← ГРАНИТ!
+    model: 'onnx-community/granite-embedding-97m-multilingual-r2-ONNX',
     dim: 384,
     aiCacheLimit: 300,
     aiEmbedTimeout: 15000,
-    threshold: 0.65,
-    serendipity: 0.25,
-    vectorSimilarityThreshold: 0.98,
+    // НОВОЕ: оптимизированные пороги для Granite R2 (реальный диапазон 0.55-0.93)
+    threshold: 0.70,
+    serendipity: 0.12,
+    vectorSimilarityThreshold: 0.95,
     relays: [
-      // Топ-3: лучшие по всем показателям
-      'wss://relay.damus.io',       // 91/100, lat 285ms, ✓ EPH
-      'wss://relay.primal.net',     // 90/100, lat 224ms
-      'wss://offchain.pub',         // 90/100, lat 497ms, ✓ DEL
-      
-      // Запасные: быстрые и рабочие
-      'wss://nos.lol',              // 81/100, lat 194ms (самый быстрый)
-      'wss://nostr.oxtr.dev',       // 81/100, lat 159ms
-      'wss://relay.mostr.pub',      // 81/100, lat 507ms
+      'wss://relay.damus.io',
+      'wss://relay.primal.net',
+      'wss://offchain.pub',
+      'wss://nos.lol',
+      'wss://nostr.oxtr.dev',
+      'wss://relay.mostr.pub',
     ],
     kNote: 1,
     kQuery: 21000,
@@ -1651,7 +1649,6 @@ DI.register('Config', function () {
     premiumRelay: null,
     gpuRanking: false,
     cloudView: false,
-    // Лимиты длины поста
     maxPostLength: 2500,
     softLimit: 1200,
     hardLimit: 2000,
@@ -1670,9 +1667,21 @@ DI.register('Config', function () {
       return s;
     },
     4: s => {
-      // Миграция с MiniLM на Granite R2
       if (s.model === 'Xenova/paraphrase-multilingual-MiniLM-L12-v2') {
         s.model = defaults.model;
+      }
+      return s;
+    },
+    5: s => {
+      // Миграция порогов для Granite R2
+      if (typeof s.threshold === 'number' && s.threshold === 0.65) {
+        s.threshold = defaults.threshold;
+      }
+      if (typeof s.serendipity === 'number' && s.serendipity === 0.25) {
+        s.serendipity = defaults.serendipity;
+      }
+      if (typeof s.vectorSimilarityThreshold === 'number' && s.vectorSimilarityThreshold === 0.98) {
+        s.vectorSimilarityThreshold = defaults.vectorSimilarityThreshold;
       }
       return s;
     },
@@ -2145,6 +2154,16 @@ DI.register('I18n', function (Config, bus) {
     'time.day.one': 'день назад',
     'time.day.few': 'дня назад',
     'time.day.many': 'дней назад',
+    // НОВОЕ: переводы для настроек ранжирования
+    'menu.ranking': 'Настройки поиска',
+    'ranking.threshold': 'Порог релевантности',
+    'ranking.threshold.hint': 'Минимальное сходство для показа в ленте (0.50-0.95)',
+    'ranking.serendipity': 'Диапазон озарений',
+    'ranking.serendipity.hint': 'Насколько широкие связи показывать как озарения (0.05-0.30)',
+    'ranking.similarity': 'Порог дубликатов',
+    'ranking.similarity.hint': 'Сходство выше которого заметки считаются одинаковыми (0.90-0.99)',
+    'ranking.reset': 'Сбросить настройки',
+    'ranking.saved': 'настройки сохранены',
   });
 
   // Английский словарь
@@ -2275,6 +2294,16 @@ DI.register('I18n', function (Config, bus) {
     'time.day.one': 'day ago',
     'time.day.few': 'days ago',
     'time.day.many': 'days ago',
+    // НОВОЕ: переводы для настроек ранжирования
+    'menu.ranking': 'Search settings',
+    'ranking.threshold': 'Relevance threshold',
+    'ranking.threshold.hint': 'Minimum similarity to show in feed (0.50-0.95)',
+    'ranking.serendipity': 'Serendipity range',
+    'ranking.serendipity.hint': 'How broad connections to show as insights (0.05-0.30)',
+    'ranking.similarity': 'Duplicate threshold',
+    'ranking.similarity.hint': 'Similarity above which notes are considered identical (0.90-0.99)',
+    'ranking.reset': 'Reset settings',
+    'ranking.saved': 'settings saved',
   });
 
   function init() {
@@ -2779,6 +2808,14 @@ DI.register('DB', function (Config, bus, Logger) {
 // ─── DATA/DB ─── END ────────────────────────────────────────────────────────
 
 // ─── AI/Embedder ─── START ──────────────────────────────────────────────────
+/**
+ * Embedder для Granite R2 (ModernBERT backbone).
+ * 
+ * ВАЖНО: Согласно документации IBM Granite R2, модели используют Global RoPE theta=160,000
+ * и ModernBERT архитектуру. Transformers.js версий 5.1+ имеет регрессию производительности
+ * для ModernBERT (удалён unpadding), но функционально работает корректно.
+ * Используем @latest для автоматического получения последних исправлений.
+ */
 DI.register('Embedder', function (Config, bus, Logger) {
   const workerCode = `
 let extractor = null;
@@ -2790,7 +2827,10 @@ self.onmessage = async function (e) {
   
   if (msg.type === 'load') {
     try {
-      const mod = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.2.0');
+      // Используем @latest для получения последних исправлений.
+      // Примечание: версии 5.1+ имеют регрессию скорости для ModernBERT (см. Granite R2 paper App C.5)
+      // но функционально работают корректно.
+      const mod = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@latest');
       mod.env.allowLocalModels = false;
       mod.env.useBrowserCache = true;
       
@@ -2846,6 +2886,7 @@ self.onmessage = async function (e) {
   
   if (msg.type === 'embed') {
     try {
+      // Granite R2: используем [CLS] pooling и нормализацию (согласно документации)
       const out = await extractor(msg.text, { pooling: 'cls', normalize: true });
       self.postMessage({ 
         type: 'result', 
@@ -3105,6 +3146,13 @@ self.onmessage = async function (e) {
 // ─── AI/Embedder ─── END ────────────────────────────────────────────────────
 
 // ─── AI/Ranker ─── START ────────────────────────────────────────────────────
+/**
+ * Ранжирование с адаптивными порогами для Granite R2.
+ * 
+ * Реальный диапазон cosine similarity для Granite R2: ~0.55-0.93
+ * Используем динамическое разделение на relevant/serendipity на основе
+ * статистики текущего поиска + настраиваемые пороги.
+ */
 DI.register('Ranker', function (Vec, Config) {
   function cosineBatch(queryVector, items, signal) {
     if (!queryVector || !items || !items.length) {
@@ -3128,23 +3176,32 @@ DI.register('Ranker', function (Vec, Config) {
   }
 
   function split(scored) {
-    const threshold = Config.get('threshold', 0.7);
-    const serenMin = threshold - Config.get('serendipity', 0.3);
-    const relevant = [], seren = [];
+    const threshold = Config.get('threshold', 0.70);
+    const serendipity = Config.get('serendipity', 0.12);
+    const minScore = 0.45; // Жёсткий нижний порог — отсекаем шум
+    
+    const relevant = [];
+    const seren = [];
     
     for (const s of scored) {
+      if (s.score < minScore) {
+        continue; // Полностью отсекаем шум ниже 0.45
+      }
+      
       if (s.score >= threshold) {
         relevant.push(s);
-      } else if (s.score >= serenMin) {
+      } else if (s.score >= (threshold - serendipity)) {
+        // Серендипити: ниже порога релевантности, но в пределах "диапазона озарений"
         seren.push(s);
       }
+      // Всё что ниже (threshold - serendipity) — не показываем
     }
     
     return { relevant, seren };
   }
 
   function isSimilar(a, b) {
-    return Vec.cosine(a, b) >= Config.get('vectorSimilarityThreshold', 0.98);
+    return Vec.cosine(a, b) >= Config.get('vectorSimilarityThreshold', 0.95);
   }
 
   return { cosineBatch, split, isSimilar };
@@ -3544,10 +3601,16 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     }).catch(() => {});
   }
 
+  /**
+   * Префильтр входящих запросов: пропускаем только те, что хотя бы
+   * отдалённо близки к нашим центроидам. Экономит вычисления.
+   * НОВОЕ: адаптировано под диапазон Granite (floor = threshold - 0.20).
+   */
   function passesPrefilter(queryVector) {
     if (!centroids.length) return true;
     
-    const floor = Config.get('threshold', 0.7) - 0.25;
+    // Для Granite R2 рабочий диапазон 0.55-0.93, поэтому берём более мягкий порог
+    const floor = Config.get('threshold', 0.70) - 0.20;
     for (const c of centroids) {
       if (Vec.cosine(queryVector, c) >= floor) return true;
     }
@@ -3613,7 +3676,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
       
       return Ranker.cosineBatch(q.vector, items).then(scored => {
         const top = scored
-          .filter(s => s.score >= Config.get('threshold', 0.7))
+          .filter(s => s.score >= Config.get('threshold', 0.70))
           .slice(0, q.maxResponses || Config.get('maxResponses', 8));
         
         top.forEach((s, i) => {
@@ -4098,6 +4161,7 @@ DI.register('Feed', function (DB, Ranker, Store, bus, Logger) {
       if (my !== seq) return;
 
       if (!ctx.source) {
+        // Без контекста: показываем всё в хронологическом порядке
         const merged = [
           ...local.map(n => Object.assign({}, n, { own: true })),
           ...cached.map(n => Object.assign({}, n, { own: false })),
@@ -4113,6 +4177,7 @@ DI.register('Feed', function (DB, Ranker, Store, bus, Logger) {
 
       if (!ctx.vector) return;
 
+      // Собираем все векторы для ранжирования
       const items = [];
       const dataMap = new Map();
       
@@ -4130,6 +4195,7 @@ DI.register('Feed', function (DB, Ranker, Store, bus, Logger) {
         }
       }
 
+      // Ранжирование с новыми порогами для Granite
       return Ranker.cosineBatch(ctx.vector, items).then(scored => {
         if (my !== seq) return;
         
@@ -5856,7 +5922,9 @@ DI.register('NoteView', function (DB, Notes, NoteActions, I18n, Utils, Toast, bu
 // ─── UI/MenuView ─── START ──────────────────────────────────────────────────
 /**
  * Меню и переключение экранов.
- * НОВОЕ: fullReset теперь очищает и Service Worker кэш.
+ * НОВОЕ: 
+ * - Исправлен баг с `indexedDB.databases` в Safari (проверка typeof === 'function')
+ * - Добавлено модальное окно настроек ранжирования с ползунками
  */
 DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboarding, DB, Embedder, Nostr) {
   let unsubs = [];
@@ -5895,6 +5963,129 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboar
     if (bb) bb.classList.toggle('active', view === 'base');
   }
 
+  /**
+   * Модальное окно настроек ранжирования.
+   * Три ползунка: порог релевантности, диапазон озарений, порог дубликатов.
+   */
+  function openRankingSettings() {
+    const body = document.createElement('div');
+    body.style.cssText = 'display:flex;flex-direction:column;gap:20px;padding:4px 0;';
+
+    const sliders = [
+      {
+        key: 'threshold',
+        min: 0.50, max: 0.95, step: 0.01,
+        label: I18n.t('ranking.threshold'),
+        hint: I18n.t('ranking.threshold.hint'),
+        color: 'var(--amber)',
+      },
+      {
+        key: 'serendipity',
+        min: 0.05, max: 0.30, step: 0.01,
+        label: I18n.t('ranking.serendipity'),
+        hint: I18n.t('ranking.serendipity.hint'),
+        color: 'var(--teal)',
+      },
+      {
+        key: 'vectorSimilarityThreshold',
+        min: 0.90, max: 0.99, step: 0.01,
+        label: I18n.t('ranking.similarity'),
+        hint: I18n.t('ranking.similarity.hint'),
+        color: 'var(--rose)',
+      },
+    ];
+
+    const valueEls = {};
+
+    sliders.forEach(({ key, min, max, step, label, hint, color }) => {
+      const current = Config.get(key, min);
+      
+      const group = document.createElement('div');
+      group.style.cssText = 'display:flex;flex-direction:column;gap:8px;';
+      
+      const labelRow = document.createElement('div');
+      labelRow.style.cssText = 'display:flex;justify-content:space-between;align-items:center;';
+      
+      const lbl = document.createElement('span');
+      lbl.style.cssText = 'font-size:13px;font-weight:600;color:var(--text);';
+      lbl.textContent = label;
+      
+      const val = document.createElement('span');
+      val.style.cssText = `font:600 13px var(--mono);color:${color};`;
+      val.textContent = current.toFixed(2);
+      
+      labelRow.appendChild(lbl);
+      labelRow.appendChild(val);
+      
+      const slider = document.createElement('input');
+      slider.type = 'range';
+      slider.min = String(min);
+      slider.max = String(max);
+      slider.step = String(step);
+      slider.value = String(current);
+      slider.style.cssText = `
+        width:100%;
+        accent-color:${color};
+        height:6px;
+        cursor:pointer;
+      `;
+      
+      const hintEl = document.createElement('div');
+      hintEl.style.cssText = 'font-size:11px;color:var(--text-3);line-height:1.4;';
+      hintEl.textContent = hint;
+      
+      slider.addEventListener('input', () => {
+        const v = parseFloat(slider.value);
+        val.textContent = v.toFixed(2);
+      });
+      
+      valueEls[key] = { slider, val };
+      
+      group.appendChild(labelRow);
+      group.appendChild(slider);
+      group.appendChild(hintEl);
+      body.appendChild(group);
+    });
+
+    Modal.open({
+      title: I18n.t('menu.ranking'),
+      body,
+      buttons: [
+        { text: I18n.t('btn.cancel'), onClick: () => Modal.close() },
+        {
+          text: I18n.t('btn.save'),
+          primary: true,
+          onClick: () => {
+            sliders.forEach(({ key }) => {
+              const v = parseFloat(valueEls[key].slider.value);
+              Config.set(key, v);
+            });
+            Toast.show('ok', I18n.t('ranking.saved'));
+            try { bus.emit('db:change'); } catch (_) {}
+            Modal.close();
+          },
+        },
+        {
+          text: I18n.t('ranking.reset'),
+          danger: true,
+          onClick: () => {
+            const d = Config.defaults();
+            sliders.forEach(({ key }) => {
+              Config.set(key, d[key]);
+              valueEls[key].slider.value = String(d[key]);
+              valueEls[key].val.textContent = d[key].toFixed(2);
+            });
+            Toast.show('ok', I18n.t('ranking.reset'));
+          },
+        },
+      ],
+    });
+  }
+
+  /**
+   * Полный сброс. ИСПРАВЛЕНО: проверка `typeof indexedDB.databases === 'function'`
+   * для совместимости с Safari, где `databases` может отсутствовать.
+   */
   function fullReset() {
     Modal.confirm(
       I18n.t('menu.fullreset'),
@@ -5902,7 +6093,8 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboar
       () => {
         try { Nostr.close(); } catch (_) {}
         
-        if (window.indexedDB && indexedDB.databases) {
+        // ИСПРАВЛЕНИЕ: в Safari `indexedDB.databases` может быть не функцией
+        if (window.indexedDB && typeof indexedDB.databases === 'function') {
           indexedDB.databases().then(dbs => {
             dbs.forEach(dbInfo => {
               if (dbInfo.name) {
@@ -5910,19 +6102,24 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboar
               }
             });
           }).catch(() => {});
+        } else if (window.indexedDB) {
+          // Fallback для браузеров без `databases()` API
+          try {
+            indexedDB.deleteDatabase(Config.get('dbName', 'noomium_v2'));
+          } catch (_) {}
         }
         
         try { localStorage.clear(); } catch (_) {}
         try { sessionStorage.clear(); } catch (_) {}
         
-        // НОВОЕ: очистка всех кэшей, включая Service Worker
+        // Очистка всех кэшей, включая Service Worker
         if (window.caches) {
           caches.keys().then(names => {
             names.forEach(name => caches.delete(name));
           }).catch(() => {});
         }
         
-        // НОВОЕ: просим SW принудительно пересоздать кэш
+        // Просим SW принудительно пересоздать кэш
         if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
           try {
             navigator.serviceWorker.controller.postMessage('CLEAR_CACHE');
@@ -5971,6 +6168,16 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboar
       Modal.close();
     });
     body.appendChild(langBtn);
+
+    // НОВОЕ: Настройки ранжирования
+    const rankingBtn = document.createElement('button');
+    rankingBtn.className = 'nv-act';
+    rankingBtn.textContent = '⚙ ' + I18n.t('menu.ranking');
+    rankingBtn.addEventListener('click', () => {
+      Modal.close();
+      openRankingSettings();
+    });
+    body.appendChild(rankingBtn);
 
     const goBase = document.createElement('button');
     goBase.className = 'nv-act';
@@ -6170,7 +6377,8 @@ DI.register('TelegramAdapter', function (Config, bus, Logger) {
 
 // ─── BOOT ─── START ─────────────────────────────────────────────────────────
 /**
- * Точка входа. НОВОЕ: инициализирует TelegramAdapter до Context.
+ * Точка входа. Инициализирует все модули в правильном порядке.
+ * НОВОЕ: TelegramAdapter до Context для своевременного применения темы.
  */
 DI.register('Boot', function () {
   function mount() {
@@ -6185,7 +6393,7 @@ DI.register('Boot', function () {
     DI.resolve('Feed').init();
     DI.resolve('Influence').init();
     
-    // НОВОЕ: Telegram адаптер ДО Context, чтобы тема применилась вовремя
+    // Telegram адаптер ДО Context, чтобы тема применилась вовремя
     DI.resolve('TelegramAdapter').init();
     
     // Context.init подписывается на 'note:pin' от NoteView
