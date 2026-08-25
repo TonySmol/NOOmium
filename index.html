@@ -596,13 +596,47 @@ body.ready #app { display: flex; }
 
 /* Процент сходства — янтарный */
 .note-sim-info {
-  color: var(--amber);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   font-weight: 600;
   font-size: 11px;
   font-family: var(--mono);
   letter-spacing: 0;
   white-space: nowrap;
   flex-shrink: 0;
+  color: var(--amber);
+}
+
+/* Палочки индикатора сигнала */
+.sig-bar {
+  display: inline-block;
+  width: 4px;
+  height: 12px;
+  border-radius: 1px;
+  flex-shrink: 0;
+}
+
+.sig-bar.sig-full {
+  background: var(--amber);
+}
+
+.sig-bar.sig-empty {
+  background: var(--surface-3);
+}
+
+/* Текстовая метка рядом с индикатором */
+.sig-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-2);
+}
+
+/* В режиме процентов — обычный стиль */
+.note-sim-info:not(:has(.sig-bar)) {
+  color: var(--amber);
 }
 
 /* Время — серый, прижато вправо */
@@ -1556,7 +1590,7 @@ body.ready #app { display: flex; }
 // ═══════════════════════════════════════════════════════════════════════════════
 // ВЕРСИЯ ПРИЛОЖЕНИЯ
 // ═══════════════════════════════════════════════════════════════════════════════
-const APP_VERSION = '0.5.16';
+const APP_VERSION = '0.5.17';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CORE/DI - ПРЕАМБУЛА
@@ -1606,6 +1640,8 @@ DI.register('Config', function () {
     threshold: 0.81,
     serendipity: 0.07,
     vectorSimilarityThreshold: 0.95,
+    // Режим отображения сходства: 'signal' (индикатор + текст) или 'percent' (сырые %)
+    similarityDisplay: 'signal',
     relays: [
       'wss://relay.damus.io',
       'wss://relay.primal.net',
@@ -2163,7 +2199,13 @@ DI.register('I18n', function (Config, bus) {
     'ranking.similarity': 'Порог дубликатов',
     'ranking.similarity.hint': 'Сходство выше которого заметки считаются одинаковыми (0.90-0.99)',
     'ranking.reset': 'Сбросить настройки',
-    'ranking.saved': 'настройки сохранены',
+    'ranking.saved': 'Настройки сохранены',
+    'ranking.display': 'Отображение сходства',
+    'ranking.display.signal': 'Индикатор сигнала',
+    'ranking.display.percent': 'Проценты (отладка)',
+    'sim.level.high': 'В тему',
+    'sim.level.mid': 'Ассоциация',
+    'menu.ranking.display': 'Режим отображения',
   });
 
   // Английский словарь
@@ -2303,7 +2345,13 @@ DI.register('I18n', function (Config, bus) {
     'ranking.similarity': 'Duplicate threshold',
     'ranking.similarity.hint': 'Similarity above which notes are considered identical (0.90-0.99)',
     'ranking.reset': 'Reset settings',
-    'ranking.saved': 'settings saved',
+    'ranking.saved': 'Settings saved',
+    'ranking.display': 'Similarity display',
+    'ranking.display.signal': 'Signal indicator',
+    'ranking.display.percent': 'Percentages (debug)',
+    'sim.level.high': 'On topic',
+    'sim.level.mid': 'Association',
+    'menu.ranking.display': 'Display mode',
   });
 
   function init() {
@@ -5249,7 +5297,45 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, P
         body.appendChild(item);
       });
     }
-    
+        // Переключатель режима отображения
+    const displayGroup = document.createElement('div');
+    displayGroup.style.cssText = 'display:flex;flex-direction:column;gap:8px;padding-top:8px;border-top:1px solid var(--line);';
+
+    const displayLabel = document.createElement('span');
+    displayLabel.style.cssText = 'font-size:13px;font-weight:600;color:var(--text);';
+    displayLabel.textContent = I18n.t('ranking.display');
+
+    const displayToggle = document.createElement('div');
+    displayToggle.style.cssText = 'display:flex;gap:6px;';
+
+    const currentDisplay = Config.get('similarityDisplay', 'signal');
+
+    ['signal', 'percent'].forEach(mode => {
+      const btn = document.createElement('button');
+      btn.className = 'nv-act' + (mode === currentDisplay ? ' active' : '');
+      btn.style.cssText += 'flex:1;font-size:12px;';
+      btn.textContent = I18n.t('ranking.display.' + mode);
+      if (mode === currentDisplay) {
+        btn.style.borderColor = 'var(--amber)';
+        btn.style.color = 'var(--amber)';
+      }
+      btn.addEventListener('click', () => {
+        displayToggle.querySelectorAll('.nv-act').forEach(b => {
+          b.classList.remove('active');
+          b.style.borderColor = '';
+          b.style.color = '';
+        });
+        btn.classList.add('active');
+        btn.style.borderColor = 'var(--amber)';
+        btn.style.color = 'var(--amber)';
+        Config.set('similarityDisplay', mode);
+      });
+      displayToggle.appendChild(btn);
+    });
+
+    displayGroup.appendChild(displayLabel);
+    displayGroup.appendChild(displayToggle);
+    body.appendChild(displayGroup);
     Modal.open({
       title: I18n.t('inf.children') + (children.length ? ' · ' + children.length : ''),
       body: body,
@@ -5395,10 +5481,35 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, P
     meta.appendChild(createSep());
 
     if (isRanked && typeof n.score === 'number') {
+      const threshold = Config.get('threshold', 0.81);
+      const serenMin = threshold - Config.get('serendipity', 0.07);
+      const displayMode = Config.get('similarityDisplay', 'signal');
+      const pct = Math.round(n.score * 100);
+
       const sim = document.createElement('span');
       sim.className = 'note-sim-info';
-      sim.textContent = I18n.t('sim.score.percent', { percent: Math.round(n.score * 100) });
-      sim.title = I18n.t('sim.score');
+
+      if (displayMode === 'percent') {
+        // Режим отладки: сырые проценты
+        sim.textContent = pct + '%';
+        sim.title = I18n.t('sim.score');
+      } else {
+        // Режим сигнала: индикатор + текст
+        if (n.score >= threshold) {
+          sim.innerHTML = '<span class="sig-bar sig-full"></span><span class="sig-bar sig-full"></span><span class="sig-bar sig-full"></span>';
+          sim.title = I18n.t('sim.level.high') + ' (' + pct + '%)';
+        } else if (n.score >= serenMin) {
+          sim.innerHTML = '<span class="sig-bar sig-full"></span><span class="sig-bar sig-full"></span><span class="sig-bar sig-empty"></span>';
+          sim.title = I18n.t('sim.level.mid') + ' (' + pct + '%)';
+        }
+        const label = document.createElement('span');
+        label.className = 'sig-label';
+        label.textContent = n.score >= threshold
+          ? I18n.t('sim.level.high')
+          : I18n.t('sim.level.mid');
+        sim.appendChild(label);
+      }
+
       meta.appendChild(sim);
     }
 
@@ -5534,7 +5645,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, bus, Influence, P
   }
 
   return { init, destroy, render };
-}, ['Store', 'Context', 'I18n', 'Utils', 'EventBus', 'Influence', 'Provenance', 'Modal', 'NetService']);
+}, ['Store', 'Context', 'I18n', 'Utils', 'Config', 'EventBus', 'Influence', 'Provenance', 'Modal', 'NetService']);
 // ─── UI/FeedView ─── END ────────────────────────────────────────────────────
 
 // ─── UI/BaseView ─── START ──────────────────────────────────────────────────
