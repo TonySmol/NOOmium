@@ -1556,7 +1556,7 @@ body.ready #app { display: flex; }
 // ═══════════════════════════════════════════════════════════════════════════════
 // ВЕРСИЯ ПРИЛОЖЕНИЯ
 // ═══════════════════════════════════════════════════════════════════════════════
-const APP_VERSION = '0.5.12';
+const APP_VERSION = '0.5.13';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CORE/DI - ПРЕАМБУЛА
@@ -2790,7 +2790,7 @@ self.onmessage = async function (e) {
       mod.env.useBrowserCache = true;
       
       extractor = await mod.pipeline('feature-extraction', msg.model, {
-        quantized: true,
+        quantized: false,
         progress_callback: function (p) {
           if (p.status === 'progress') {
             const fileName = p.file || p.name || 'unknown';
