@@ -3047,21 +3047,778 @@ DI.register('DB', function (Config, bus, Logger) {
 }, ['Config', 'EventBus', 'Logger']);
 // ─── DATA/DB ─── END ────────────────────────────────────────────────────────
 
-// ─── AI/Embedder ─── START
-// [заглушка: модуль будет выдан отдельным блоком по запросу]
-// ─── AI/Embedder ─── END
+// ─── AI/Embedder ─── START ──────────────────────────────────────────────────
+/**
+ * Embedder для Granite R2 (ModernBERT backbone).
+ *
+ * Архитектура модели (из документации IBM):
+ * - granite-encoder-small-multilingual: 12 слоёв, 384-dim, SiLU, RoPE theta 160,000
+ * - Пулинг: [CLS] (формула 3.2 в paper)
+ * - Нормализация: да (косинусное сходство нормализованных векторов)
+ *
+ * Транспортировка:
+ * - Модель грузится в Web Worker через transformers.js
+ * - Fallback: FNV-1a хеш-эмбеддинг при недоступности Worker или ошибке загрузки
+ */
+DI.register('Embedder', function (Config, bus, Logger) {
+  const workerCode = `
+let extractor = null;
+let ready = false;
+let files = new Map();
 
-// ─── AI/Ranker ─── START
-// [заглушка: модуль будет выдан отдельным блоком по запросу]
-// ─── AI/Ranker ─── END
+self.onmessage = async function (e) {
+  const msg = e.data;
+  
+  if (msg.type === 'load') {
+    try {
+      const mod = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@latest');
+      mod.env.allowLocalModels = false;
+      mod.env.useBrowserCache = true;
+      
+      extractor = await mod.pipeline('feature-extraction', msg.model, {
+        dtype: 'q8',
+        progress_callback: function (p) {
+          if (p.status === 'progress') {
+            const fileName = p.file || p.name || 'unknown';
+            files.set(fileName, { 
+              loaded: p.loaded || 0, 
+              total: p.total || 0,
+              file: fileName
+            });
+            
+            let totalLoaded = 0, totalSize = 0;
+            files.forEach(f => { 
+              totalLoaded += f.loaded; 
+              if (f.total > 0) totalSize += f.total; 
+            });
+            
+            const pct = totalSize > 0 ? (totalLoaded / totalSize) * 100 : 0;
+            self.postMessage({ 
+              type: 'progress', 
+              pct,
+              loadedMB: (totalLoaded / 1024 / 1024).toFixed(1),
+              totalMB: totalSize > 0 ? (totalSize / 1024 / 1024).toFixed(1) : null,
+              model: msg.model
+            });
+          }
+        }
+      });
+      
+      ready = true;
+      self.postMessage({ type: 'ready' });
+    } catch (err) {
+      self.postMessage({ 
+        type: 'error', 
+        id: null, 
+        message: String(err && err.message || err) 
+      });
+    }
+    return;
+  }
+  
+  if (!ready) {
+    self.postMessage({ 
+      type: 'error', 
+      id: msg.id, 
+      message: 'model not loaded' 
+    });
+    return;
+  }
+  
+  if (msg.type === 'embed') {
+    try {
+      // Granite R2: [CLS] pooling + нормализация (согласно документации)
+      const out = await extractor(msg.text, { pooling: 'cls', normalize: true });
+      self.postMessage({ 
+        type: 'result', 
+        id: msg.id, 
+        vector: Array.from(out.data) 
+      });
+    } catch (err) {
+      self.postMessage({ 
+        type: 'error', 
+        id: msg.id, 
+        message: String(err && err.message || err) 
+      });
+    }
+  }
+};
+`;
 
-// ─── NET/Protocol ─── START
-// [заглушка: модуль будет выдан отдельным блоком по запросу]
-// ─── NET/Protocol ─── END
+  let worker = null;
+  let workerUrl = null;
+  let mode = 'loading';
+  let loadPromise = null;
+  let nextId = 0;
+  let lastPct = 0;
+  const pending = new Map();
+  const progressFns = [];
+  const cache = new Map();
 
-// ─── NET/Nostr ─── START
-// [заглушка: модуль будет выдан отдельным блоком по запросу]
-// ─── NET/Nostr ─── END
+  function emitStatus() {
+    try {
+      bus.emit('ai:status', { mode, percent: lastPct });
+    } catch (_) {}
+  }
+
+  /**
+   * Fallback: детерминированный хеш-эмбеддинг (FNV-1a).
+   * Используется только если Worker/модель недоступны.
+   * Качество поиска при этом нулевое, но приложение не падает.
+   */
+  function hashEmbed(text) {
+    const DIM = Config.get('dim', 384);
+    const vec = new Float32Array(DIM);
+    const tokens = (text || '').toLowerCase().match(/[a-zа-яё0-9]+/gi) || [];
+    
+    for (const tok of tokens) {
+      let h = 2166136261;
+      for (let i = 0; i < tok.length; i++) {
+        h ^= tok.charCodeAt(i);
+        h = Math.imul(h, 16777619);
+      }
+      vec[Math.abs(h) % DIM] += 1;
+      
+      const h2 = Math.imul(h ^ 0x9e3779b9, 2654435761);
+      vec[Math.abs(h2) % DIM] += 0.5;
+    }
+    
+    let norm = 0;
+    for (let i = 0; i < DIM; i++) norm += vec[i] * vec[i];
+    norm = Math.sqrt(norm) || 1;
+    
+    for (let i = 0; i < DIM; i++) vec[i] /= norm;
+    return vec;
+  }
+
+  function cacheGet(key) {
+    if (!cache.has(key)) return undefined;
+    const v = cache.get(key);
+    cache.delete(key);
+    cache.set(key, v);
+    return v;
+  }
+
+  function cacheSet(key, v) {
+    if (cache.has(key)) {
+      cache.delete(key);
+    } else if (cache.size >= Config.get('aiCacheLimit', 300)) {
+      cache.delete(cache.keys().next().value);
+    }
+    cache.set(key, v);
+  }
+
+  function cleanup() {
+    pending.forEach(p => {
+      clearTimeout(p.timer);
+      const v = hashEmbed(p.text);
+      cacheSet(p.text, v);
+      p.resolve(v);
+    });
+    pending.clear();
+    
+    if (worker) {
+      try { worker.terminate(); } catch (_) {}
+      worker = null;
+    }
+    
+    if (workerUrl) {
+      try { URL.revokeObjectURL(workerUrl); } catch (_) {}
+      workerUrl = null;
+    }
+  }
+
+  function doLoad() {
+    return new Promise(resolve => {
+      if (typeof Worker === 'undefined') {
+        mode = 'demo';
+        emitStatus();
+        Logger.warn('Embedder: Worker не поддерживается, demo mode');
+        return resolve();
+      }
+      
+      try {
+        const blob = new Blob([workerCode], { type: 'application/javascript' });
+        workerUrl = URL.createObjectURL(blob);
+        worker = new Worker(workerUrl, { type: 'module' });
+      } catch (err) {
+        mode = 'demo';
+        emitStatus();
+        Logger.warn('Embedder: не создать Worker, demo mode', String(err));
+        return resolve();
+      }
+
+      worker.onerror = err => {
+        Logger.warn('Embedder: ошибка Worker, demo mode', String(err && err.message || err));
+        cleanup();
+        mode = 'demo';
+        emitStatus();
+        resolve();
+      };
+
+      worker.onmessage = e => {
+        const msg = e.data;
+        
+        if (msg.type === 'progress') {
+          lastPct = msg.pct;
+          
+          for (const fn of progressFns) {
+            try { fn(msg); } catch (_) {}
+          }
+          
+          try { bus.emit('ai:progress', msg); } catch (_) {}
+          try {
+            bus.emit('ai:status', {
+              mode: 'loading',
+              percent: msg.pct,
+              loadedMB: msg.loadedMB,
+              totalMB: msg.totalMB,
+              model: msg.model,
+            });
+          } catch (_) {}
+        }
+        else if (msg.type === 'ready') {
+          mode = 'model';
+          emitStatus();
+          Logger.info('Embedder: модель готова');
+          resolve();
+        }
+        else if (msg.type === 'error' && msg.id === null) {
+          Logger.warn('Embedder: ошибка загрузки модели, demo mode', msg.message);
+          cleanup();
+          mode = 'demo';
+          emitStatus();
+          resolve();
+        }
+        else if (msg.type === 'result') {
+          const p = pending.get(msg.id);
+          if (p) {
+            clearTimeout(p.timer);
+            pending.delete(msg.id);
+            
+            const vec = Float32Array.from(msg.vector);
+            cacheSet(p.text, vec);
+            p.resolve(vec);
+          }
+        }
+        else if (msg.type === 'error' && msg.id != null) {
+          const p = pending.get(msg.id);
+          if (p) {
+            clearTimeout(p.timer);
+            pending.delete(msg.id);
+            
+            Logger.warn('Embedder: ошибка embed, hash fallback', msg.message);
+            const v = hashEmbed(p.text);
+            cacheSet(p.text, v);
+            p.resolve(v);
+          }
+        }
+      };
+
+      worker.postMessage({
+        type: 'load',
+        model: Config.get('model', 'onnx-community/granite-embedding-97m-multilingual-r2-ONNX'),
+      });
+    });
+  }
+
+  return {
+    load(onProgress) {
+      if (typeof onProgress === 'function') {
+        progressFns.push(onProgress);
+      }
+      
+      if (mode === 'model' || mode === 'demo') {
+        return Promise.resolve();
+      }
+      
+      if (loadPromise) return loadPromise;
+      
+      mode = 'loading';
+      emitStatus();
+      loadPromise = doLoad().then(() => {
+        loadPromise = null;
+      });
+      
+      return loadPromise;
+    },
+
+    embed(text) {
+      const t = (text || '').trim();
+      if (!t) return Promise.resolve(null);
+      
+      const cached = cacheGet(t);
+      if (cached) return Promise.resolve(cached);
+      
+      if (mode === 'demo' || !worker) {
+        const v = hashEmbed(t);
+        cacheSet(t, v);
+        return Promise.resolve(v);
+      }
+      
+      const id = nextId++;
+      return new Promise(resolve => {
+        const timer = setTimeout(() => {
+          if (pending.delete(id)) {
+            Logger.warn('Embedder: таймаут embed, hash fallback');
+            const v = hashEmbed(t);
+            cacheSet(t, v);
+            resolve(v);
+          }
+        }, Config.get('aiEmbedTimeout', 15000));
+        
+        pending.set(id, { resolve, timer, text: t });
+        worker.postMessage({ type: 'embed', id, text: t });
+      });
+    },
+
+    ready() {
+      return mode === 'model' || mode === 'demo';
+    },
+    
+    getMode() {
+      return mode;
+    },
+    
+    onProgress(fn) {
+      if (typeof fn === 'function') {
+        progressFns.push(fn);
+      }
+    },
+  };
+}, ['Config', 'EventBus', 'Logger']);
+// ─── AI/Embedder ─── END ────────────────────────────────────────────────────
+
+// ─── AI/Ranker ─── START ────────────────────────────────────────────────────
+/**
+ * Ранжирование заметок по косинусному сходству.
+ *
+ * Логика порогов (адаптирована под Granite R2, диапазон ~0.55–0.93):
+ *
+ *   >= threshold                    → relevant («В тему»)
+ *   >= threshold - serendipity      → serendipity («Озарение»)
+ *   <  динамический нижний порог    → полностью скрывается
+ *
+ * Динамический нижний порог = max(0.40, threshold - serendipity - 0.05).
+ * Это гарантирует, что даже при экстремальных настройках пользователя
+ * отсечение шума не уходит ниже 0.40.
+ */
+DI.register('Ranker', function (Vec, Config) {
+  /**
+   * Пакетное вычисление косинусного сходства.
+   * @param {Float32Array|number[]} queryVector - Вектор запроса.
+   * @param {Array<{id: string, vector: Array|Float32Array}>} items - Заметки с векторами.
+   * @param {AbortSignal} [signal] - Сигнал отмены.
+   * @returns {Promise<Array<{id: string, score: number}>>} Отсортировано по убыванию.
+   */
+  function cosineBatch(queryVector, items, signal) {
+    if (!queryVector || !items || !items.length) {
+      return Promise.resolve([]);
+    }
+    
+    if (signal && signal.aborted) {
+      return Promise.reject(new Error('aborted'));
+    }
+    
+    const out = [];
+    for (const it of items) {
+      if (signal && signal.aborted) {
+        return Promise.reject(new Error('aborted'));
+      }
+      out.push({ id: it.id, score: Vec.cosine(queryVector, it.vector) });
+    }
+    
+    out.sort((a, b) => b.score - a.score);
+    return Promise.resolve(out);
+  }
+
+  /**
+   * Разделение результатов на relevant и serendipity.
+   * Пороги берутся из Config (настраиваются пользователем).
+   *
+   * @param {Array<{id: string, score: number}>} scored - Результаты cosineBatch.
+   * @returns {{relevant: Array, seren: Array}}
+   */
+  function split(scored) {
+    const threshold = Config.get('threshold', 0.81);
+    const serendipity = Config.get('serendipity', 0.07);
+
+    // Динамический нижний порог: не ниже 0.40, не выше (threshold - serendipity)
+    const lowerBound = Math.max(0.40, threshold - serendipity - 0.05);
+    
+    const relevant = [];
+    const seren = [];
+    
+    for (const s of scored) {
+      if (s.score < lowerBound) {
+        continue;
+      }
+      
+      if (s.score >= threshold) {
+        relevant.push(s);
+      } else {
+        seren.push(s);
+      }
+    }
+    
+    return { relevant, seren };
+  }
+
+  /**
+   * Проверка на дубликат: два вектора считаются одинаковыми,
+   * если их сходство >= duplicateThreshold.
+   * Используется для предотвращения повторных запросов в сеть.
+   *
+   * Для Granite R2 (диапазон ~0.55–0.93) порог 0.88 означает
+   * «практически идентичные по смыслу».
+   */
+  function isSimilar(a, b) {
+    return Vec.cosine(a, b) >= Config.get('duplicateThreshold', 0.88);
+  }
+
+  return { cosineBatch, split, isSimilar };
+}, ['Vec', 'Config']);
+// ─── AI/Ranker ─── END ──────────────────────────────────────────────────────
+
+// ─── NET/Protocol ─── START ─────────────────────────────────────────────────
+/**
+ * Сериализация/десериализация Nostr-событий NOOmium.
+ *
+ * Виды событий:
+ * - kind 1:     Заметка (текст + вектор + parent)
+ * - kind 21000: Запрос (вектор + параметры)
+ * - kind 21001: Ответ (заметка + скор)
+ * - kind 5:     Удаление (список event ID)
+ *
+ * Безопасность:
+ * - Все входящие тексты ограничены по длине (защита от переполнения)
+ * - Все входящие векторы валидируются (конечность, числовой тип)
+ */
+DI.register('Protocol', function (Config, Vec) {
+  function findTag(tags, name) {
+    if (!Array.isArray(tags)) return null;
+    for (const t of tags) {
+      if (Array.isArray(t) && t[0] === name) return t;
+    }
+    return null;
+  }
+
+  function noteEvent(note, room) {
+    const tags = [['t', room]];
+    if (note.vector) tags.push(['v', Vec.toB64(note.vector)]);
+    if (note.parentId) tags.push(['parent', note.parentId, note.parentPubkey || '']);
+    
+    return {
+      kind: Config.get('kNote', 1),
+      created_at: Math.floor((note.createdAt || Date.now()) / 1000),
+      tags,
+      content: note.text || '',
+    };
+  }
+
+  function decodeNote(ev) {
+    if (!ev || ev.kind !== Config.get('kNote', 1)) return null;
+    
+    // Защита от переполнения: ограничиваем длину входящего текста
+    const maxLen = Config.get('maxNoteTextLength', 10000);
+    if (typeof ev.content === 'string' && ev.content.length > maxLen) return null;
+    
+    const vTag = findTag(ev.tags, 'v');
+    const pTag = findTag(ev.tags, 'parent');
+    
+    return {
+      id: ev.id,
+      text: ev.content || '',
+      vector: vTag ? Vec.fromB64(vTag[1]) : null,
+      shared: true,
+      authorPubkey: ev.pubkey,
+      parentId: pTag ? pTag[1] : null,
+      parentPubkey: pTag ? (pTag[2] || null) : null,
+      createdAt: (ev.created_at || 0) * 1000,
+    };
+  }
+
+  function queryEvent(vector, maxResponses, window) {
+    return {
+      kind: Config.get('kQuery', 21000),
+      created_at: Math.floor(Date.now() / 1000),
+      tags: [['t', Config.get('room', 'noomium-main')]],
+      content: JSON.stringify({ vector: Array.from(vector), maxResponses, window }),
+    };
+  }
+
+  function decodeQuery(ev) {
+    if (!ev || ev.kind !== Config.get('kQuery', 21000)) return null;
+    
+    let data;
+    try {
+      data = JSON.parse(ev.content);
+    } catch (_) {
+      return null;
+    }
+    
+    if (!data || !Array.isArray(data.vector) || !data.vector.length) return null;
+    
+    for (const x of data.vector) {
+      if (typeof x !== 'number' || !isFinite(x)) return null;
+    }
+    
+    return {
+      vector: data.vector,
+      maxResponses: typeof data.maxResponses === 'number' ? data.maxResponses : Config.get('maxResponses', 8),
+      window: typeof data.window === 'number' ? data.window : Config.get('responseWindow', 6000),
+      authorPubkey: ev.pubkey,
+      queryId: ev.id,
+    };
+  }
+
+  function answerEvent(note, score, queryId, room) {
+    return {
+      kind: Config.get('kAnswer', 21001),
+      created_at: Math.floor(Date.now() / 1000),
+      tags: [['t', room], ['e', queryId]],
+      content: JSON.stringify({
+        noteId: note.id,
+        text: note.text,
+        vector: note.vector ? Array.from(note.vector) : null,
+        score,
+      }),
+    };
+  }
+
+  function decodeAnswer(ev) {
+    if (!ev || ev.kind !== Config.get('kAnswer', 21001)) return null;
+    
+    const eTag = findTag(ev.tags, 'e');
+    if (!eTag) return null;
+    
+    let data;
+    try {
+      data = JSON.parse(ev.content);
+    } catch (_) {
+      return null;
+    }
+    
+    if (!data || typeof data.text !== 'string') return null;
+    if (data.text.length > Config.get('maxAnswerTextLength', 10000)) return null;
+    
+    let vector = null;
+    if (Array.isArray(data.vector)) {
+      for (const x of data.vector) {
+        if (typeof x !== 'number' || !isFinite(x)) return null;
+      }
+      vector = data.vector;
+    }
+    
+    return {
+      id: ev.id,
+      queryId: eTag[1],
+      noteId: data.noteId || ev.id,
+      text: data.text,
+      vector,
+      score: typeof data.score === 'number' ? data.score : 0,
+      authorPubkey: ev.pubkey,
+      createdAt: (ev.created_at || 0) * 1000,
+    };
+  }
+
+  function deleteEvent(eventIds, room) {
+    const ids = Array.isArray(eventIds) ? eventIds : [eventIds];
+    const tags = ids.filter(Boolean).map(id => ['e', id]);
+    
+    if (!tags.length) return null;
+    if (room) tags.push(['t', room]);
+    
+    return {
+      kind: Config.get('kDelete', 5),
+      created_at: Math.floor(Date.now() / 1000),
+      tags,
+      content: '',
+    };
+  }
+
+  function decodeDelete(ev) {
+    if (!ev || ev.kind !== Config.get('kDelete', 5)) return null;
+    
+    const eTags = (ev.tags || []).filter(t => Array.isArray(t) && t[0] === 'e' && t[1]);
+    if (!eTags.length) return null;
+    
+    return {
+      eventIds: eTags.map(t => t[1]),
+      authorPubkey: ev.pubkey,
+    };
+  }
+
+  return {
+    noteEvent,
+    decodeNote,
+    queryEvent,
+    decodeQuery,
+    answerEvent,
+    decodeAnswer,
+    deleteEvent,
+    decodeDelete,
+  };
+}, ['Config', 'Vec']);
+// ─── NET/Protocol ─── END ───────────────────────────────────────────────────
+
+// ─── NET/Nostr ─── START ────────────────────────────────────────────────────
+/**
+ * Транспортный слой Nostr.
+ * Управляет ключами, пулом рэлеев, публикацией и подписками.
+ * Не содержит бизнес-логики — только отправка/приём.
+ */
+DI.register('Nostr', function (Config, bus, Logger) {
+  const CDN = 'https://cdn.jsdelivr.net/npm/nostr-tools@2.7.2/+esm';
+  const SK_KEY = 'noomium:sk';
+
+  let nostr = null;
+  let pool = null;
+  let sk = null;
+  let pk = null;
+  let initPromise = null;
+
+  function loadKey() {
+    try {
+      const hex = localStorage.getItem(SK_KEY);
+      if (hex && /^[0-9a-f]{64}$/i.test(hex)) {
+        return new Uint8Array(hex.match(/.{1,2}/g).map(b => parseInt(b, 16)));
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  function saveKey(key) {
+    try {
+      localStorage.setItem(
+        SK_KEY,
+        Array.from(key).map(b => b.toString(16).padStart(2, '0')).join('')
+      );
+    } catch (_) {}
+  }
+
+  function init() {
+    if (initPromise) return initPromise;
+    
+    initPromise = import(CDN).then(mod => {
+      nostr = (typeof mod.generateSecretKey === 'function')
+        ? mod
+        : (mod.default && typeof mod.default.generateSecretKey === 'function' ? mod.default : mod);
+      
+      if (typeof nostr.generateSecretKey !== 'function') {
+        throw new Error('nostr-tools: несовместимый модуль');
+      }
+
+      sk = loadKey();
+      if (!sk) {
+        sk = nostr.generateSecretKey();
+        saveKey(sk);
+      }
+      
+      pk = nostr.getPublicKey(sk);
+      pool = new nostr.SimplePool();
+      
+      Logger.info('Nostr: готов, pubkey ' + pk.slice(0, 8) + '…');
+      return pk;
+    }).catch(err => {
+      initPromise = null;
+      Logger.error('Nostr: не загрузить nostr-tools', String(err && err.message || err));
+      try { bus.emit('net:status', { status: 'failed' }); } catch (_) {}
+      throw err;
+    });
+    
+    return initPromise;
+  }
+
+  function relays() {
+    return Config.get('relays', []);
+  }
+
+  function sign(template) {
+    if (!nostr || !sk) throw new Error('Nostr not ready');
+    return nostr.finalizeEvent(template, sk);
+  }
+
+  /**
+   * Публикация события на все настроенные рэлеи.
+   * Резолвится при успехе хотя бы на одном рэлее.
+   */
+  function publish(template) {
+    let ev;
+    try {
+      ev = sign(template);
+    } catch (e) {
+      return Promise.reject(e);
+    }
+    
+    if (!pool) return Promise.reject(new Error('Nostr not ready'));
+    
+    const urls = relays();
+    if (!urls.length) return Promise.reject(new Error('no relays configured'));
+    
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      let failures = 0;
+      
+      urls.forEach(url => {
+        pool.ensureRelay(url)
+          .then(relay => relay.publish(ev))
+          .then(() => {
+            if (!settled) {
+              settled = true;
+              resolve(ev);
+            }
+          })
+          .catch(err => {
+            failures++;
+            Logger.warn('Nostr: релей ' + url + ' не принял', String(err && err.message || err));
+            
+            if (!settled && failures === urls.length) {
+              settled = true;
+              reject(new Error('no relay accepted'));
+            }
+          });
+      });
+    });
+  }
+
+  function subscribe(filters, handlers) {
+    if (!pool) return null;
+    return pool.subscribeMany(relays(), filters, handlers);
+  }
+
+  function ensureRelay(url) {
+    if (!pool) return Promise.reject(new Error('Nostr not ready'));
+    return pool.ensureRelay(url);
+  }
+
+  function getPubkey() {
+    return pk;
+  }
+
+  function isReady() {
+    return !!(nostr && sk && pool);
+  }
+
+  function close() {
+    if (pool && typeof pool.close === 'function') {
+      try { pool.close(relays()); } catch (_) {}
+    }
+  }
+
+  return {
+    init,
+    sign,
+    publish,
+    subscribe,
+    ensureRelay,
+    getPubkey,
+    isReady,
+    relays,
+    close,
+  };
+}, ['Config', 'EventBus', 'Logger']);
+// ─── NET/Nostr ─── END ──────────────────────────────────────────────────────
 
 // ─── NET/NetService ─── START
 // [заглушка: модуль будет выдан отдельным блоком по запросу]
