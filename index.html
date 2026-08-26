@@ -188,13 +188,22 @@ input, textarea, select {
 ::-webkit-scrollbar-thumb:hover { background: var(--text-3); }
 ::-webkit-scrollbar-track { background: transparent; }
 
-/* Фокус: только для клавиатурной навигации, янтарный */
+/* Фокус: только для клавиатурной навигации, янтарный.
+   Для полей ввода (input, textarea, select) фокус показываем
+   только через смену цвета рамки (одинарная тонкая линия),
+   чтобы не было двойного кольца из-за :focus. */
 :focus { outline: none; }
 
 :focus-visible {
   outline: 2px solid var(--amber);
   outline-offset: 2px;
   border-radius: var(--r-xs);
+}
+
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  outline: none;
 }
 
 /* Выделение текста: насыщенный янтарный */
@@ -600,7 +609,7 @@ body.ready #app { display: flex; }
 
 .note.pinned {
   border-color: var(--amber);
-  box-shadow: 0 0 0 1px var(--amber-glow), var(--shadow-sm);
+  box-shadow: var(--shadow-sm);
 }
 
 @keyframes noteIn {
@@ -1723,7 +1732,7 @@ body.ready #app { display: flex; }
 // ═══════════════════════════════════════════════════════════════════════════════
 // ВЕРСИЯ ПРИЛОЖЕНИЯ
 // ═══════════════════════════════════════════════════════════════════════════════
-const APP_VERSION = '0.6.0';
+const APP_VERSION = '0.6.1';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CORE/DI - ПРЕАМБУЛА
@@ -5993,7 +6002,10 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
     // Индикатор сходства (сигнал или проценты)
     if (isRanked && typeof n.score === 'number') {
       const threshold = Config.get('threshold', 0.81);
-      const serenMin = threshold - Config.get('serendipity', 0.07);
+      const serendipity = Config.get('serendipity', 0.07);
+      const serenMin = threshold - serendipity;
+      // Середина диапазона озарений: делит на «сильные» и «слабые»
+      const serenMid = threshold - serendipity / 2;
       const displayMode = Config.get('similarityDisplay', 'signal');
       const pct = Math.round(n.score * 100);
 
@@ -6007,10 +6019,16 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
       } else {
         // Режим сигнала: палочки + текстовая метка
         if (n.score >= threshold) {
+          // ▰▰▰ В тему
           sim.innerHTML = '<span class="sig-bar sig-full"></span><span class="sig-bar sig-full"></span><span class="sig-bar sig-full"></span>';
           sim.title = I18n.t('sim.level.high') + ' (' + pct + '%)';
-        } else if (n.score >= serenMin) {
+        } else if (n.score >= serenMid) {
+          // ▰▰▱ Озарение (сильная связь, верхняя половина диапазона)
           sim.innerHTML = '<span class="sig-bar sig-full"></span><span class="sig-bar sig-full"></span><span class="sig-bar sig-empty"></span>';
+          sim.title = I18n.t('sim.level.mid') + ' (' + pct + '%)';
+        } else {
+          // ▰▱▱ Озарение (слабая связь, нижняя половина диапазона)
+          sim.innerHTML = '<span class="sig-bar sig-full"></span><span class="sig-bar sig-empty"></span><span class="sig-bar sig-empty"></span>';
           sim.title = I18n.t('sim.level.mid') + ' (' + pct + '%)';
         }
         const label = document.createElement('span');
@@ -6401,7 +6419,7 @@ DI.register('NoteView', function (DB, Notes, NoteActions, I18n, Utils, Toast, bu
       return;
     }
     
-    const editBtn = document.querySelector('.nv-act:not(.danger)');
+    const editBtn = document.querySelector('[data-role="edit"]');
     
     if (editBtn) {
       editBtn.disabled = true;
@@ -6493,6 +6511,7 @@ DI.register('NoteView', function (DB, Notes, NoteActions, I18n, Utils, Toast, bu
       // Редактирование доступно только для личных заметок
       const edit = document.createElement('button');
       edit.className = 'nv-act';
+      edit.setAttribute('data-role', 'edit');
       edit.textContent = I18n.t('btn.edit');
       
       edit.addEventListener('click', () => {
@@ -6833,7 +6852,35 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboar
       I18n.t('menu.fullreset'),
       I18n.t('menu.fullreset.confirm'),
       () => {
-        try { Nostr.close(); } catch (_) {}
+        // Отправляем delete на релеи для всех публичных заметок ДО закрытия пула
+        try {
+          if (Nostr.isReady()) {
+            const Protocol = DI.resolve('Protocol');
+            const Logger = DI.resolve('Logger');
+            const Config = DI.resolve('Config');
+
+            DB.all().then(notes => {
+              const publicIds = notes
+                .filter(n => n && n.shared && n.eventId)
+                .map(n => n.eventId);
+
+              if (publicIds.length) {
+                const ev = Protocol.deleteEvent(publicIds, Config.get('room', 'noomium-main'));
+                if (ev) {
+                  return Nostr.publish(ev).then(() => {
+                    Logger.info('MenuView: delete отправлен для ' + publicIds.length + ' заметок');
+                  });
+                }
+              }
+            }).catch(() => {}).finally(() => {
+              try { Nostr.close(); } catch (_) {}
+            });
+          } else {
+            try { Nostr.close(); } catch (_) {}
+          }
+        } catch (_) {
+          try { Nostr.close(); } catch (_) {}
+        }
 
         if (window.indexedDB && typeof indexedDB.databases === 'function') {
           indexedDB.databases().then(dbs => {
@@ -7188,7 +7235,28 @@ DI.register('Boot', function () {
     const Store = DI.resolve('Store');
     
     EventBus.on('wipe:request', () => {
-      DB.reset().then(() => {
+      // Сначала отправляем delete на релеи для всех публичных заметок
+      const Protocol = DI.resolve('Protocol');
+      const Nostr = DI.resolve('Nostr');
+      const Logger = DI.resolve('Logger');
+
+      DB.all().then(notes => {
+        const publicIds = notes
+          .filter(n => n && n.shared && n.eventId)
+          .map(n => n.eventId);
+
+        if (publicIds.length && Nostr.isReady()) {
+          const ev = Protocol.deleteEvent(publicIds, Config.get('room', 'noomium-main'));
+          if (ev) {
+            Nostr.publish(ev)
+              .then(() => Logger.info('Boot: delete отправлен для ' + publicIds.length + ' заметок'))
+              .catch(e => Logger.warn('Boot: не удалось отправить delete', String(e)));
+          }
+        }
+
+        // Затем очищаем локальную БД
+        return DB.reset();
+      }).then(() => {
         Toast.show('ok', I18n.t('toast.base.wiped'));
         Store.setState({ view: 'stream' });
       });
