@@ -1732,7 +1732,7 @@ body.ready #app { display: flex; }
 // ═══════════════════════════════════════════════════════════════════════════════
 // ВЕРСИЯ ПРИЛОЖЕНИЯ
 // ═══════════════════════════════════════════════════════════════════════════════
-const APP_VERSION = '0.6.3';
+const APP_VERSION = '0.6.4';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CORE/DI - ПРЕАМБУЛА
@@ -3831,15 +3831,17 @@ DI.register('Nostr', function (Config, bus, Logger) {
 /**
  * Оркестрация Nostr-сети: подписки, публикация, обработка входящих событий.
  *
- * Безопасность:
- * - Rate limit на исходящие запросы (queryRateLimit)
- * - Rate limit на входящие запросы от одного пира (peerQueryTimes)
- * - Rate limit на входящие заметки от одного пира (защита от флуда)
- * - Дедупликация по event ID (seen) и по контенту (contentSeen)
- * - Префильтр входящих запросов через центроиды (экономия CPU)
+ * Ключевые механизмы:
+ * - Входящие заметки принимаются через token bucket, чтобы не резать первичную синхронизацию.
+ * - seen добавляется только после принятия события.
+ * - Офлайн-операции публикуются через persistent outbox:
+ *   - заметки, которые нужно анонсировать;
+ *   - delete-события, которые нужно отправить позже.
+ * - При появлении сети приложение автоматически переподключается и сбрасывает очередь.
  */
 DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Config, Logger, bus) {
   let started = false;
+  let startPromise = null;
   let subscription = null;
   let hbTimer = null;
   let activeQueryId = null;
@@ -3847,15 +3849,47 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   let lastQueryTime = 0;
   let centroids = [];
   let contextUnsub = null;
+  let hasReceivedEvent = false;
+  let flushing = false;
+  let flushTimer = null;
+  let startRetryTimer = null;
+  let onlineListenerAdded = false;
+  let busUnsubs = [];
+
   const seen = new Set();
   const contentSeen = new Map();
   const peers = new Map();
   const peerQueryTimes = new Map();
-  const peerNoteTimes = new Map();
+  const peerNoteBudgets = new Map();
 
   let currentWindow = Config.get('subWindow', 300);
   let historyLoading = false;
   let subEpoch = 0;
+
+  const OUTBOX_KEY = 'noomium:outbox';
+
+  function loadOutbox() {
+    try {
+      const raw = localStorage.getItem(OUTBOX_KEY);
+      if (raw) {
+        const o = JSON.parse(raw);
+        return {
+          announce: Array.isArray(o.announce) ? o.announce.filter(Boolean) : [],
+          del: Array.isArray(o.del) ? o.del.filter(Boolean) : [],
+        };
+      }
+    } catch (_) {}
+
+    return { announce: [], del: [] };
+  }
+
+  function saveOutbox() {
+    try {
+      localStorage.setItem(OUTBOX_KEY, JSON.stringify(outbox));
+    } catch (_) {}
+  }
+
+  let outbox = loadOutbox();
 
   const kNote = () => Config.get('kNote', 1);
   const kQuery = () => Config.get('kQuery', 21000);
@@ -3875,13 +3909,194 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     try { bus.emit('net:history', { loading: loading, window: windowSec }); } catch (_) {}
   }
 
+  function isOffline() {
+    return typeof navigator !== 'undefined' && navigator.onLine === false;
+  }
+
+  function canPublish() {
+    return Nostr.isReady() && !isOffline();
+  }
+
+  // ─── Outbox ────────────────────────────────────────────────────────────────
+
+  function queueAnnounce(noteId) {
+    if (!noteId) return;
+
+    if (outbox.announce.indexOf(noteId) === -1) {
+      outbox.announce.push(noteId);
+      saveOutbox();
+    }
+
+    scheduleFlush();
+  }
+
+  function unqueueAnnounce(noteId) {
+    if (!noteId) return;
+
+    const i = outbox.announce.indexOf(noteId);
+    if (i > -1) {
+      outbox.announce.splice(i, 1);
+      saveOutbox();
+    }
+  }
+
+  function queueDelete(eventId) {
+    if (!eventId) return;
+
+    if (outbox.del.indexOf(eventId) === -1) {
+      outbox.del.push(eventId);
+      saveOutbox();
+    }
+
+    scheduleFlush();
+  }
+
+  function unqueueDelete(eventId) {
+    if (!eventId) return;
+
+    const i = outbox.del.indexOf(eventId);
+    if (i > -1) {
+      outbox.del.splice(i, 1);
+      saveOutbox();
+    }
+  }
+
+  function scheduleFlush(delay) {
+    if (flushTimer) return;
+
+    flushTimer = setTimeout(() => {
+      flushTimer = null;
+      flushOutbox();
+    }, delay || 5000);
+  }
+
+  /**
+   * Сброс накопившихся офлайн-операций.
+   * Вызывается при появлении сети, при подключении и по таймеру.
+   */
+  function flushOutbox() {
+    if (flushing) return;
+    if (!canPublish()) return;
+    if (!outbox.announce.length && !outbox.del.length) return;
+
+    flushing = true;
+
+    const announceIds = outbox.announce.slice();
+
+    const tasks = announceIds.map(noteId => {
+      return DB.get(noteId).then(note => {
+        // Заметка удалена, стала личной или уже опубликована — убираем из очереди.
+        if (!note || !note.shared || !note.vector || note.eventId) {
+          unqueueAnnounce(noteId);
+          return;
+        }
+
+        return Nostr.publish(Protocol.noteEvent(note, room()))
+          .then(ev => {
+            unqueueAnnounce(noteId);
+
+            if (ev && ev.id && note.id) {
+              DB.get(note.id).then(cur => {
+                if (cur && cur.eventId !== ev.id) {
+                  cur.eventId = ev.id;
+                  DB.put(cur);
+                  migrateChildrenParentId(cur.id, cur.eventId);
+                }
+              }).catch(() => {});
+            }
+          })
+          .catch(() => {
+            // Оставляем в очереди для повторной попытки.
+          });
+      }).catch(() => {
+        unqueueAnnounce(noteId);
+      });
+    });
+
+    Promise.all(tasks).then(() => {
+      const deleteIds = outbox.del.slice();
+
+      if (deleteIds.length) {
+        const ev = Protocol.deleteEvent(deleteIds, room());
+
+        if (ev) {
+          return Nostr.publish(ev)
+            .then(() => {
+              outbox.del = [];
+              saveOutbox();
+            })
+            .catch(() => {
+              // Оставляем delete-очередь для повторной попытки.
+            });
+        }
+      }
+    }).catch(() => {}).finally(() => {
+      flushing = false;
+
+      if (outbox.announce.length || outbox.del.length) {
+        scheduleFlush(10000);
+      }
+    });
+  }
+
+  /**
+   * Ищем локальные опубликованные заметки, у которых ещё нет eventId.
+   * Это чинит заметки, созданные офлайн или пережившие перезагрузку.
+   */
+  function scanLocalUnpublished() {
+    DB.all().then(notes => {
+      notes.forEach(n => {
+        if (n && n.shared && n.vector && !n.eventId) {
+          queueAnnounce(n.id);
+        }
+      });
+
+      flushOutbox();
+    }).catch(() => {});
+  }
+
+  // ─── Вспомогательные сети ─────────────────────────────────────────────────
+
+  function ensureOnlineListener() {
+    if (onlineListenerAdded) return;
+    onlineListenerAdded = true;
+
+    window.addEventListener('online', () => {
+      if (!started) {
+        start();
+        return;
+      }
+
+      if (!subscription && !isOffline()) {
+        subscribeToRoom();
+      }
+
+      flushOutbox();
+    });
+
+    window.addEventListener('offline', () => {
+      if (!started) return;
+
+      setStatus('failed');
+
+      // Инвалидируем текущую подписку, чтобы onclose не запускал переподключение.
+      subEpoch++;
+
+      if (subscription && typeof subscription.close === 'function') {
+        try { subscription.close(); } catch (_) {}
+      }
+
+      subscription = null;
+    });
+  }
+
   function trimSeen() {
     const max = Config.get('seenMaxSize', 1000);
     if (seen.size <= max) return;
-    
+
     const arr = Array.from(seen);
     seen.clear();
-    
+
     for (let i = arr.length - Math.floor(max / 2); i < arr.length; i++) {
       seen.add(arr[i]);
     }
@@ -3890,30 +4105,45 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   function isContentDuplicate(pubkey, text) {
     const key = pubkey + '::' + String(text || '').trim();
     if (contentSeen.has(key)) return true;
-    
+
     contentSeen.set(key, true);
-    
+
     if (contentSeen.size > 2000) {
       const first = contentSeen.keys().next().value;
       contentSeen.delete(first);
     }
-    
+
     return false;
   }
 
   /**
-   * Rate limit на входящие заметки от одного пира.
-   * Если с момента последней заметки прошло меньше 500мс — флуд, пропускаем.
+   * Token bucket для входящих заметок от одного автора.
+   * Стартовый бюджет позволяет нормально загрузить исторические заметки
+   * при первичной синхронизации, но всё равно защищает от откровенного флуда.
    */
-  function isNoteRateLimited(pubkey) {
+  function allowIncomingNote(pubkey) {
     const now = Date.now();
-    const last = peerNoteTimes.get(pubkey) || 0;
-    
-    if (now - last < 500) {
+    const capacity = Math.max(1, Number(Config.get('maxIncomingNotesPerPeer', 20)) || 20);
+    const refillPerSec = 2;
+
+    let bucket = peerNoteBudgets.get(pubkey);
+
+    if (!bucket) {
+      bucket = { tokens: capacity, ts: now };
+      peerNoteBudgets.set(pubkey, bucket);
+    }
+
+    const elapsedSec = Math.max(0, (now - bucket.ts) / 1000);
+    if (elapsedSec > 0) {
+      bucket.tokens = Math.min(capacity, bucket.tokens + elapsedSec * refillPerSec);
+      bucket.ts = now;
+    }
+
+    if (bucket.tokens >= 1) {
+      bucket.tokens -= 1;
       return true;
     }
-    
-    peerNoteTimes.set(pubkey, now);
+
     return false;
   }
 
@@ -3924,7 +4154,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
         centroids = [];
         return;
       }
-      
+
       centroids = Vec.kmeans(
         vecs,
         Math.min(Config.get('centroidCount', 12), vecs.length),
@@ -3933,101 +4163,129 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     }).catch(() => {});
   }
 
-  /**
-   * Префильтр входящих запросов: пропускаем только те, что хотя бы
-   * отдалённо близки к нашим центроидам. Экономит вычисления.
-   *
-   * Для Granite R2 (рабочий диапазон ~0.55–0.93) берём мягкий порог:
-   * floor = threshold - 0.20. При threshold=0.81 это 0.61.
-   */
   function passesPrefilter(queryVector) {
     if (!centroids.length) return true;
-    
+
     const floor = Config.get('threshold', 0.81) - 0.20;
     for (const c of centroids) {
       if (Vec.cosine(queryVector, c) >= floor) return true;
     }
-    
+
     return false;
+  }
+
+  // ─── Входящие события ─────────────────────────────────────────────────────
+
+  function markConnected() {
+    if (!started) return;
+
+    if (!hasReceivedEvent) {
+      hasReceivedEvent = true;
+    }
+
+    setStatus('connected');
+    flushOutbox();
   }
 
   function onEvent(ev) {
     if (!ev) return;
 
-    // Первое полученное событие подтверждает, что сеть работает
+    // Любое полученное событие подтверждает, что сеть жива.
     if (!hasReceivedEvent) {
-      hasReceivedEvent = true;
-      setStatus('connected');
-      flushPendingAnnounce();
+      markConnected();
     }
 
     if (seen.has(ev.id)) return;
-    
-    seen.add(ev.id);
-    trimSeen();
-    
-    if (ev.pubkey === Nostr.getPubkey()) return;
+
+    // Свои события игнорируем, но помечаем как виденные.
+    if (ev.pubkey === Nostr.getPubkey()) {
+      seen.add(ev.id);
+      trimSeen();
+      return;
+    }
+
+    let accepted = false;
 
     if (ev.kind === kNote()) {
-      handleIncomingNote(ev);
+      accepted = handleIncomingNote(ev);
     } else if (ev.kind === kQuery()) {
-      handleIncomingQuery(ev);
+      accepted = handleIncomingQuery(ev);
     } else if (ev.kind === kAnswer()) {
-      handleIncomingAnswer(ev);
+      accepted = handleIncomingAnswer(ev);
     } else if (ev.kind === kDelete()) {
-      handleIncomingDelete(ev);
+      accepted = handleIncomingDelete(ev);
+    }
+
+    if (accepted) {
+      seen.add(ev.id);
+      trimSeen();
     }
   }
 
   function handleIncomingNote(ev) {
     const note = Protocol.decodeNote(ev);
-    if (!note) return;
-    
-    // Защита от флуда: не более одной заметки в 500мс от одного пира
-    if (isNoteRateLimited(note.authorPubkey)) return;
-    
-    if (isContentDuplicate(note.authorPubkey, note.text)) return;
-    
+
+    // Некорректную заметку помечаем как seen, чтобы не обрабатывать повторно.
+    if (!note) return true;
+
+    // Временный rate-limit: НЕ помечаем seen, чтобы событие могло пройти позже.
+    if (!allowIncomingNote(note.authorPubkey)) {
+      return false;
+    }
+
+    // Повторяющийся контент от того же автора считаем дублем.
+    if (isContentDuplicate(note.authorPubkey, note.text)) {
+      return true;
+    }
+
+    peers.set(note.authorPubkey, Date.now());
+
     DB.cacheGet(note.id).then(existing => {
       if (existing && existing.createdAt && note.createdAt && existing.createdAt > note.createdAt) {
         return;
       }
-      
-      peers.set(note.authorPubkey, Date.now());
+
       DB.cachePut(note);
       notifyPeers();
-    });
+    }).catch(() => {});
+
+    return true;
   }
 
   function handleIncomingQuery(ev) {
     const q = Protocol.decodeQuery(ev);
-    if (!q) return;
-    
+
+    if (!q) return true;
+
     const now = Date.now();
     const last = peerQueryTimes.get(ev.pubkey) || 0;
-    
-    if (now - last < Config.get('queryRateLimit', 3000)) return;
-    
+
+    if (now - last < Config.get('queryRateLimit', 3000)) {
+      return true;
+    }
+
     peerQueryTimes.set(ev.pubkey, now);
-    
-    if (!passesPrefilter(q.vector)) return;
+
+    if (!passesPrefilter(q.vector)) {
+      return true;
+    }
 
     DB.all().then(notes => {
       const candidates = notes.filter(n => n.shared && n.vector);
       if (!candidates.length) return null;
-      
+
       const byId = new Map(candidates.map(n => [n.id, n]));
       const items = candidates.map(n => ({ id: n.id, vector: n.vector }));
-      
+
       return Ranker.cosineBatch(q.vector, items).then(scored => {
         const top = scored
           .filter(s => s.score >= Config.get('threshold', 0.81))
           .slice(0, q.maxResponses || Config.get('maxResponses', 8));
-        
+
         top.forEach((s, i) => {
           const note = byId.get(s.id);
           if (!note) return;
-          
+
           setTimeout(() => {
             Nostr.publish(Protocol.answerEvent(note, s.score, q.queryId, room()))
               .catch(e => Logger.warn('NetService: не отправить ответ', String(e)));
@@ -4035,17 +4293,25 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
         });
       });
     }).catch(e => Logger.warn('NetService: ошибка обработки запроса', String(e)));
+
+    return true;
   }
 
   function handleIncomingAnswer(ev) {
     const a = Protocol.decodeAnswer(ev);
-    if (!a) return;
-    
-    if (a.queryId !== activeQueryId) return;
-    if (isContentDuplicate(a.authorPubkey, a.text)) return;
-    
+
+    if (!a) return true;
+
+    if (a.queryId !== activeQueryId) {
+      return true;
+    }
+
+    if (isContentDuplicate(a.authorPubkey, a.text)) {
+      return true;
+    }
+
     peers.set(a.authorPubkey, Date.now());
-    
+
     DB.cachePut({
       id: a.id,
       text: a.text,
@@ -4055,35 +4321,42 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
       createdAt: a.createdAt,
       score: a.score,
     });
-    
+
     notifyPeers();
+
+    return true;
   }
 
   function handleIncomingDelete(ev) {
     const del = Protocol.decodeDelete(ev);
-    if (!del) return;
-    
+
+    if (!del) return true;
+
     del.eventIds.forEach(eventId => {
       if (eventId) DB.cacheDel(eventId);
     });
-    
+
     if (del.authorPubkey) peers.set(del.authorPubkey, Date.now());
     notifyPeers();
+
+    return true;
   }
 
+  // ─── Исходящие операции ───────────────────────────────────────────────────
+
   /**
-   * При публикации локальной заметки ей присваивается eventId (Nostr event ID).
+   * При публикации локальной заметки ей присваивается eventId.
    * Дети, привязанные к локальному id, мигрируют на eventId.
    */
   function migrateChildrenParentId(oldParentId, newParentId) {
     if (!oldParentId || !newParentId || oldParentId === newParentId) return;
-    
+
     DB.all().then(notes => {
       const children = notes.filter(n => n && n.parentId === oldParentId);
       if (!children.length) return;
-      
+
       Logger.info('NetService: мигрирую parentId у ' + children.length + ' детей');
-      
+
       children.forEach(child => {
         child.parentId = newParentId;
         DB.put(child).catch(e => Logger.warn('NetService: не обновить дочку', String(e)));
@@ -4091,27 +4364,27 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     }).catch(e => Logger.warn('NetService: не мигрировать детей', String(e)));
   }
 
-  // Очередь заметок, ожидающих публикации
-  const pendingAnnounce = [];
-  let announceRetryTimer = null;
-
   /**
-   * Публикация заметки в сеть с повторными попытками.
-   * Если publish фейлится, заметка попадает в очередь и повторяется через 5 секунд.
+   * Анонс заметки в сеть.
+   * Если сети нет или publish упал, заметка уходит в очередь.
    */
   function announceNote(note) {
     if (!note || !note.shared || !note.vector) return;
 
-    // Если сеть не готова, ставим в очередь
-    if (!Nostr.isReady()) {
-      pendingAnnounce.push(note);
-      scheduleAnnounceRetry();
-      Logger.warn('NetService: сеть не готова, заметка ' + note.id + ' в очереди');
+    // Уже опубликована — очищаем возможную очередь.
+    if (note.eventId) {
+      unqueueAnnounce(note.id);
+      return;
+    }
+
+    if (!canPublish()) {
+      queueAnnounce(note.id);
       return;
     }
 
     Nostr.publish(Protocol.noteEvent(note, room()))
       .then(ev => {
+        unqueueAnnounce(note.id);
         Logger.info('NetService: анонс заметки ' + note.id);
 
         if (ev && ev.id && note.id) {
@@ -4125,78 +4398,68 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
         }
       })
       .catch(e => {
-        Logger.warn('NetService: не анонсировать, повтор через 5с', String(e));
-        // Повторная попытка через 5 секунд
-        pendingAnnounce.push(note);
-        scheduleAnnounceRetry();
+        Logger.warn('NetService: не анонсировать, поставлено в очередь', String(e));
+        queueAnnounce(note.id);
       });
   }
 
   /**
-   * Обработка очереди неопубликованных заметок.
+   * Запрос удаления опубликованной заметки с рэлеев.
+   * Если сети нет, delete уходит в очередь.
    */
-  function scheduleAnnounceRetry() {
-    if (announceRetryTimer) return;
-
-    announceRetryTimer = setTimeout(() => {
-      announceRetryTimer = null;
-
-      if (!pendingAnnounce.length) return;
-
-      const batch = pendingAnnounce.splice(0, pendingAnnounce.length);
-      batch.forEach(note => announceNote(note));
-    }, 5000);
-  }
-
-  /**
-   * Попытка опубликовать все накопившиеся заметки.
-   * Вызывается при успешном подключении к сети.
-   */
-  function flushPendingAnnounce() {
-    if (!pendingAnnounce.length) return;
-
-    Logger.info('NetService: публикую ' + pendingAnnounce.length + ' накопленных заметок');
-    const batch = pendingAnnounce.splice(0, pendingAnnounce.length);
-    batch.forEach(note => announceNote(note));
-  }
   function forgetNote(note) {
     if (!note || !note.eventId) return;
-    
+
+    if (!canPublish()) {
+      queueDelete(note.eventId);
+      return;
+    }
+
     const ev = Protocol.deleteEvent(note.eventId, room());
     if (!ev) return;
-    
+
     Nostr.publish(ev)
-      .then(() => Logger.info('NetService: запрос удаления с рэлеев ' + note.id))
-      .catch(e => Logger.warn('NetService: не удалить с рэлеев', String(e)));
+      .then(() => {
+        unqueueDelete(note.eventId);
+        Logger.info('NetService: запрос удаления с рэлеев ' + note.id);
+      })
+      .catch(e => {
+        Logger.warn('NetService: не удалить с рэлеев, поставлено в очередь', String(e));
+        queueDelete(note.eventId);
+      });
   }
 
   /**
-   * Отправка запроса в сеть при изменении контекста (пин или дрейф).
-   * Использует duplicateThreshold для предотвращения повторных запросов:
-   * если новый вектор похож на предыдущий >= 0.88, запрос не отправляется.
+   * Отправка запроса в сеть при изменении контекста.
+   * В офлайне запросы не отправляем.
    */
   function maybeSendQuery() {
     const ctx = Store.get('context');
-    
+
     if ((ctx.source !== 'pin' && ctx.source !== 'drift') || !ctx.vector) {
       lastQueryVec = null;
       return;
     }
-    
+
+    if (!canPublish()) {
+      lastQueryVec = null;
+      return;
+    }
+
     const now = Date.now();
     if (now - lastQueryTime < Config.get('queryRateLimit', 3000)) return;
-    
+
     if (lastQueryVec && Ranker.isSimilar(lastQueryVec, ctx.vector)) return;
-    
+
     lastQueryVec = ctx.vector;
     lastQueryTime = now;
-    
+
     const tpl = Protocol.queryEvent(
       ctx.vector,
       Config.get('maxResponses', 8),
       Config.get('responseWindow', 6000)
     );
-    
+
     Nostr.publish(tpl)
       .then(ev => {
         activeQueryId = ev.id;
@@ -4209,7 +4472,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
       });
   }
 
-  let hasReceivedEvent = false;
+  // ─── Подписка ─────────────────────────────────────────────────────────────
 
   function subscribeToRoom() {
     const since = Math.floor(Date.now() / 1000) - currentWindow;
@@ -4231,25 +4494,22 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
         if (myEpoch !== subEpoch) return;
 
         setStatus('reconnecting');
+
         setTimeout(() => {
-          if (started && myEpoch === subEpoch) {
+          if (started && myEpoch === subEpoch && !isOffline()) {
             subscribeToRoom();
           }
         }, Config.get('reconnectBaseDelay', 1000));
       },
     });
 
-    // Ставим "подключение" только если подписка создалась.
-    // Реальный "онлайн" будет подтверждён первым событием или таймаутом.
     if (subscription) {
       setStatus('connecting');
-      
-      // Если через 5 секунд нет событий и подписка не закрылась,
-      // считаем что подключение установлено (рэлеи просто пустые).
+
+      // Если комната пустая и нет событий, через 5 секунд считаем подключение установленным.
       setTimeout(() => {
-        if (myEpoch === subEpoch && started) {
-          setStatus('connected');
-          flushPendingAnnounce();
+        if (myEpoch === subEpoch && started && !isOffline()) {
+          markConnected();
         }
       }, 5000);
     }
@@ -4257,18 +4517,18 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
 
   function loadHistory() {
     if (!started || historyLoading) return;
-    
+
     const maxWindow = Config.get('historyMaxWindow', 2592000);
     if (currentWindow >= maxWindow) {
       emitHistory(false, currentWindow);
       return;
     }
-    
+
     historyLoading = true;
     emitHistory(true, currentWindow);
-    
+
     currentWindow = Math.min(maxWindow, Math.max(currentWindow * 4, 86400));
-    
+
     try {
       subscribeToRoom();
       Logger.info('NetService: окно истории → ' + currentWindow + 's');
@@ -4282,68 +4542,103 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
 
   function startHeartbeat() {
     if (hbTimer) clearInterval(hbTimer);
-    
+
     hbTimer = setInterval(() => {
       const now = Date.now();
       const ttl = Config.get('peerTTL', 60000);
       let changed = false;
-      
+
       peers.forEach((ts, pk) => {
         if (now - ts > ttl) {
           peers.delete(pk);
           changed = true;
         }
       });
-      
+
+      peerQueryTimes.forEach((ts, pk) => {
+        if (now - ts > 60000) peerQueryTimes.delete(pk);
+      });
+
+      peerNoteBudgets.forEach((bucket, pk) => {
+        if (now - bucket.ts > 300000) peerNoteBudgets.delete(pk);
+      });
+
       if (changed) notifyPeers();
       trimSeen();
     }, Config.get('heartbeat', 30000));
   }
 
+  // ─── Старт/стоп ───────────────────────────────────────────────────────────
+
   function start() {
     if (started) return Promise.resolve();
-    
-    return Nostr.init().then(() => {
+    if (startPromise) return startPromise;
+
+    ensureOnlineListener();
+
+    startPromise = Nostr.init().then(() => {
       started = true;
-      
-      subscribeToRoom();
-      
-      bus.on('note:created', note => {
+      hasReceivedEvent = false;
+
+      // Чистим старые подписки на шину, если старт повторный.
+      busUnsubs.forEach(u => {
+        try { u(); } catch (_) {}
+      });
+      busUnsubs = [];
+
+      busUnsubs.push(bus.on('note:created', note => {
         if (note && note.shared) announceNote(note);
-      });
-      
-      bus.on('note:shared', note => {
+      }));
+
+      busUnsubs.push(bus.on('note:shared', note => {
         if (note && note.shared) announceNote(note);
-      });
-      
-      bus.on('note:unshared', note => {
-        if (note && !note.shared && note.eventId) forgetNote(note);
-      });
-      
-      bus.on('note:deleted', note => {
-        if (note && note.shared && note.eventId) forgetNote(note);
-      });
-      
-      bus.on('db:change', () => rebuildCentroids());
-      
+      }));
+
+      busUnsubs.push(bus.on('note:unshared', note => {
+        if (!note) return;
+
+        if (note.id) unqueueAnnounce(note.id);
+        if (!note.shared && note.eventId) forgetNote(note);
+      }));
+
+      busUnsubs.push(bus.on('note:deleted', note => {
+        if (!note) return;
+
+        if (note.id) unqueueAnnounce(note.id);
+        if (note.shared && note.eventId) forgetNote(note);
+      }));
+
+      busUnsubs.push(bus.on('db:change', () => rebuildCentroids()));
+
       contextUnsub = Store.subscribe(s => s.context, () => maybeSendQuery());
-      
+
       startHeartbeat();
       rebuildCentroids();
-      
-      setStatus('connected');
+      scanLocalUnpublished();
+
+      if (isOffline()) {
+        setStatus('failed');
+        Logger.warn('NetService: офлайн, ожидаем появление сети');
+      } else {
+        subscribeToRoom();
+      }
+
       Logger.info('NetService: запущен, комната #' + room());
     }).catch(e => {
       Logger.error('NetService: не стартовать', String(e && e.message || e));
       setStatus('failed');
+
+      if (startRetryTimer) clearTimeout(startRetryTimer);
+      startRetryTimer = setTimeout(() => {
+        if (!started) start();
+      }, 10000);
+    }).finally(() => {
+      startPromise = null;
     });
+
+    return startPromise;
   }
 
-  /**
-   * Остановка сетевого слоя.
-   * @param {boolean} full - Если true, полная очистка (перед выгрузкой).
-   *                         Если false, мягкое переподключение (seen сохраняется).
-   */
   function stop(full) {
     started = false;
     hasReceivedEvent = false;
@@ -4362,6 +4657,25 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
       try { contextUnsub(); } catch (_) {}
       contextUnsub = null;
     }
+
+    busUnsubs.forEach(u => {
+      try { u(); } catch (_) {}
+    });
+    busUnsubs = [];
+
+    if (flushTimer) {
+      clearTimeout(flushTimer);
+      flushTimer = null;
+    }
+
+    if (startRetryTimer) {
+      clearTimeout(startRetryTimer);
+      startRetryTimer = null;
+    }
+
+    activeQueryId = null;
+    lastQueryVec = null;
+    lastQueryTime = 0;
 
     if (full) {
       peers.clear();
