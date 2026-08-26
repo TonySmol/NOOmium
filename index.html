@@ -1372,8 +1372,6 @@ body.ready #app { display: flex; }
   padding: 16px;
   min-height: 0;
   color: var(--text);
-  -webkit-user-select: text;
-  user-select: text;
 }
 
 .nv-f-bottom {
@@ -5425,21 +5423,1170 @@ DI.register('HeaderStatus', function (bus, I18n, Embedder) {
 }, ['EventBus', 'I18n', 'Embedder']);
 // ─── UI/HeaderStatus ─── END ────────────────────────────────────────────────
 
-// ─── UI/Composer ─── START
-// [заглушка: модуль будет выдан отдельным блоком по запросу]
-// ─── UI/Composer ─── END
+// ─── UI/Composer ─── START ──────────────────────────────────────────────────
+/**
+ * Композер: поле ввода, счётчик символов, переключатель Личное/Мир, отправка.
+ *
+ * Лимиты длины поста (из Config):
+ * - softLimit: жёлтая подсветка, подсказка «пиши короче»
+ * - hardLimit: красная подсветка, подсказка «вектор обрезается»
+ * - maxPostLength: блокировка ввода через maxlength + блокировка кнопки
+ *
+ * Обработка виртуальной клавиатуры:
+ * При открытии клавиатуры сжимаем #app до видимой области через
+ * VisualViewport API, чтобы композер оставался в потоке.
+ */
+DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils, Config) {
+  let ta, cnt, sendBtn, toggle;
+  let sending = false;
+  let editingId = null;
+  let unsubs = [];
+  let vvCleanup = null;
 
-// ─── UI/FeedView ─── START
-// [заглушка: модуль будет выдан отдельным блоком по запросу]
-// ─── UI/FeedView ─── END
+  // SVG-иконка отправки (paper plane). Единый источник — совпадает с HTML.
+  const SEND_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4 20-7z"/></svg>';
 
-// ─── UI/BaseView ─── START
-// [заглушка: модуль будет выдан отдельным блоком по запросу]
-// ─── UI/BaseView ─── END
+  function updateCounter() {
+    if (!cnt || !ta) return;
+    
+    const len = ta.value.length;
+    const max = Config.get('maxPostLength', 2500);
+    const soft = Config.get('softLimit', 1200);
+    const hard = Config.get('hardLimit', 2000);
+    
+    cnt.textContent = Utils.word('symbols', len, I18n.getLang());
+    
+    let color = 'var(--text-3)';
+    let hint = null;
+    
+    if (len >= max) {
+      color = 'var(--rose)';
+      hint = I18n.t('ed.limit.max', { max });
+    } else if (len >= hard) {
+      color = 'var(--rose)';
+      hint = I18n.t('ed.limit.hard');
+    } else if (len >= soft) {
+      color = 'var(--amber)';
+      hint = I18n.t('ed.limit.soft');
+    }
+    
+    cnt.style.color = color;
+    updateHint(hint);
+    
+    if (sendBtn) {
+      sendBtn.disabled = len >= max || sending;
+    }
+  }
 
-// ─── UI/NoteView ─── START
-// [заглушка: модуль будет выдан отдельным блоком по запросу]
-// ─── UI/NoteView ─── END
+  function updateHint(text) {
+    let hintEl = document.getElementById('ed-hint');
+    
+    if (!text) {
+      if (hintEl) hintEl.remove();
+      return;
+    }
+    
+    if (!hintEl) {
+      hintEl = document.createElement('div');
+      hintEl.id = 'ed-hint';
+      hintEl.style.cssText = `
+        font-size: 11px;
+        color: var(--text-3);
+        padding-top: 4px;
+        transition: color 0.15s var(--ease);
+      `;
+      cnt.parentNode.insertBefore(hintEl, cnt.nextSibling);
+    }
+    
+    hintEl.textContent = text;
+    
+    if (text.includes(I18n.t('ed.limit.hard')) || text.includes(I18n.t('ed.limit.max'))) {
+      hintEl.style.color = 'var(--rose)';
+    } else {
+      hintEl.style.color = 'var(--amber)';
+    }
+  }
+
+  function reflectMode(mode) {
+    if (!toggle) return;
+    toggle.setAttribute('data-mode', mode);
+    toggle.querySelectorAll('.mt-opt').forEach(o =>
+      o.classList.toggle('on', o.getAttribute('data-v') === mode)
+    );
+  }
+
+  /**
+   * Переключение кнопки отправки между состояниями.
+   * - Обычный режим: SVG-иконка → при отправке скрывается, показывается '…'
+   * - Режим редактирования: текст «Сохранить» → при отправке '…'
+   */
+  function setSendingUI(on) {
+    if (!sendBtn) return;
+    sendBtn.disabled = on;
+    sendBtn.classList.toggle('sending', on);
+    
+    if (editingId) {
+      // Режим редактирования: текстовая кнопка
+      sendBtn.textContent = on ? '…' : I18n.t('btn.save');
+    } else {
+      // Обычный режим: SVG-иконка или индикатор загрузки
+      if (on) {
+        sendBtn.innerHTML = '<span style="font-size:16px;line-height:1;display:block;">…</span>';
+      } else {
+        sendBtn.innerHTML = SEND_SVG;
+      }
+    }
+  }
+
+  /**
+   * Синхронизация кнопки отправки с режимом (создание vs редактирование).
+   */
+  function refreshEditUI() {
+    if (!sendBtn || !toggle) return;
+    
+    if (editingId) {
+      toggle.style.display = 'none';
+      sendBtn.textContent = I18n.t('btn.save');
+    } else {
+      toggle.style.display = '';
+      sendBtn.innerHTML = SEND_SVG;
+    }
+  }
+
+  function edit(id) {
+    Notes.get(id).then(note => {
+      if (!note || !ta) return;
+      
+      editingId = id;
+      ta.value = note.text || '';
+      updateCounter();
+      refreshEditUI();
+      ta.focus();
+    });
+  }
+
+  function cancelEdit() {
+    editingId = null;
+    if (ta) ta.value = '';
+    updateCounter();
+    refreshEditUI();
+  }
+
+  function send() {
+    if (sending) return;
+    
+    const text = ta.value.trim();
+    if (!text) {
+      Toast.show('warn', I18n.t('toast.empty'));
+      return;
+    }
+    
+    const max = Config.get('maxPostLength', 2500);
+    if (text.length > max) {
+      Toast.show('err', I18n.t('ed.limit.max', { max }));
+      return;
+    }
+    
+    const mode = Store.get('sendMode');
+    sending = true;
+    setSendingUI(true);
+
+    const finish = () => {
+      sending = false;
+      setSendingUI(false);
+      editingId = null;
+      ta.value = '';
+      ta.style.height = 'auto';
+      Context.setInput('');
+      updateCounter();
+      refreshEditUI();
+    };
+
+    if (editingId) {
+      Notes.edit(editingId, text)
+        .then(() => {
+          Toast.show('ok', I18n.t('toast.edit.saved'));
+          finish();
+        })
+        .catch(e => {
+          Toast.show('err', String(e && e.message || e));
+          sending = false;
+          setSendingUI(false);
+        });
+      return;
+    }
+
+    const pin = Context.getPin();
+    const parentId = pin ? (pin.eventId || pin.id) : null;
+
+    Notes.create(text, mode, parentId)
+      .then(note => {
+        Toast.show('ok', I18n.t(mode === 'world' ? 'toast.saved.public' : 'toast.saved.private')
+          + (note && note.parentId ? ' · ' + I18n.t('inf.linked') : ''));
+        try { bus.emit('editor:sent'); } catch (_) {}
+        finish();
+      })
+      .catch(e => {
+        Toast.show('err', String(e && e.message || e));
+        sending = false;
+        setSendingUI(false);
+      });
+  }
+
+  /**
+   * Обработка виртуальной клавиатуры через VisualViewport API.
+   * При открытии клавиатуры сжимаем #app до видимой области,
+   * чтобы композер оставался в потоке, а лента корректно скроллилась.
+   */
+  function setupKeyboardHandler() {
+    if (!window.visualViewport) return;
+    
+    const vv = window.visualViewport;
+    
+    const onResize = () => {
+      const app = document.getElementById('app');
+      if (!app) return;
+      
+      const keyboardHeight = window.innerHeight - vv.height;
+      
+      if (keyboardHeight > 100) {
+        app.style.height = vv.height + 'px';
+        app.style.maxHeight = vv.height + 'px';
+      } else {
+        app.style.height = '';
+        app.style.maxHeight = '';
+      }
+    };
+    
+    vv.addEventListener('resize', onResize);
+    vv.addEventListener('scroll', onResize);
+    
+    vvCleanup = () => {
+      vv.removeEventListener('resize', onResize);
+      vv.removeEventListener('scroll', onResize);
+    };
+  }
+
+  function init() {
+    ta = document.getElementById('ed-ta');
+    cnt = document.getElementById('ed-cnt');
+    sendBtn = document.getElementById('btn-send');
+    toggle = document.getElementById('mode-toggle');
+    
+    if (!ta) return;
+
+    // Блокировка ввода на уровне браузера
+    ta.setAttribute('maxlength', Config.get('maxPostLength', 2500));
+
+    ta.addEventListener('input', () => {
+      ta.style.height = 'auto';
+      ta.style.height = Math.min(ta.scrollHeight, 120) + 'px';
+      
+      updateCounter();
+      Context.setInput(ta.value);
+    });
+
+    setupKeyboardHandler();
+    
+    ta.addEventListener('keydown', e => {
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        send();
+      } else if (e.key === 'Escape' && editingId) {
+        e.preventDefault();
+        cancelEdit();
+      }
+    });
+    
+    if (sendBtn) sendBtn.addEventListener('click', send);
+    
+    if (toggle) {
+      toggle.addEventListener('click', e => {
+        const opt = e.target.closest('.mt-opt');
+        if (opt && opt.getAttribute('data-v')) {
+          Store.setState({ sendMode: opt.getAttribute('data-v') });
+        }
+      });
+    }
+
+    unsubs.push(Store.subscribe(s => s.sendMode, reflectMode));
+    
+    unsubs.push(bus.on('i18n:change', () => {
+      updateCounter();
+      reflectMode(Store.get('sendMode'));
+      refreshEditUI();
+    }));
+    
+    unsubs.push(bus.on('note:edit-request', p => {
+      if (p && p.id) edit(p.id);
+    }));
+
+    reflectMode(Store.get('sendMode'));
+    refreshEditUI();
+    updateCounter();
+  }
+
+  function destroy() {
+    unsubs.forEach(u => {
+      try { u(); } catch (_) {}
+    });
+    unsubs = [];
+    
+    if (vvCleanup) {
+      try { vvCleanup(); } catch (_) {}
+      vvCleanup = null;
+    }
+  }
+
+  return { init, destroy, send, edit, cancelEdit };
+}, ['Context', 'Notes', 'Store', 'I18n', 'EventBus', 'Toast', 'Utils', 'Config']);
+// ─── UI/Composer ─── END ────────────────────────────────────────────────────
+
+// ─── UI/FeedView ─── START ──────────────────────────────────────────────────
+/**
+ * Рендеринг ленты заметок.
+ *
+ * Три режима отображения:
+ * 1. Без контекста: хронологический поток (все заметки)
+ * 2. Пин: все релевантные + озарения, отсортированные по убыванию скора
+ * 3. Ввод/дрейф: заметки из активного сегмента (Моё / Мир / Озарения)
+ *
+ * Карточка заметки содержит:
+ * - Текст
+ * - Тег (лично/открыто)
+ * - Кнопку «↳ по мотивам» (если есть parentId)
+ * - Кнопку «◆ резонанс» (если есть потомки)
+ * - Индикатор сходства (сигнал или проценты)
+ * - Дату
+ * - Кнопку «✎ открыть» (только для своих заметок)
+ */
+DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Influence, Provenance, Modal, NetService) {
+  let feedEl, emptyEl, emptyT, segBar, ctxBanner, ctxSrc, ctxTxt, ctxX;
+  let cLocal, cWorld, cSeren, histBtn;
+  let unsubs = [];
+  let rafPending = false;
+
+  function bind() {
+    feedEl = document.getElementById('feed');
+    emptyEl = document.getElementById('feed-empty');
+    emptyT = document.getElementById('feed-empty-t');
+    segBar = document.getElementById('seg');
+    ctxBanner = document.getElementById('ctx-banner');
+    ctxSrc = document.getElementById('ctx-src');
+    ctxTxt = document.getElementById('ctx-txt');
+    ctxX = document.getElementById('ctx-x');
+    cLocal = document.getElementById('c-local');
+    cWorld = document.getElementById('c-world');
+    cSeren = document.getElementById('c-seren');
+    histBtn = document.getElementById('btn-history');
+  }
+
+  function scheduleRender() {
+    if (rafPending) return;
+    rafPending = true;
+    requestAnimationFrame(() => {
+      rafPending = false;
+      render();
+    });
+  }
+
+  function isPinned(n) {
+    const ctx = Store.get('context');
+    return ctx.source === 'pin' && ctx.noteId === n.id;
+  }
+
+  function onNoteClick(n) {
+    const ctx = Store.get('context');
+    
+    if ((ctx.source === 'pin' || ctx.source === 'drift') && ctx.noteId === n.id) {
+      Context.clearPin();
+      return;
+    }
+    
+    if (n.vector) Context.setPin(n);
+  }
+
+  /**
+   * Модалка «Потомки»: список заметок, порождённых данной.
+   */
+  function renderChildrenModal(children) {
+    const body = document.createElement('div');
+    body.style.cssText = 'display:flex;flex-direction:column;gap:8px;';
+
+    if (!children.length) {
+      const empty = document.createElement('div');
+      empty.style.cssText = 'color:var(--text-3);font-size:13px;text-align:center;padding:12px;';
+      empty.textContent = I18n.t('inf.nochildren');
+      body.appendChild(empty);
+    } else {
+      children.forEach(c => {
+        const item = document.createElement('button');
+        item.className = 'nv-act';
+        item.style.cssText = 'text-align:left;justify-content:flex-start;white-space:normal;height:auto;min-height:40px;width:100%;';
+        item.textContent = (c.text || '').slice(0, 140);
+
+        item.addEventListener('click', () => {
+          Modal.close();
+          try { bus.emit('note:open', { id: c.id }); } catch (_) {}
+        });
+
+        body.appendChild(item);
+      });
+    }
+
+    Modal.open({
+      title: I18n.t('inf.children') + (children.length ? ' · ' + children.length : ''),
+      body: body,
+      buttons: [{ text: I18n.t('btn.close'), onClick: () => Modal.close() }],
+    });
+  }
+
+  function showChildren(note) {
+    const ids = [note.id];
+    if (note.eventId) ids.push(note.eventId);
+    
+    Promise.all(ids.map(id => Provenance.children(id))).then(results => {
+      const seenIds = new Set();
+      const children = [];
+      
+      results.forEach(list => {
+        (list || []).forEach(c => {
+          if (c && !seenIds.has(c.id)) {
+            seenIds.add(c.id);
+            children.push(c);
+          }
+        });
+      });
+      
+      renderChildrenModal(children);
+    }).catch(() => {});
+  }
+
+  /**
+   * Модалка «Линейка по мотивам»: цепочка предков с отступами.
+   */
+  function renderAncestorsModal(note, chain) {
+    const body = document.createElement('div');
+    body.style.cssText = 'display:flex;flex-direction:column;gap:8px;';
+    
+    if (!chain.length) {
+      const empty = document.createElement('div');
+      empty.style.cssText = 'color:var(--text-3);font-size:13px;text-align:center;padding:12px;';
+      empty.textContent = I18n.t('inf.noancestors');
+      body.appendChild(empty);
+    } else {
+      chain.forEach((c, i) => {
+        const item = document.createElement('button');
+        item.className = 'nv-act';
+        item.style.cssText = 'text-align:left;justify-content:flex-start;white-space:normal;height:auto;min-height:40px;width:100%;';
+        item.style.paddingLeft = (16 + i * 14) + 'px';
+        item.textContent = '↳ ' + (c.text || '').slice(0, 140);
+        
+        item.addEventListener('click', () => {
+          Modal.close();
+          try { bus.emit('note:open', { id: c.id }); } catch (_) {}
+        });
+        
+        body.appendChild(item);
+      });
+    }
+    
+    Modal.open({
+      title: I18n.t('inf.lineage') + (chain.length ? ' · ' + chain.length : ''),
+      body: body,
+      buttons: [{ text: I18n.t('btn.close'), onClick: () => Modal.close() }],
+    });
+  }
+
+  function showAncestors(note) {
+    Provenance.ancestors(note.id).then(chain => {
+      renderAncestorsModal(note, chain);
+    }).catch(() => {});
+  }
+
+  function createSep() {
+    const sep = document.createElement('span');
+    sep.className = 'note-meta-sep';
+    return sep;
+  }
+
+  /**
+   * Рендеринг одной карточки заметки.
+   * @param {Object} n - Заметка.
+   * @param {boolean} isRanked - Показывать ли индикатор сходства.
+   * @param {number} i - Индекс для анимации появления.
+   */
+  function card(n, isRanked, i) {
+    const el = document.createElement('div');
+    el.className = 'note' + (isPinned(n) ? ' pinned' : '');
+    el.style.animationDelay = Math.min(i * 25, 300) + 'ms';
+    el.dataset.id = n.id;
+
+    const txt = document.createElement('div');
+    txt.className = 'note-txt';
+    txt.textContent = n.text || '';
+    el.appendChild(txt);
+
+    const meta = document.createElement('div');
+    meta.className = 'note-meta';
+
+    // Тег: лично/открыто для своих, «· pubkey» для чужих
+    const tag = document.createElement('span');
+    if (n.own) {
+      tag.className = 'note-tag ' + (n.shared ? 'world' : 'priv');
+      tag.textContent = n.shared ? I18n.t('base.tag.shared') : I18n.t('base.tag.private');
+    } else {
+      tag.className = 'note-tag world';
+      tag.textContent = '· ' + Utils.shortPk(n.authorPubkey || '');
+    }
+    meta.appendChild(tag);
+
+    const hasNav = !!n.parentId;
+    const res = Influence.resonance(n.id) + Influence.resonance(n.eventId);
+    const hasResonance = res > 0;
+
+    if (hasNav || hasResonance) {
+      meta.appendChild(createSep());
+
+      // Кнопка «↳ по мотивам»
+      if (n.parentId) {
+        const link = document.createElement('button');
+        link.className = 'note-parent';
+        link.textContent = '↳';
+        link.title = I18n.t('inf.lineage');
+        link.setAttribute('aria-label', I18n.t('inf.openparent'));
+        
+        Provenance.ancestors(n.id).then(chain => {
+          if (!chain.length) {
+            link.classList.add('orphan');
+            link.title = I18n.t('inf.orphan.hint');
+          } else {
+            link.addEventListener('click', e => {
+              e.stopPropagation();
+              showAncestors(n);
+            });
+          }
+        }).catch(() => {});
+        
+        meta.appendChild(link);
+      }
+
+      // Кнопка «◆ резонанс»
+      if (hasResonance) {
+        const r = document.createElement('button');
+        r.className = 'note-sim';
+        r.textContent = '◆' + res;
+        r.title = I18n.t('inf.resonance');
+        r.setAttribute('aria-label', I18n.t('inf.resonance'));
+        
+        r.addEventListener('click', e => {
+          e.stopPropagation();
+          showChildren(n);
+        });
+        
+        meta.appendChild(r);
+      }
+    }
+
+    meta.appendChild(createSep());
+
+    // Индикатор сходства (сигнал или проценты)
+    if (isRanked && typeof n.score === 'number') {
+      const threshold = Config.get('threshold', 0.81);
+      const serenMin = threshold - Config.get('serendipity', 0.07);
+      const displayMode = Config.get('similarityDisplay', 'signal');
+      const pct = Math.round(n.score * 100);
+
+      const sim = document.createElement('span');
+      sim.className = 'note-sim-info';
+
+      if (displayMode === 'percent') {
+        // Режим отладки: сырые проценты
+        sim.textContent = pct + '%';
+        sim.title = I18n.t('sim.score');
+      } else {
+        // Режим сигнала: палочки + текстовая метка
+        if (n.score >= threshold) {
+          sim.innerHTML = '<span class="sig-bar sig-full"></span><span class="sig-bar sig-full"></span><span class="sig-bar sig-full"></span>';
+          sim.title = I18n.t('sim.level.high') + ' (' + pct + '%)';
+        } else if (n.score >= serenMin) {
+          sim.innerHTML = '<span class="sig-bar sig-full"></span><span class="sig-bar sig-full"></span><span class="sig-bar sig-empty"></span>';
+          sim.title = I18n.t('sim.level.mid') + ' (' + pct + '%)';
+        }
+        const label = document.createElement('span');
+        label.className = 'sig-label';
+        label.textContent = n.score >= threshold
+          ? I18n.t('sim.level.high')
+          : I18n.t('sim.level.mid');
+        sim.appendChild(label);
+      }
+
+      meta.appendChild(sim);
+    }
+
+    // Дата
+    const date = document.createElement('span');
+    date.className = 'note-date';
+    date.textContent = Utils.fmtRelativeTime(n.createdAt, I18n.getLang(), I18n.t);
+    meta.appendChild(date);
+
+    // Кнопка «✎ открыть» (только для своих заметок)
+    if (n.own) {
+      const openBtn = document.createElement('button');
+      openBtn.className = 'na';
+      openBtn.textContent = '✎';
+      openBtn.title = I18n.t('btn.open');
+      openBtn.setAttribute('aria-label', I18n.t('btn.open'));
+      
+      openBtn.addEventListener('click', e => {
+        e.stopPropagation();
+        try { bus.emit('note:open', { id: n.id }); } catch (_) {}
+      });
+      
+      meta.appendChild(openBtn);
+    }
+
+    el.appendChild(meta);
+    el.addEventListener('click', () => onNoteClick(n));
+    return el;
+  }
+
+  function render() {
+    if (!feedEl) return;
+    
+    const state = Store.getState();
+    const ctx = state.context;
+    const isPinnedMode = ctx.source === 'pin';
+    const isTyping = ctx.source === 'input';
+    const isDrift = ctx.source === 'drift';
+    const isRanked = isPinnedMode || isTyping || isDrift;
+
+    segBar.classList.toggle('on', isTyping || isDrift);
+    ctxBanner.classList.toggle('on', isPinnedMode || isDrift);
+    
+    if (isPinnedMode || isDrift) {
+      ctxSrc.textContent = isDrift ? I18n.t('ctx.drift') : I18n.t('ctx.pinned');
+      ctxTxt.textContent = isDrift ? (ctx.pinText || ctx.text) : ctx.text;
+    }
+
+    document.querySelectorAll('.seg-b').forEach(b => {
+      b.classList.toggle('on', b.getAttribute('data-k') === state.seg);
+    });
+    
+    cLocal.textContent = state.lists.local.length;
+    cWorld.textContent = state.lists.world.length;
+    cSeren.textContent = state.lists.seren.length;
+
+    let notes;
+    
+    if (isPinnedMode) {
+      // Пин: все релевантные + озарения, по убыванию скора
+      notes = [...state.lists.local, ...state.lists.world, ...state.lists.seren]
+        .filter(n => n.id !== ctx.noteId)
+        .sort((a, b) => (b.score || 0) - (a.score || 0));
+    } else if (isTyping || isDrift) {
+      // Ввод/дрейф: заметки из активного сегмента
+      notes = state.lists[state.seg] || [];
+    } else {
+      // Без контекста: хронологический поток
+      notes = state.feed;
+    }
+
+    feedEl.innerHTML = '';
+    
+    if (!notes.length) {
+      emptyEl.classList.add('on');
+      
+      emptyT.textContent = isPinnedMode
+        ? I18n.t('empty.world.t')
+        : ((isTyping || isDrift) ? I18n.t('empty.' + state.seg + '.t') : I18n.t('empty.local.t'));
+    } else {
+      emptyEl.classList.remove('on');
+      
+      const frag = document.createDocumentFragment();
+      notes.forEach((n, i) => {
+        frag.appendChild(card(n, isRanked, i));
+      });
+      feedEl.appendChild(frag);
+    }
+  }
+
+  function init() {
+    bind();
+    if (!feedEl) return;
+
+    unsubs.push(Store.subscribe(s => s.context, scheduleRender, Store.shallowEqual));
+    unsubs.push(Store.subscribe(s => s.lists, scheduleRender));
+    unsubs.push(Store.subscribe(s => s.feed, scheduleRender));
+    unsubs.push(Store.subscribe(s => s.seg, scheduleRender));
+    unsubs.push(bus.on('i18n:change', scheduleRender));
+    unsubs.push(bus.on('db:change', scheduleRender));
+    unsubs.push(bus.on('db:cache', scheduleRender));
+    unsubs.push(bus.on('influence:updated', scheduleRender));
+    
+    if (histBtn) {
+      histBtn.addEventListener('click', () => NetService.loadHistory());
+      
+      unsubs.push(bus.on('net:history', e => {
+        if (!histBtn) return;
+        
+        if (e && e.loading) {
+          histBtn.disabled = true;
+          histBtn.textContent = I18n.t('net.loading');
+        } else {
+          histBtn.disabled = false;
+          histBtn.textContent = I18n.t('net.loadmore');
+        }
+      }));
+    }
+    
+    document.querySelectorAll('.seg-b').forEach(b => {
+      b.addEventListener('click', () => {
+        Store.setState({ seg: b.getAttribute('data-k') });
+      });
+    });
+    
+    if (ctxX) {
+      ctxX.addEventListener('click', () => Context.clearPin());
+    }
+    
+    render();
+  }
+
+  function destroy() {
+    unsubs.forEach(u => {
+      try { u(); } catch (_) {}
+    });
+    unsubs = [];
+  }
+
+  return { init, destroy, render };
+}, ['Store', 'Context', 'I18n', 'Utils', 'Config', 'EventBus', 'Influence', 'Provenance', 'Modal', 'NetService']);
+// ─── UI/FeedView ─── END ────────────────────────────────────────────────────
+
+// ─── UI/BaseView ─── START ──────────────────────────────────────────────────
+/**
+ * Экран «База»: все локальные заметки пользователя.
+ * - Статистика: всего / открыто / лично
+ * - Текстовый поиск (дебаунс)
+ * - Сортировка: новые / старые / а-я
+ * - Клик по заметке → открывает NoteView
+ */
+DI.register('BaseView', function (Store, DB, I18n, Utils, Config, bus) {
+  let listEl, statsTotal, statsOpen, statsPriv, qEl, sortEl;
+  let unsubs = [];
+  let rafPending = false;
+
+  function bind() {
+    listEl = document.getElementById('base-list');
+    statsTotal = document.getElementById('bs-total');
+    statsOpen = document.getElementById('bs-open');
+    statsPriv = document.getElementById('bs-priv');
+    qEl = document.getElementById('base-q');
+    sortEl = document.getElementById('base-sort');
+  }
+
+  function scheduleRender() {
+    if (rafPending) return;
+    rafPending = true;
+    requestAnimationFrame(() => {
+      rafPending = false;
+      render();
+    });
+  }
+
+  function render() {
+    if (!listEl) return;
+    
+    const view = Store.get('view');
+    if (view !== 'base') return;
+
+    const q = (qEl && qEl.value || '').trim().toLowerCase();
+    const sort = (sortEl && sortEl.value) || 'new';
+
+    DB.all().then(notes => {
+      let arr = notes.slice();
+      
+      if (q) arr = arr.filter(n => (n.text || '').toLowerCase().includes(q));
+      
+      if (sort === 'old') {
+        arr.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+      } else if (sort === 'az') {
+        arr.sort((a, b) => (a.text || '').localeCompare(b.text || '', I18n.getLang() === 'en' ? 'en' : 'ru'));
+      } else {
+        arr.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+      }
+
+      const shared = notes.filter(n => n.shared).length;
+      
+      if (statsTotal) statsTotal.textContent = notes.length;
+      if (statsOpen) statsOpen.textContent = shared;
+      if (statsPriv) statsPriv.textContent = notes.length - shared;
+
+      listEl.innerHTML = '';
+      
+      if (!arr.length) {
+        const empty = document.createElement('div');
+        empty.className = 'note';
+        empty.style.cursor = 'default';
+        empty.textContent = q ? I18n.t('empty.base.empty') : I18n.t('empty.base.t');
+        listEl.appendChild(empty);
+        return;
+      }
+
+      const frag = document.createDocumentFragment();
+      arr.forEach(n => frag.appendChild(row(n)));
+      listEl.appendChild(frag);
+    }).catch(() => {});
+  }
+
+  function row(n) {
+    const el = document.createElement('div');
+    el.className = 'bi';
+    el.dataset.id = n.id;
+
+    const t = document.createElement('div');
+    t.className = 'bi-t';
+    t.textContent = n.text || '';
+    el.appendChild(t);
+
+    const f = document.createElement('div');
+    f.className = 'bi-f';
+
+    const tag = document.createElement('span');
+    tag.className = 'note-tag ' + (n.shared ? 'world' : 'priv');
+    tag.textContent = n.shared ? I18n.t('base.tag.shared') : I18n.t('base.tag.private');
+    f.appendChild(tag);
+
+    const date = document.createElement('span');
+    date.textContent = Utils.fmtDate(n.updatedAt || n.createdAt, I18n.getLang());
+    f.appendChild(date);
+
+    el.appendChild(f);
+    el.addEventListener('click', () => {
+      try { bus.emit('note:open', { id: n.id }); } catch (_) {}
+    });
+    
+    return el;
+  }
+
+  function init() {
+    bind();
+    if (!listEl) return;
+    
+    const debouncedRender = Utils.debounce(scheduleRender, Config.get('baseSearchDebounce', 200));
+    
+    if (qEl) qEl.addEventListener('input', debouncedRender);
+    if (sortEl) sortEl.addEventListener('change', scheduleRender);
+    
+    unsubs.push(bus.on('db:change', scheduleRender));
+    unsubs.push(bus.on('view:changed', scheduleRender));
+    unsubs.push(bus.on('i18n:change', scheduleRender));
+    
+    render();
+  }
+
+  function destroy() {
+    unsubs.forEach(u => {
+      try { u(); } catch (_) {}
+    });
+    unsubs = [];
+  }
+
+  return { init, destroy, render };
+}, ['Store', 'DB', 'I18n', 'Utils', 'Config', 'EventBus']);
+// ─── UI/BaseView ─── END ────────────────────────────────────────────────────
+
+// ─── UI/NoteView ─── START ──────────────────────────────────────────────────
+/**
+ * Полноэкранный просмотр заметки.
+ *
+ * Для своих заметок:
+ * - Удаление (с подтверждением)
+ * - Переключение видимости (лично ↔ открыто)
+ * - Пин (закрепление для контекстного поиска)
+ * - Редактирование (только для личных; публичные immutable в Nostr)
+ *
+ * Для чужих заметок:
+ * - Только просмотр + пин
+ *
+ * Текст в режиме чтения не выделяется (user-select: none из глобального стиля).
+ * В режиме редактирования (.nv-text-edit) выделение разрешено.
+ */
+DI.register('NoteView', function (DB, Notes, NoteActions, I18n, Utils, Toast, bus) {
+  let root = null;
+  let currentId = null;
+  let currentNote = null;
+  let escHandler = null;
+  let editMode = false;
+  let editTextarea = null;
+
+  function ensureRoot() {
+    if (!root) root = document.getElementById('noteview');
+    return root;
+  }
+
+  function close() {
+    const r = ensureRoot();
+    if (r) {
+      r.classList.remove('on');
+      r.innerHTML = '';
+    }
+    
+    if (escHandler) {
+      document.removeEventListener('keydown', escHandler);
+      escHandler = null;
+    }
+    
+    currentId = null;
+    currentNote = null;
+    editMode = false;
+    editTextarea = null;
+  }
+
+  /**
+   * Открыть заметку по id. Сначала ищем в локальной БД,
+   * потом в сетевом кэше (для чужих заметок).
+   */
+  function open(id) {
+    if (!id) return;
+    
+    DB.get(id).then(note => {
+      if (!note) {
+        return DB.cacheGet(id).then(cached => {
+          if (cached) render(cached);
+        });
+      }
+      render(note);
+    }).catch(() => {});
+  }
+
+  /**
+   * Переход в режим редактирования: текст заменяется на textarea.
+   */
+  function enterEditMode(note, editBtn) {
+    if (editMode) return;
+    
+    editMode = true;
+    const r = ensureRoot();
+    if (!r) return;
+
+    const txt = r.querySelector('.nv-text');
+    
+    if (txt) {
+      const ta = document.createElement('textarea');
+      ta.className = 'nv-text-edit';
+      ta.value = note.text || '';
+      ta.placeholder = I18n.t('note.edit.placeholder');
+      txt.replaceWith(ta);
+      editTextarea = ta;
+      ta.focus();
+    }
+
+    if (editBtn) {
+      editBtn.textContent = I18n.t('btn.save');
+    }
+  }
+
+  /**
+   * Сохранение изменений при редактировании.
+   */
+  function saveEdit(note) {
+    if (!editMode || !editTextarea) return;
+    
+    const newText = editTextarea.value.trim();
+    
+    if (!newText) {
+      Toast.show('warn', I18n.t('toast.empty'));
+      return;
+    }
+    
+    const editBtn = document.querySelector('.nv-act:not(.danger)');
+    
+    if (editBtn) {
+      editBtn.disabled = true;
+      editBtn.textContent = '…';
+    }
+    
+    Notes.edit(note.id, newText).then(updatedNote => {
+      if (!updatedNote) {
+        Toast.show('err', I18n.t('toast.copy.fail'));
+        return;
+      }
+      
+      Toast.show('ok', I18n.t('toast.edit.saved'));
+      currentNote = updatedNote;
+      render(updatedNote);
+    }).catch(() => {
+      Toast.show('err', I18n.t('toast.copy.fail'));
+      
+      if (editBtn) {
+        editBtn.disabled = false;
+        editBtn.textContent = I18n.t('btn.save');
+      }
+    });
+  }
+
+  function pinAndClose() {
+    if (!currentNote) {
+      close();
+      return;
+    }
+    
+    try {
+      bus.emit('note:pin', currentNote);
+      Toast.show('ok', I18n.t('toast.pinned'));
+    } catch (_) {}
+    
+    close();
+  }
+
+  /**
+   * Полный рендер экрана просмотра заметки.
+   */
+  function render(note) {
+    const r = ensureRoot();
+    if (!r) return;
+    
+    currentId = note.id;
+    currentNote = note;
+    r.innerHTML = '';
+    r.classList.add('on');
+    editMode = false;
+    editTextarea = null;
+
+    const isOwn = !!(note.id && !note.authorPubkey);
+
+    // Верхняя панель действий
+    const top = document.createElement('div');
+    top.className = 'nv-f';
+
+    if (isOwn) {
+      const del = document.createElement('button');
+      del.className = 'nv-act danger';
+      del.textContent = I18n.t('btn.del');
+      del.addEventListener('click', () => {
+        NoteActions.remove(note.id);
+        close();
+      });
+      top.appendChild(del);
+
+      const tog = document.createElement('button');
+      tog.className = 'nv-act';
+      tog.textContent = note.shared ? I18n.t('btn.toggle.priv') : I18n.t('btn.toggle.pub');
+      tog.addEventListener('click', () => {
+        NoteActions.toggle(note.id);
+        close();
+      });
+      top.appendChild(tog);
+    }
+
+    const pinBtn = document.createElement('button');
+    pinBtn.className = 'nv-act';
+    pinBtn.textContent = '◈ ' + I18n.t('btn.pin');
+    pinBtn.title = I18n.t('btn.pin.aria');
+    pinBtn.setAttribute('aria-label', I18n.t('btn.pin.aria'));
+    pinBtn.addEventListener('click', pinAndClose);
+    top.appendChild(pinBtn);
+
+    if (isOwn && !note.shared) {
+      // Редактирование доступно только для личных заметок
+      const edit = document.createElement('button');
+      edit.className = 'nv-act';
+      edit.textContent = I18n.t('btn.edit');
+      
+      edit.addEventListener('click', () => {
+        if (editMode) {
+          saveEdit(note);
+        } else {
+          enterEditMode(note, edit);
+        }
+      });
+      
+      top.appendChild(edit);
+    } else if (isOwn && note.shared) {
+      // Публичные заметки нельзя редактировать (immutable в Nostr)
+      const hint = document.createElement('span');
+      hint.style.cssText = 'font-size:12px;color:var(--text-3);align-self:center;';
+      hint.textContent = I18n.t('note.public.noedit');
+      top.appendChild(hint);
+    }
+
+    r.appendChild(top);
+
+    // Тело: мета + текст
+    const body = document.createElement('div');
+    body.className = 'nv-b';
+
+    const info = document.createElement('div');
+    info.className = 'note-meta';
+    info.style.marginBottom = '12px';
+
+    const tag = document.createElement('span');
+    
+    if (isOwn) {
+      tag.className = 'note-tag ' + (note.shared ? 'world' : 'priv');
+      tag.textContent = note.shared ? I18n.t('base.tag.shared') : I18n.t('base.tag.private');
+    } else {
+      tag.className = 'note-tag world';
+      tag.textContent = '· ' + Utils.shortPk(note.authorPubkey || '');
+    }
+    
+    info.appendChild(tag);
+
+    const date = document.createElement('span');
+    date.textContent = Utils.fmtDate(note.updatedAt || note.createdAt, I18n.getLang()) + ' ' +
+                       Utils.fmtTime(note.updatedAt || note.createdAt, I18n.getLang());
+    info.appendChild(date);
+    body.appendChild(info);
+
+    const txt = document.createElement('div');
+    txt.className = 'nv-text';
+    txt.textContent = note.text || '';
+    body.appendChild(txt);
+
+    r.appendChild(body);
+
+    // Нижняя панель: кнопка закрытия
+    const bottom = document.createElement('div');
+    bottom.className = 'nv-f-bottom';
+    
+    const closeBtn = document.createElement('button');
+    closeBtn.className = 'nv-act';
+    closeBtn.textContent = I18n.t('btn.close');
+    closeBtn.addEventListener('click', close);
+    bottom.appendChild(closeBtn);
+    
+    r.appendChild(bottom);
+
+    // Закрытие по клику на фон
+    r.addEventListener('click', e => {
+      if (e.target === r) close();
+    });
+
+    // Закрытие по Escape
+    if (escHandler) document.removeEventListener('keydown', escHandler);
+    escHandler = e => {
+      if (e.key === 'Escape') close();
+    };
+    document.addEventListener('keydown', escHandler);
+  }
+
+  function init() {
+    ensureRoot();
+    
+    bus.on('note:open', p => {
+      if (p && p.id) open(p.id);
+    });
+  }
+
+  function destroy() {
+    close();
+  }
+
+  return { init, destroy, open, close };
+}, ['DB', 'Notes', 'NoteActions', 'I18n', 'Utils', 'Toast', 'EventBus']);
+// ─── UI/NoteView ─── END ────────────────────────────────────────────────────
 
 // ─── UI/MenuView ─── START
 // [заглушка: модуль будет выдан отдельным блоком по запросу]
