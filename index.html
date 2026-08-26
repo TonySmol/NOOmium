@@ -1764,7 +1764,7 @@ body.ready #app { display: flex; }
 // ═══════════════════════════════════════════════════════════════════════════════
 // ВЕРСИЯ ПРИЛОЖЕНИЯ
 // ═══════════════════════════════════════════════════════════════════════════════
-const APP_VERSION = '0.6.7';
+const APP_VERSION = '0.6.8';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CORE/DI - ПРЕАМБУЛА
@@ -4310,13 +4310,23 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
 
     peers.set(note.authorPubkey, Date.now());
 
-    DB.cacheGet(note.id).then(existing => {
-      if (existing && existing.createdAt && note.createdAt && existing.createdAt > note.createdAt) {
-        return;
-      }
+    // Проверяем, есть ли эта заметка уже в локальной БД (notes store).
+    // Если есть (по id или eventId), не кладём в cache — это дубль своей заметки.
+    DB.all().then(localNotes => {
+      const isLocal = localNotes.some(n => 
+        n && (n.id === note.id || n.eventId === note.id)
+      );
+      
+      if (isLocal) return;
 
-      DB.cachePut(note);
-      notifyPeers();
+      DB.cacheGet(note.id).then(existing => {
+        if (existing && existing.createdAt && note.createdAt && existing.createdAt > note.createdAt) {
+          return;
+        }
+
+        DB.cachePut(note);
+        notifyPeers();
+      }).catch(() => {});
     }).catch(() => {});
 
     return true;
@@ -5034,9 +5044,24 @@ DI.register('Feed', function (DB, Ranker, Store, bus, Logger) {
 
       if (!ctx.source) {
         // Режим 1: без контекста — хронологический поток
+        
+        // Дедупликация: исключаем из cached те заметки, которые уже есть в local
+        // (по id или eventId). Это предотвращает дубли когда своя опубликованная
+        // заметка возвращается от рэлея.
+        const localIds = new Set();
+        local.forEach(n => {
+          if (n && n.id) localIds.add(n.id);
+          if (n && n.eventId) localIds.add(n.eventId);
+        });
+        
+        const filteredCached = cached.filter(n => {
+          if (!n || !n.id) return false;
+          return !localIds.has(n.id);
+        });
+        
         const merged = [
           ...local.map(n => Object.assign({}, n, { own: true })),
-          ...cached.map(n => Object.assign({}, n, { own: false })),
+          ...filteredCached.map(n => Object.assign({}, n, { own: false })),
         ].sort((x, y) => (y.createdAt || 0) - (x.createdAt || 0));
         
         Store.setState({
