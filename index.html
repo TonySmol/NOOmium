@@ -5006,21 +5006,424 @@ DI.register('Onboarding', function (Config, Modal, I18n, Embedder) {
 }, ['Config', 'Modal', 'I18n', 'Embedder']);
 // ─── UI/Onboarding ─── END ──────────────────────────────────────────────────
 
-// ─── UI/Modal ─── START
-// [заглушка: модуль будет выдан отдельным блоком по запросу]
-// ─── UI/Modal ─── END
+// ─── UI/Modal ─── START ─────────────────────────────────────────────────────
+/**
+ * Универсальная система модальных окон.
+ * Поддерживает: текстовые body, DOM-элементы, кнопки с primary/danger модификаторами.
+ *
+ * Доступность:
+ * - Закрытие по Escape
+ * - Закрытие по клику на overlay
+ * - Возврат фокуса на элемент, открывший модалку
+ * - Автофокус на первый интерактивный элемент
+ */
+DI.register('Modal', function (I18n) {
+  let overlay, modal, titleEl, bodyEl, footEl, closeBtn;
+  let escHandler = null;
+  let lastFocus = null;
 
-// ─── UI/Toast ─── START
-// [заглушка: модуль будет выдан отдельным блоком по запросу]
-// ─── UI/Toast ─── END
+  function bind() {
+    if (overlay) return;
+    
+    overlay = document.getElementById('overlay');
+    modal = document.getElementById('modal');
+    titleEl = document.getElementById('modal-t');
+    bodyEl = document.getElementById('modal-b');
+    footEl = document.getElementById('modal-f');
+    closeBtn = document.getElementById('modal-x');
+    
+    if (closeBtn) closeBtn.addEventListener('click', close);
+    if (overlay) overlay.addEventListener('click', e => {
+      if (e.target === overlay) close();
+    });
+  }
 
-// ─── UI/Progress ─── START
-// [заглушка: модуль будет выдан отдельным блоком по запросу]
-// ─── UI/Progress ─── END
+  /**
+   * Открыть модальное окно.
+   * @param {Object} opts - Параметры модалки.
+   * @param {string} [opts.title] - Заголовок.
+   * @param {string|Element} [opts.body] - Тело: строка или DOM-элемент.
+   * @param {Array<{text: string, primary?: boolean, danger?: boolean, onClick: Function}>} [opts.buttons] - Кнопки футера.
+   */
+  function open(opts) {
+    bind();
+    if (!overlay) return;
+    
+    opts = opts || {};
+    lastFocus = document.activeElement;
 
-// ─── UI/HeaderStatus ─── START
-// [заглушка: модуль будет выдан отдельным блоком по запросу]
-// ─── UI/HeaderStatus ─── END
+    if (titleEl) titleEl.textContent = opts.title || '';
+    
+    if (bodyEl) {
+      bodyEl.innerHTML = '';
+      
+      if (opts.body) {
+        if (typeof opts.body === 'string') {
+          bodyEl.textContent = opts.body;
+        } else {
+          bodyEl.appendChild(opts.body);
+        }
+      }
+    }
+    
+    if (footEl) {
+      footEl.innerHTML = '';
+      
+      (opts.buttons || []).forEach(b => {
+        const btn = document.createElement('button');
+        btn.className = 'mbtn' + (b.primary ? ' primary' : '') + (b.danger ? ' danger' : '');
+        btn.textContent = b.text || 'OK';
+        btn.addEventListener('click', () => {
+          if (b.onClick) b.onClick();
+        });
+        footEl.appendChild(btn);
+      });
+    }
+
+    overlay.classList.add('on');
+
+    if (escHandler) document.removeEventListener('keydown', escHandler);
+    escHandler = e => {
+      if (e.key === 'Escape') close();
+    };
+    document.addEventListener('keydown', escHandler);
+
+    // Автофокус на первый интерактивный элемент после анимации появления
+    setTimeout(() => {
+      if (!modal) return;
+      const focusable = modal.querySelectorAll('button, input, textarea, [tabindex]:not([tabindex="-1"])');
+      if (focusable.length) focusable[0].focus();
+    }, 50);
+  }
+
+  function close() {
+    if (!overlay) return;
+    
+    overlay.classList.remove('on');
+    
+    if (escHandler) {
+      document.removeEventListener('keydown', escHandler);
+      escHandler = null;
+    }
+    
+    // Возврат фокуса на элемент, открывший модалку
+    if (lastFocus && lastFocus.focus) {
+      try { lastFocus.focus(); } catch (_) {}
+    }
+  }
+
+  /**
+   * Модальное окно подтверждения (2 кнопки: Отмена / OK).
+   */
+  function confirm(title, text, onOk, okText) {
+    open({
+      title,
+      body: text,
+      buttons: [
+        { text: I18n.t('btn.cancel'), onClick: close },
+        {
+          text: okText || 'OK',
+          primary: true,
+          danger: true,
+          onClick: () => {
+            close();
+            if (onOk) onOk();
+          },
+        },
+      ],
+    });
+  }
+
+  return { open, close, confirm };
+}, ['I18n']);
+// ─── UI/Modal ─── END ───────────────────────────────────────────────────────
+
+// ─── UI/Toast ─── START ─────────────────────────────────────────────────────
+/**
+ * Всплывающие уведомления (тосты).
+ * - Держит не более `toastMaxVisible` уведомлений, старые вытесняет
+ * - Haptic feedback для Telegram Mini Apps (если доступно)
+ * - Автоудаление после `toastDefaultDuration` мс
+ *
+ * Типы: ok (зелёный), err (розовый), warn (янтарный), info (бирюзовый).
+ */
+DI.register('Toast', function (Config) {
+  const ICONS = { ok: '✓', err: '✕', warn: '!', info: '◆' };
+  const COLORS = {
+    ok: 'var(--green)',
+    err: 'var(--rose)',
+    warn: 'var(--amber)',
+    info: 'var(--teal)',
+  };
+  let container = null;
+
+  /**
+   * Отправка haptic feedback через TelegramAdapter, если приложение
+   * запущено внутри Telegram. Безопасно: если TelegramAdapter не загружен
+   * или DI.resolve падает, ничего не происходит.
+   */
+  function haptic(type) {
+    try {
+      const tg = DI.resolve('TelegramAdapter');
+      if (tg && tg.isTelegram()) {
+        if (type === 'ok') tg.hapticFeedback('success');
+        else if (type === 'err') tg.hapticFeedback('error');
+        else tg.hapticFeedback('light');
+      }
+    } catch (_) {}
+  }
+
+  /**
+   * Показать тост.
+   * @param {'ok'|'err'|'warn'|'info'} type - Тип уведомления.
+   * @param {string} msg - Текст сообщения.
+   * @param {number} [ms] - Длительность показа (по умолчанию из Config).
+   */
+  function show(type, msg, ms) {
+    if (!container) container = document.getElementById('toasts');
+    if (!container) return;
+    
+    const cls = ICONS[type] ? type : 'info';
+    haptic(type);
+
+    const el = document.createElement('div');
+    el.className = 'toast ' + cls;
+    
+    const ic = document.createElement('span');
+    ic.textContent = ICONS[cls];
+    ic.style.fontWeight = '700';
+    ic.style.color = COLORS[cls];
+    
+    const m = document.createElement('span');
+    m.textContent = String(msg || '');
+    
+    el.appendChild(ic);
+    el.appendChild(m);
+    container.appendChild(el);
+
+    // Лимит количества видимых тостов: вытесняем старые
+    const limit = Config.get('toastMaxVisible', 3);
+    while (container.children.length > limit) {
+      container.removeChild(container.firstChild);
+    }
+
+    // Анимация исчезновения и удаление из DOM
+    setTimeout(() => {
+      el.style.transition = 'opacity .25s, transform .25s';
+      el.style.opacity = '0';
+      el.style.transform = 'translateY(6px)';
+      
+      setTimeout(() => {
+        try { el.remove(); } catch (_) {}
+      }, 260);
+    }, ms || Config.get('toastDefaultDuration', 2200));
+  }
+
+  return { show };
+}, ['Config']);
+// ─── UI/Toast ─── END ───────────────────────────────────────────────────────
+
+// ─── UI/Progress ─── START ──────────────────────────────────────────────────
+/**
+ * Полноэкранный оверлей прогресса загрузки модели.
+ *
+ * Логика показа:
+ * - Показывается только если загрузка длится дольше SHOW_DELAY (500мс)
+ * - Это предотвращает мелькание при быстром кэшированном запуске
+ * - Скрывается автоматически при переходе в режим 'model' или 'demo'
+ *
+ * События:
+ * - 'ai:progress' — обновление прогресс-бара (pct, loadedMB, totalMB, model)
+ * - 'ai:status' — смена режима (loading/model/demo)
+ */
+DI.register('Progress', function (bus) {
+  let overlay, fill, pctEl, infoEl;
+  let showTimer = null;
+  const SHOW_DELAY = 500;
+
+  function bind() {
+    overlay = document.getElementById('progress');
+    fill = document.getElementById('prog-fill');
+    pctEl = document.getElementById('prog-pct');
+    infoEl = document.getElementById('prog-info');
+  }
+
+  function show() {
+    if (overlay) overlay.classList.add('on');
+  }
+
+  function hide() {
+    if (overlay) overlay.classList.remove('on');
+  }
+
+  function update(data) {
+    if (!data) return;
+    
+    const p = Math.max(0, Math.min(100, Math.round(data.pct || data.percent || 0)));
+    
+    if (fill) {
+      fill.style.width = p + '%';
+    }
+    
+    if (pctEl) {
+      let text = p + '%';
+      
+      if (data.loadedMB) {
+        text = data.loadedMB + ' MB';
+        if (data.totalMB) text += ' / ' + data.totalMB + ' MB';
+      }
+      
+      pctEl.textContent = text;
+    }
+    
+    if (infoEl && data.model) {
+      infoEl.textContent = data.model;
+    }
+  }
+
+  function init() {
+    bind();
+    
+    bus.on('ai:progress', e => update(e));
+    
+    bus.on('ai:status', e => {
+      if (!e) return;
+      
+      if (e.mode === 'loading') {
+        update(e);
+        
+        // Показываем прогресс только если загрузка затянулась
+        if (!showTimer && overlay && !overlay.classList.contains('on')) {
+          showTimer = setTimeout(() => {
+            show();
+            showTimer = null;
+          }, SHOW_DELAY);
+        }
+      } else {
+        // Загрузка завершена (успех или fallback): скрываем
+        if (showTimer) {
+          clearTimeout(showTimer);
+          showTimer = null;
+        }
+        hide();
+      }
+    });
+  }
+
+  return { init, show, hide, update };
+}, ['EventBus']);
+// ─── UI/Progress ─── END ────────────────────────────────────────────────────
+
+// ─── UI/HeaderStatus ─── START ──────────────────────────────────────────────
+/**
+ * Индикаторы состояния в шапке: сеть (NetService) и ИИ (Embedder).
+ *
+ * Состояния сети:
+ * - disconnected (серый): не запущен
+ * - connecting (пульсирующий): попытка соединения
+ * - connected (зелёный): подписка активна
+ * - reconnecting (янтарный): пересоединение
+ * - failed (розовый): ошибка инициализации
+ *
+ * Состояния ИИ:
+ * - loading (пульсирующий): загрузка модели
+ * - model (зелёный): модель готова
+ * - demo (янтарный): fallback на hash-эмбеддинг
+ *
+ * Фича: клик по тексту статуса сети запускает stop/start цикл переподключения.
+ */
+DI.register('HeaderStatus', function (bus, I18n, Embedder) {
+  let netDot, netTxt, aiDot, aiTxt;
+  let unsubs = [];
+  let currentNetStatus = 'disconnected';
+  let currentAiMode = 'loading';
+  let currentAiPercent = 0;
+
+  function bind() {
+    netDot = document.getElementById('st-net-dot');
+    netTxt = document.getElementById('st-net-txt');
+    aiDot = document.getElementById('st-ai-dot');
+    aiTxt = document.getElementById('st-ai-txt');
+  }
+
+  function setAI(mode, percent) {
+    currentAiMode = mode;
+    currentAiPercent = percent || 0;
+    
+    if (!aiDot || !aiTxt) return;
+    
+    if (mode === 'model') {
+      aiDot.className = 'dot ok';
+      aiTxt.textContent = I18n.t('st.ai.ready');
+    } else if (mode === 'demo') {
+      aiDot.className = 'dot warn';
+      aiTxt.textContent = I18n.t('st.ai.demo');
+    } else {
+      aiDot.className = 'dot load';
+      aiTxt.textContent = I18n.t('st.ai.loading') + (currentAiPercent ? ' ' + Math.round(currentAiPercent) + '%' : '');
+    }
+  }
+
+  function setNet(status) {
+    currentNetStatus = status;
+    
+    if (!netDot || !netTxt) return;
+    
+    const map = {
+      connected: ['ok', 'st.net.online'],
+      connecting: ['load', 'st.net.connecting'],
+      reconnecting: ['warn', 'st.net.reconnecting'],
+      failed: ['err', 'st.net.failed'],
+      disconnected: ['', 'st.net'],
+    };
+    
+    const [cls, key] = map[status] || ['', 'st.net'];
+    netDot.className = 'dot' + (cls ? ' ' + cls : '');
+    netTxt.textContent = I18n.t(key);
+  }
+
+  function init() {
+    bind();
+    
+    // Интерактивный статус сети: клик запускает переподключение
+    if (netTxt) {
+      netTxt.style.cursor = 'pointer';
+      netTxt.addEventListener('click', () => {
+        try {
+          const NetService = DI.resolve('NetService');
+          if (NetService) {
+            NetService.stop();
+            setTimeout(() => NetService.start(), 500);
+          }
+        } catch (_) {}
+      });
+    }
+    
+    // Подписки на изменения состояния
+    unsubs.push(bus.on('ai:status', e => setAI(e.mode, e.percent)));
+    unsubs.push(bus.on('net:status', e => setNet(e.status)));
+    
+    // Обновление при смене языка
+    unsubs.push(bus.on('i18n:change', () => {
+      setAI(currentAiMode, currentAiPercent);
+      setNet(currentNetStatus);
+    }));
+    
+    // Начальное состояние
+    setAI(Embedder.getMode());
+    setNet('disconnected');
+  }
+
+  function destroy() {
+    unsubs.forEach(u => {
+      try { u(); } catch (_) {}
+    });
+    unsubs = [];
+  }
+
+  return { init, destroy };
+}, ['EventBus', 'I18n', 'Embedder']);
+// ─── UI/HeaderStatus ─── END ────────────────────────────────────────────────
 
 // ─── UI/Composer ─── START
 // [заглушка: модуль будет выдан отдельным блоком по запросу]
