@@ -1764,7 +1764,7 @@ body.ready #app { display: flex; }
 // ═══════════════════════════════════════════════════════════════════════════════
 // ВЕРСИЯ ПРИЛОЖЕНИЯ
 // ═══════════════════════════════════════════════════════════════════════════════
-const APP_VERSION = '0.6.11';
+const APP_VERSION = '0.6.12';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CORE/DI - ПРЕАМБУЛА
@@ -2348,6 +2348,7 @@ DI.register('I18n', function (Config, bus) {
     'sim.score': 'похожа на',
     'sim.level.high': 'В тему',
     'sim.level.mid': 'Озарение',
+    'sim.level.low': 'Проблеск',
 
     'inf.resonance': 'резонанс',
     'inf.linked': 'по мотивам',
@@ -2495,6 +2496,7 @@ DI.register('I18n', function (Config, bus) {
     'sim.score': 'similarity',
     'sim.level.high': 'On topic',
     'sim.level.mid': 'Insight',
+    'sim.level.low': 'Glimmer',
 
     'inf.resonance': 'resonance',
     'inf.linked': 'inspired by',
@@ -6519,15 +6521,15 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
           sim.innerHTML = '<span class="sig-bar sig-full"></span><span class="sig-bar sig-full"></span><span class="sig-bar sig-empty"></span>';
           sim.title = I18n.t('sim.level.mid') + ' (' + pct + '%)';
         } else {
-          // ▰▱▱ Озарение (слабая связь, нижняя половина диапазона)
+          // ▰▱▱ Проблеск (слабая связь, нижняя половина диапазона)
           sim.innerHTML = '<span class="sig-bar sig-full"></span><span class="sig-bar sig-empty"></span><span class="sig-bar sig-empty"></span>';
-          sim.title = I18n.t('sim.level.mid') + ' (' + pct + '%)';
+          sim.title = I18n.t('sim.level.low') + ' (' + pct + '%)';
         }
         const label = document.createElement('span');
         label.className = 'sig-label';
         label.textContent = n.score >= threshold
           ? I18n.t('sim.level.high')
-          : I18n.t('sim.level.mid');
+          : (n.score >= serenMid ? I18n.t('sim.level.mid') : I18n.t('sim.level.low'));
         sim.appendChild(label);
       }
 
