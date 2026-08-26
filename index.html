@@ -1764,7 +1764,7 @@ body.ready #app { display: flex; }
 // ═══════════════════════════════════════════════════════════════════════════════
 // ВЕРСИЯ ПРИЛОЖЕНИЯ
 // ═══════════════════════════════════════════════════════════════════════════════
-const APP_VERSION = '0.6.9';
+const APP_VERSION = '0.6.10';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CORE/DI - ПРЕАМБУЛА
@@ -3507,9 +3507,9 @@ DI.register('Ranker', function (Vec, Config) {
     const threshold = Config.get('threshold', 0.81);
     const serendipity = Config.get('serendipity', 0.07);
 
-    // Нижний порог: не ниже 0.40, не выше (threshold - serendipity)
-    // Это гарантирует, что окно серендипити точно соответствует настройке пользователя.
-    const lowerBound = Math.max(0.40, threshold - serendipity);
+    // Нижний порог = threshold - serendipity (без ограничений)
+    // Пользователь сам отвечает за свои настройки через ползунки.
+    const lowerBound = threshold - serendipity;
     
     const relevant = [];
     const seren = [];
@@ -6496,7 +6496,6 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
     if (isRanked && typeof n.score === 'number') {
       const threshold = Config.get('threshold', 0.81);
       const serendipity = Config.get('serendipity', 0.07);
-      const serenMin = threshold - serendipity;
       // Середина диапазона озарений: делит на «сильные» и «слабые»
       const serenMid = threshold - serendipity / 2;
       const displayMode = Config.get('similarityDisplay', 'signal');
