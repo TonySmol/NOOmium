@@ -6588,22 +6588,632 @@ DI.register('NoteView', function (DB, Notes, NoteActions, I18n, Utils, Toast, bu
 }, ['DB', 'Notes', 'NoteActions', 'I18n', 'Utils', 'Toast', 'EventBus']);
 // ─── UI/NoteView ─── END ────────────────────────────────────────────────────
 
-// ─── UI/MenuView ─── START
-// [заглушка: модуль будет выдан отдельным блоком по запросу]
-// ─── UI/MenuView ─── END
+// ─── UI/MenuView ─── START ──────────────────────────────────────────────────
+/**
+ * Меню настроек и переключение экранов (Поток / База).
+ *
+ * Содержит:
+ * - Переключение темы (с установкой userThemeOverride для Telegram)
+ * - Переключение языка
+ * - Настройки ранжирования (ползунки + режим отображения)
+ * - Переход между экранами Поток/База
+ * - Стирание базы и полный сброс
+ */
+DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboarding, DB, Embedder, Nostr) {
+  let unsubs = [];
 
-// ─── PLATFORM/TelegramAdapter ─── START
-// [заглушка: модуль будет выдан отдельным блоком по запросу]
-// ─── PLATFORM/TelegramAdapter ─── END
+  function applyTheme(theme) {
+    document.body.setAttribute('data-theme', theme);
+    Config.set('theme', theme);
+  }
 
-// ─── BOOT ─── START
-// [заглушка: модуль будет выдан отдельным блоком по запросу]
-// ─── BOOT ─── END
+  function setView(view) {
+    Store.setState({ view });
 
-// ─── ЗАПУСК ─── START
+    const isBase = view === 'base';
+
+    ['ctx-banner', 'seg', 'feed-wrap', 'btn-history', 'composer'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.classList.toggle('hidden', isBase);
+    });
+
+    const base = document.getElementById('base');
+    if (base) base.classList.toggle('on', isBase);
+
+    try { bus.emit('view:changed', { view }); } catch (_) {}
+
+    viewSync();
+  }
+
+  function viewSync() {
+    const view = Store.get('view');
+
+    document.querySelectorAll('.tab-b').forEach(b =>
+      b.classList.toggle('on', b.getAttribute('data-v') === view)
+    );
+
+    const bb = document.getElementById('btn-base');
+    if (bb) bb.classList.toggle('active', view === 'base');
+  }
+
+  /**
+   * Модальное окно настроек ранжирования.
+   * Три ползунка: порог релевантности, диапазон озарений, порог одинаковости.
+   * Плюс переключатель режима отображения сходства (сигнал / проценты).
+   */
+  function openRankingSettings() {
+    const body = document.createElement('div');
+    body.style.cssText = 'display:flex;flex-direction:column;gap:20px;padding:4px 0;';
+
+    const sliders = [
+      {
+        key: 'threshold',
+        min: 0.50,
+        max: 0.95,
+        step: 0.01,
+        label: I18n.t('ranking.threshold'),
+        hint: I18n.t('ranking.threshold.hint'),
+        color: 'var(--amber)',
+      },
+      {
+        key: 'serendipity',
+        min: 0.05,
+        max: 0.30,
+        step: 0.01,
+        label: I18n.t('ranking.serendipity'),
+        hint: I18n.t('ranking.serendipity.hint'),
+        color: 'var(--teal)',
+      },
+      {
+        key: 'duplicateThreshold',
+        min: 0.88,
+        max: 0.99,
+        step: 0.01,
+        label: I18n.t('ranking.similarity'),
+        hint: I18n.t('ranking.similarity.hint'),
+        color: 'var(--rose)',
+      },
+    ];
+
+    const valueEls = {};
+
+    sliders.forEach(cfg => {
+      const current = Number(Config.get(cfg.key, cfg.min));
+      const safe = Number.isFinite(current) ? current : cfg.min;
+
+      const group = document.createElement('div');
+      group.style.cssText = 'display:flex;flex-direction:column;gap:8px;';
+
+      const labelRow = document.createElement('div');
+      labelRow.style.cssText = 'display:flex;justify-content:space-between;align-items:center;';
+
+      const lbl = document.createElement('span');
+      lbl.style.cssText = 'font-size:13px;font-weight:600;color:var(--text);';
+      lbl.textContent = cfg.label;
+
+      const val = document.createElement('span');
+      val.style.cssText = 'font:600 13px var(--mono);color:' + cfg.color + ';';
+      val.textContent = safe.toFixed(2);
+
+      labelRow.appendChild(lbl);
+      labelRow.appendChild(val);
+
+      const slider = document.createElement('input');
+      slider.type = 'range';
+      slider.min = String(cfg.min);
+      slider.max = String(cfg.max);
+      slider.step = String(cfg.step);
+      slider.value = String(safe);
+      slider.style.cssText = 'width:100%;accent-color:' + cfg.color + ';height:6px;cursor:pointer;';
+
+      const hintEl = document.createElement('div');
+      hintEl.style.cssText = 'font-size:11px;color:var(--text-3);line-height:1.4;';
+      hintEl.textContent = cfg.hint;
+
+      slider.addEventListener('input', () => {
+        const v = parseFloat(slider.value);
+        val.textContent = Number.isFinite(v) ? v.toFixed(2) : cfg.min.toFixed(2);
+      });
+
+      valueEls[cfg.key] = { slider, val };
+
+      group.appendChild(labelRow);
+      group.appendChild(slider);
+      group.appendChild(hintEl);
+      body.appendChild(group);
+    });
+
+    // Режим отображения сходства: signal / percent
+    let pendingDisplay = Config.get('similarityDisplay', 'signal');
+    if (pendingDisplay !== 'signal' && pendingDisplay !== 'percent') {
+      pendingDisplay = 'signal';
+    }
+
+    const displayGroup = document.createElement('div');
+    displayGroup.style.cssText = 'display:flex;flex-direction:column;gap:8px;padding-top:10px;border-top:1px solid var(--line);';
+
+    const displayLabel = document.createElement('span');
+    displayLabel.style.cssText = 'font-size:13px;font-weight:600;color:var(--text);';
+    displayLabel.textContent = I18n.t('ranking.display');
+
+    const displayToggle = document.createElement('div');
+    displayToggle.style.cssText = 'display:flex;gap:6px;';
+
+    function paintDisplayButtons() {
+      displayToggle.querySelectorAll('button').forEach(btn => {
+        const mode = btn.getAttribute('data-display-mode');
+        const on = mode === pendingDisplay;
+
+        btn.classList.toggle('active', on);
+        btn.style.borderColor = on ? 'var(--amber)' : '';
+        btn.style.color = on ? 'var(--amber)' : '';
+      });
+    }
+
+    ['signal', 'percent'].forEach(mode => {
+      const btn = document.createElement('button');
+      btn.className = 'nv-act';
+      btn.setAttribute('data-display-mode', mode);
+      btn.style.cssText = 'flex:1;font-size:12px;';
+      btn.textContent = I18n.t('ranking.display.' + mode);
+
+      btn.addEventListener('click', () => {
+        pendingDisplay = mode;
+        paintDisplayButtons();
+      });
+
+      displayToggle.appendChild(btn);
+    });
+
+    paintDisplayButtons();
+
+    displayGroup.appendChild(displayLabel);
+    displayGroup.appendChild(displayToggle);
+    body.appendChild(displayGroup);
+
+    Modal.open({
+      title: I18n.t('menu.ranking'),
+      body,
+      buttons: [
+        {
+          text: I18n.t('btn.cancel'),
+          onClick: () => Modal.close(),
+        },
+        {
+          text: I18n.t('btn.save'),
+          primary: true,
+          onClick: () => {
+            sliders.forEach(cfg => {
+              const v = parseFloat(valueEls[cfg.key].slider.value);
+              if (Number.isFinite(v)) Config.set(cfg.key, v);
+            });
+
+            Config.set('similarityDisplay', pendingDisplay);
+
+            try { bus.emit('db:change'); } catch (_) {}
+
+            Toast.show('ok', I18n.t('ranking.saved'));
+            Modal.close();
+          },
+        },
+        {
+          text: I18n.t('ranking.reset'),
+          danger: true,
+          onClick: () => {
+            const d = Config.defaults();
+
+            sliders.forEach(cfg => {
+              const def = Number(d[cfg.key]);
+              const safe = Number.isFinite(def) ? def : cfg.min;
+
+              Config.set(cfg.key, safe);
+              valueEls[cfg.key].slider.value = String(safe);
+              valueEls[cfg.key].val.textContent = safe.toFixed(2);
+            });
+
+            pendingDisplay = d.similarityDisplay === 'percent' ? 'percent' : 'signal';
+            Config.set('similarityDisplay', pendingDisplay);
+            paintDisplayButtons();
+
+            try { bus.emit('db:change'); } catch (_) {}
+
+            Toast.show('ok', I18n.t('ranking.reset'));
+          },
+        },
+      ],
+    });
+  }
+
+  /**
+   * Полный сброс: удаление всех данных (БД, кэш, localStorage, Service Worker).
+   * Safari-safe: проверка `typeof indexedDB.databases === 'function'`.
+   */
+  function fullReset() {
+    Modal.confirm(
+      I18n.t('menu.fullreset'),
+      I18n.t('menu.fullreset.confirm'),
+      () => {
+        try { Nostr.close(); } catch (_) {}
+
+        if (window.indexedDB && typeof indexedDB.databases === 'function') {
+          indexedDB.databases().then(dbs => {
+            dbs.forEach(dbInfo => {
+              if (dbInfo.name) {
+                indexedDB.deleteDatabase(dbInfo.name);
+              }
+            });
+          }).catch(() => {});
+        } else if (window.indexedDB) {
+          try {
+            indexedDB.deleteDatabase(Config.get('dbName', 'noomium_v2'));
+          } catch (_) {}
+        }
+
+        try { localStorage.clear(); } catch (_) {}
+        try { sessionStorage.clear(); } catch (_) {}
+
+        if (window.caches) {
+          caches.keys().then(names => {
+            names.forEach(name => caches.delete(name));
+          }).catch(() => {});
+        }
+
+        if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
+          try {
+            navigator.serviceWorker.controller.postMessage('CLEAR_CACHE');
+          } catch (_) {}
+        }
+
+        Toast.show('ok', I18n.t('menu.fullreset.done'));
+
+        setTimeout(() => {
+          window.location.reload();
+        }, 1500);
+      }
+    );
+  }
+
+  function openMenu() {
+    const body = document.createElement('div');
+    body.style.cssText = 'display:flex;flex-direction:column;gap:12px;';
+
+    // Как это работает
+    const helpBtn = document.createElement('button');
+    helpBtn.className = 'nv-act';
+    helpBtn.textContent = '? ' + I18n.t('menu.help');
+    helpBtn.addEventListener('click', () => {
+      Modal.close();
+      Onboarding.showHelp(false);
+    });
+    body.appendChild(helpBtn);
+
+    // Переключение темы
+    const themeBtn = document.createElement('button');
+    themeBtn.className = 'nv-act';
+    themeBtn.textContent = I18n.t('menu.theme') + ': ' + (Config.get('theme', 'dark') === 'dark' ? '🌙' : '☀️');
+    themeBtn.addEventListener('click', () => {
+      const next = Config.get('theme', 'dark') === 'dark' ? 'light' : 'dark';
+      applyTheme(next);
+      // Помечаем что тема выбрана вручную — Telegram не должен её перезаписывать
+      Config.set('userThemeOverride', true);
+      Modal.close();
+      Toast.show('ok', I18n.t('menu.theme') + ' → ' + next);
+    });
+    body.appendChild(themeBtn);
+
+    // Переключение языка
+    const langBtn = document.createElement('button');
+    langBtn.className = 'nv-act';
+    langBtn.textContent = I18n.t('menu.lang') + ': ' + I18n.getLang().toUpperCase();
+    langBtn.addEventListener('click', () => {
+      const next = I18n.getLang() === 'ru' ? 'en' : 'ru';
+      I18n.setLang(next);
+      Modal.close();
+    });
+    body.appendChild(langBtn);
+
+    // Настройки ранжирования
+    const rankingBtn = document.createElement('button');
+    rankingBtn.className = 'nv-act';
+    rankingBtn.textContent = '⚙ ' + I18n.t('menu.ranking');
+    rankingBtn.addEventListener('click', () => {
+      Modal.close();
+      openRankingSettings();
+    });
+    body.appendChild(rankingBtn);
+
+    // Переход: База
+    const goBase = document.createElement('button');
+    goBase.className = 'nv-act';
+    goBase.textContent = I18n.t('tab.base');
+    goBase.addEventListener('click', () => {
+      Modal.close();
+      setView('base');
+    });
+    body.appendChild(goBase);
+
+    // Переход: Поток
+    const goStream = document.createElement('button');
+    goStream.className = 'nv-act';
+    goStream.textContent = I18n.t('tab.stream');
+    goStream.addEventListener('click', () => {
+      Modal.close();
+      setView('stream');
+    });
+    body.appendChild(goStream);
+
+    // Стирание базы
+    const wipe = document.createElement('button');
+    wipe.className = 'nv-act danger';
+    wipe.textContent = I18n.t('base.wipe');
+    wipe.addEventListener('click', () => {
+      Modal.close();
+      Modal.confirm(I18n.t('base.wipe'), I18n.t('base.wipe.confirm'), () => {
+        try { bus.emit('wipe:request'); } catch (_) {}
+      });
+    });
+    body.appendChild(wipe);
+
+    // Полный сброс
+    const resetBtn = document.createElement('button');
+    resetBtn.className = 'nv-act danger';
+    resetBtn.textContent = I18n.t('menu.fullreset');
+    resetBtn.addEventListener('click', () => {
+      Modal.close();
+      fullReset();
+    });
+    body.appendChild(resetBtn);
+
+    // Версия приложения
+    const version = document.createElement('div');
+    version.style.cssText = 'text-align:center;font-size:11px;color:var(--text-3);margin-top:8px;';
+    version.textContent = 'v' + APP_VERSION;
+    body.appendChild(version);
+
+    Modal.open({ title: I18n.t('menu.settings'), body });
+  }
+
+  function init() {
+    applyTheme(Config.get('theme', 'dark'));
+
+    const menuBtn = document.getElementById('btn-menu');
+    if (menuBtn) menuBtn.addEventListener('click', openMenu);
+
+    const baseBtn = document.getElementById('btn-base');
+    if (baseBtn) {
+      baseBtn.addEventListener('click', () =>
+        setView(Store.get('view') === 'base' ? 'stream' : 'base')
+      );
+    }
+
+    document.querySelectorAll('.tab-b').forEach(b => {
+      b.addEventListener('click', () => setView(b.getAttribute('data-v')));
+    });
+
+    unsubs.push(Store.subscribe(s => s.view, viewSync));
+    unsubs.push(bus.on('i18n:change', viewSync));
+
+    // Очистка кеша предков при изменении БД
+    unsubs.push(bus.on('db:change', () => {
+      try {
+        const Provenance = DI.resolve('Provenance');
+        if (Provenance && Provenance.clearCache) Provenance.clearCache();
+      } catch (_) {}
+    }));
+
+    unsubs.push(bus.on('db:cache', () => {
+      try {
+        const Provenance = DI.resolve('Provenance');
+        if (Provenance && Provenance.clearCache) Provenance.clearCache();
+      } catch (_) {}
+    }));
+
+    viewSync();
+  }
+
+  function destroy() {
+    unsubs.forEach(u => {
+      try { u(); } catch (_) {}
+    });
+    unsubs = [];
+  }
+
+  return { init, destroy, setView, openMenu };
+}, ['Store', 'Config', 'Modal', 'Toast', 'I18n', 'EventBus', 'Onboarding', 'DB', 'Embedder', 'Nostr']);
+// ─── UI/MenuView ─── END ────────────────────────────────────────────────────
+
+// ─── PLATFORM/TelegramAdapter ─── START ─────────────────────────────────────
+/**
+ * Интеграция с Telegram Mini Apps.
+ *
+ * Определяет, открыто ли приложение в Telegram, применяет тему, даёт
+ * haptic feedback для тостов.
+ *
+ * Защита от конфликта тем:
+ * Если пользователь вручную выбрал тему в настройках (userThemeOverride = true),
+ * событие themeChanged от Telegram игнорируется.
+ */
+DI.register('TelegramAdapter', function (Config, bus, Logger) {
+  let tg = null;
+  let isActive = false;
+
+  function init() {
+    if (!window.Telegram || !window.Telegram.WebApp) {
+      Logger.info('TelegramAdapter: не в Telegram, пропускаем');
+      return;
+    }
+
+    tg = window.Telegram.WebApp;
+    
+    try {
+      tg.ready();
+      tg.expand();
+      isActive = true;
+      Logger.info('TelegramAdapter: активирован');
+    } catch (e) {
+      Logger.warn('TelegramAdapter: ошибка инициализации', String(e));
+      return;
+    }
+
+    applyTheme();
+
+    tg.onEvent('themeChanged', () => {
+      applyTheme();
+    });
+
+    try {
+      tg.setHeaderColor(tg.colorScheme === 'dark' ? '#0a0a0b' : '#fafafa');
+      tg.setBackgroundColor(tg.colorScheme === 'dark' ? '#0a0a0b' : '#fafafa');
+    } catch (_) {}
+  }
+
+  /**
+   * Применение темы из Telegram.
+   * Если пользователь вручную выбрал тему (userThemeOverride), пропускаем.
+   */
+  function applyTheme() {
+    if (!tg) return;
+    
+    // Защита от конфликта: ручная тема имеет приоритет
+    if (Config.get('userThemeOverride', false)) {
+      return;
+    }
+    
+    const scheme = tg.colorScheme || 'dark';
+    document.body.setAttribute('data-theme', scheme);
+    
+    try {
+      tg.setHeaderColor(scheme === 'dark' ? '#0a0a0b' : '#fafafa');
+      tg.setBackgroundColor(scheme === 'dark' ? '#0a0a0b' : '#fafafa');
+    } catch (_) {}
+    
+    try {
+      bus.emit('telegram:theme', { scheme });
+    } catch (_) {}
+  }
+
+  function isTelegram() {
+    return isActive;
+  }
+
+  function hapticFeedback(type) {
+    if (!tg || !tg.HapticFeedback) return;
+    
+    try {
+      if (type === 'success') {
+        tg.HapticFeedback.notificationOccurred('success');
+      } else if (type === 'error') {
+        tg.HapticFeedback.notificationOccurred('error');
+      } else {
+        tg.HapticFeedback.impactOccurred('light');
+      }
+    } catch (_) {}
+  }
+
+  function showAlert(message) {
+    if (!tg) return;
+    
+    try {
+      tg.showAlert(message);
+    } catch (_) {
+      alert(message);
+    }
+  }
+
+  function showConfirm(message, callback) {
+    if (!tg) {
+      if (confirm(message)) callback();
+      return;
+    }
+    
+    try {
+      tg.showConfirm(message, confirmed => {
+        if (confirmed) callback();
+      });
+    } catch (_) {
+      if (confirm(message)) callback();
+    }
+  }
+
+  return { init, isTelegram, hapticFeedback, showAlert, showConfirm };
+}, ['Config', 'EventBus', 'Logger']);
+// ─── PLATFORM/TelegramAdapter ─── END ───────────────────────────────────────
+
+// ─── BOOT ─── START ─────────────────────────────────────────────────────────
+/**
+ * Точка входа. Инициализирует все модули в правильном порядке.
+ *
+ * Порядок инициализации:
+ * 1. Тема + переводы статических элементов (до показа)
+ * 2. Подписчики событий (без DOM): Progress, HeaderStatus, Feed, Influence
+ * 3. TelegramAdapter (до Context, чтобы тема применилась вовремя)
+ * 4. Context (подписывается на 'note:pin')
+ * 5. DOM-модули: Composer, FeedView, NoteView, BaseView, MenuView
+ * 6. Обработчик стирания данных
+ * 7. Показ приложения
+ * 8. Запуск AI и сети
+ * 9. Онбординг (последним, ждёт загрузки модели)
+ */
+DI.register('Boot', function () {
+  function mount() {
+    // 1. Тема и перевод статических элементов до показа
+    const Config = DI.resolve('Config');
+    document.body.setAttribute('data-theme', Config.get('theme', 'dark'));
+    DI.resolve('I18n').init();
+
+    // 2. Подписчики событий (без DOM)
+    DI.resolve('Progress').init();
+    DI.resolve('HeaderStatus').init();
+    DI.resolve('Feed').init();
+    DI.resolve('Influence').init();
+    
+    // 3. Telegram адаптер ДО Context, чтобы тема применилась вовремя
+    DI.resolve('TelegramAdapter').init();
+    
+    // 4. Context.init подписывается на 'note:pin' от NoteView
+    DI.resolve('Context').init();
+
+    // 5. DOM-модули
+    DI.resolve('Composer').init();
+    DI.resolve('FeedView').init();
+    DI.resolve('NoteView').init();
+    DI.resolve('BaseView').init();
+    DI.resolve('MenuView').init();
+
+    // 6. Слушатель стирания данных
+    const EventBus = DI.resolve('EventBus');
+    const DB = DI.resolve('DB');
+    const Toast = DI.resolve('Toast');
+    const I18n = DI.resolve('I18n');
+    const Store = DI.resolve('Store');
+    
+    EventBus.on('wipe:request', () => {
+      DB.reset().then(() => {
+        Toast.show('ok', I18n.t('toast.base.wiped'));
+        Store.setState({ view: 'stream' });
+      });
+    });
+
+    // 7. Показ приложения
+    document.body.classList.add('ready');
+
+    // 8. Запуск AI и сети
+    DI.resolve('Embedder').load();
+    DI.resolve('NetService').start();
+
+    // 9. Онбординг последним (ждёт загрузки модели)
+    DI.resolve('Onboarding').init();
+  }
+
+  return { mount };
+});
+// ─── BOOT ─── END ───────────────────────────────────────────────────────────
+
+// ─── ЗАПУСК ─── START ───────────────────────────────────────────────────────
 window.DI = DI;
+
 DI.resolve('Boot').mount();
-// ─── ЗАПУСК ─── END
+// ─── ЗАПУСК ─── END ─────────────────────────────────────────────────────────
 
 </script>
 </body>
