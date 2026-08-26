@@ -1764,7 +1764,7 @@ body.ready #app { display: flex; }
 // ═══════════════════════════════════════════════════════════════════════════════
 // ВЕРСИЯ ПРИЛОЖЕНИЯ
 // ═══════════════════════════════════════════════════════════════════════════════
-const APP_VERSION = '0.6.10';
+const APP_VERSION = '0.6.11';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CORE/DI - ПРЕАМБУЛА
@@ -7241,7 +7241,7 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboar
     function updatePreview() {
       const threshold = parseFloat(valueEls['threshold'].slider.value);
       const serendipity = parseFloat(valueEls['serendipity'].slider.value);
-      const lowerBound = Math.max(0.40, threshold - serendipity);
+      const lowerBound = threshold - serendipity;
       
       previewEl.textContent = 
         'Релевантно: >= ' + Math.round(threshold * 100) + '% | ' +
