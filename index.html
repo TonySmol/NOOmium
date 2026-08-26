@@ -4638,21 +4638,373 @@ DI.register('Feed', function (DB, Ranker, Store, bus, Logger) {
 }, ['DB', 'Ranker', 'Store', 'EventBus', 'Logger']);
 // ─── DOMAIN/Feed ─── END ────────────────────────────────────────────────────
 
-// ─── DOMAIN/Provenance ─── START
-// [заглушка: модуль будет выдан отдельным блоком по запросу]
-// ─── DOMAIN/Provenance ─── END
+// ─── DOMAIN/Provenance ─── START ────────────────────────────────────────────
+/**
+ * Построение генеалогических связей между заметками.
+ *
+ * Заметки связаны через поле `parentId`. При публикации в Nostr заметка
+ * получает `eventId`, и дети мигрируют с локального `id` на `eventId`.
+ * Поэтому поиск родителя/предков должен проверять оба поля.
+ *
+ * Кэширование: ancestors кешируются на 5 секунд для избежания повторных
+ * full-scan при открытии модалки линейки.
+ */
+DI.register('Provenance', function (DB) {
+  const ancestorsCache = new Map();
+  const CACHE_TTL = 5000;
 
-// ─── DOMAIN/Influence ─── START
-// [заглушка: модуль будет выдан отдельным блоком по запросу]
-// ─── DOMAIN/Influence ─── END
+  function loadAll() {
+    return Promise.all([DB.all(), DB.cacheAll()]).then(([own, cached]) => own.concat(cached));
+  }
 
-// ─── DOMAIN/NoteActions ─── START
-// [заглушка: модуль будет выдан отдельным блоком по запросу]
-// ─── DOMAIN/NoteActions ─── END
+  /**
+   * Прямые дети заметки по её id или eventId.
+   */
+  function children(id) {
+    if (!id) return Promise.resolve([]);
+    
+    return loadAll().then(all => all.filter(n => n && n.parentId === id));
+  }
 
-// ─── UI/Onboarding ─── START
-// [заглушка: модуль будет выдан отдельным блоком по запросу]
-// ─── UI/Onboarding ─── END
+  /**
+   * Все потомки (BFS). Защита от циклов через seenIds.
+   */
+  function descendants(id) {
+    if (!id) return Promise.resolve([]);
+    
+    return loadAll().then(all => {
+      const out = [];
+      const seenIds = new Set([id]);
+      let frontier = [id];
+      
+      while (frontier.length) {
+        const next = [];
+        
+        for (const n of all) {
+          if (n && n.parentId && frontier.indexOf(n.parentId) !== -1 && !seenIds.has(n.id)) {
+            seenIds.add(n.id);
+            out.push(n);
+            next.push(n.id);
+          }
+        }
+        
+        frontier = next;
+      }
+      
+      return out;
+    });
+  }
+
+  /**
+   * Цепочка предков от текущей заметки до корня.
+   *
+   * Поиск родителя учитывает:
+   * 1. Точное совпадение по id (локальная заметка)
+   * 2. Совпадение по eventId (опубликованная заметка)
+   * 3. Локальная заметка с matching eventId (миграция после публикации)
+   *
+   * Защита от циклов через seen.
+   */
+  function ancestors(id) {
+    if (!id) return Promise.resolve([]);
+    
+    const cached = ancestorsCache.get(id);
+    if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
+      return Promise.resolve(cached.chain);
+    }
+    
+    return loadAll().then(all => {
+      const byId = new Map();
+      
+      all.forEach(n => {
+        if (!n) return;
+        if (n.id) byId.set(n.id, n);
+        if (n.eventId) byId.set(n.eventId, n);
+      });
+      
+      function findNote(targetId) {
+        if (!targetId) return null;
+        
+        // 1. Прямое совпадение по id или eventId
+        if (byId.has(targetId)) return byId.get(targetId);
+        
+        // 2. Локальная заметка, которая была опубликована (имеет matching eventId)
+        const localPublished = all.find(n => n && n.id === targetId && n.eventId);
+        if (localPublished) return localPublished;
+        
+        // 3. Сетевая заметка с matching eventId
+        const byEvent = all.find(n => n && n.eventId === targetId);
+        if (byEvent) return byEvent;
+        
+        return null;
+      }
+      
+      const chain = [];
+      const seen = new Set();
+      let current = findNote(id);
+      
+      while (current && current.parentId) {
+        if (seen.has(current.parentId)) break;
+        seen.add(current.parentId);
+        
+        const parent = findNote(current.parentId);
+        if (!parent) break;
+        
+        chain.push(parent);
+        current = parent;
+      }
+      
+      ancestorsCache.set(id, { chain, timestamp: Date.now() });
+      return chain;
+    });
+  }
+
+  /**
+   * Очистка кеша предков. Вызывается при изменении БД.
+   */
+  function clearCache() {
+    ancestorsCache.clear();
+  }
+
+  return { children, descendants, ancestors, loadAll, clearCache };
+}, ['DB']);
+// ─── DOMAIN/Provenance ─── END ──────────────────────────────────────────────
+
+// ─── DOMAIN/Influence ─── START ─────────────────────────────────────────────
+/**
+ * Подсчёт резонанса: сколько уникальных авторов создали потомков заметки.
+ *
+ * Резонанс показывает влияние заметки на сеть. Если заметка A породила
+ * 5 заметок от 3 разных авторов, её резонанс = 3 (уникальные авторы).
+ *
+ * Карта resonanceMap перестраивается при изменении БД или создании/удалении заметок.
+ */
+DI.register('Influence', function (DB, bus, Logger) {
+  const resonanceMap = new Map();
+  let seq = 0;
+
+  /**
+   * Полная перестройка карты резонанса.
+   * Защита от race conditions через seq.
+   */
+  function rebuild() {
+    const my = ++seq;
+    
+    return Promise.all([DB.all(), DB.cacheAll()]).then(([own, cached]) => {
+      if (my !== seq) return;
+      
+      const map = new Map();
+      
+      own.concat(cached).forEach(n => {
+        if (n && n.parentId) {
+          if (!map.has(n.parentId)) map.set(n.parentId, new Set());
+          map.get(n.parentId).add(n.authorPubkey || 'self');
+        }
+      });
+      
+      resonanceMap.clear();
+      map.forEach((v, k) => resonanceMap.set(k, v));
+      
+      try { bus.emit('influence:updated'); } catch (_) {}
+    }).catch(e => Logger.warn('Influence: ошибка rebuild', String(e)));
+  }
+
+  /**
+   * Инкрементальное обновление при создании/обновлении заметки.
+   */
+  function updateForNote(note) {
+    if (!note || !note.parentId) return;
+    
+    if (!resonanceMap.has(note.parentId)) {
+      resonanceMap.set(note.parentId, new Set());
+    }
+    
+    resonanceMap.get(note.parentId).add(note.authorPubkey || 'self');
+    
+    try { bus.emit('influence:updated'); } catch (_) {}
+  }
+
+  /**
+   * Получить резонанс заметки по id или eventId.
+   * Проверяет оба ключа, т.к. parentId может ссылаться на локальный id или eventId.
+   */
+  function resonance(id) {
+    if (!id) return 0;
+    const s = resonanceMap.get(id);
+    return s ? s.size : 0;
+  }
+
+  function init() {
+    bus.on('note:created', updateForNote);
+    bus.on('note:updated', updateForNote);
+    bus.on('note:deleted', () => rebuild());
+    bus.on('db:change', () => rebuild());
+    bus.on('db:cache', () => rebuild());
+    
+    rebuild();
+  }
+
+  return { init, resonance, rebuild };
+}, ['DB', 'EventBus', 'Logger']);
+// ─── DOMAIN/Influence ─── END ───────────────────────────────────────────────
+
+// ─── DOMAIN/NoteActions ─── START ───────────────────────────────────────────
+/**
+ * UI-действия над заметками: удаление, переключение видимости, копирование.
+ * Модуль не содержит бизнес-логики — только связывает UI с DOMAIN/Notes.
+ */
+DI.register('NoteActions', function (Notes, Modal, Toast, I18n) {
+  /**
+   * Удаление заметки с подтверждением.
+   */
+  function remove(id) {
+    if (!id) return;
+    
+    Modal.confirm(I18n.t('btn.del'), I18n.t('del.confirm'), () => {
+      Notes.remove(id).then(() => {
+        Toast.show('ok', I18n.t('toast.deleted'));
+      }).catch(() => {
+        Toast.show('err', I18n.t('toast.copy.fail'));
+      });
+    });
+  }
+
+  /**
+   * Переключение видимости: личное ↔ мир.
+   */
+  function toggle(id) {
+    if (!id) return;
+    
+    Notes.toggleShared(id).then(note => {
+      if (!note) return;
+      Toast.show('ok', I18n.t(note.shared ? 'toast.saved.public' : 'toast.saved.private'));
+    }).catch(() => {
+      Toast.show('err', I18n.t('toast.copy.fail'));
+    });
+  }
+
+  /**
+   * Копирование текста в буфер обмена.
+   * Использует Clipboard API с fallback на document.execCommand.
+   */
+  function copy(text) {
+    const done = () => Toast.show('ok', I18n.t('toast.copied'));
+    const fail = () => Toast.show('err', I18n.t('toast.copy.fail'));
+    
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text || '').then(done).catch(fail);
+    } else {
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = text || '';
+        ta.style.position = 'fixed';
+        ta.style.left = '-9999px';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        ta.remove();
+        done();
+      } catch (_) {
+        fail();
+      }
+    }
+  }
+
+  return { remove, toggle, copy };
+}, ['Notes', 'Modal', 'Toast', 'I18n']);
+// ─── DOMAIN/NoteActions ─── END ─────────────────────────────────────────────
+
+// ─── UI/Onboarding ─── START ────────────────────────────────────────────────
+/**
+ * Онбординг: первый запуск показывает объяснение механик приложения.
+ * Пользователь может отключить показ флажком "Больше не показывать".
+ */
+DI.register('Onboarding', function (Config, Modal, I18n, Embedder) {
+  /**
+   * Построение тела модалки онбординга.
+   * @param {boolean} firstRun - Если true, показывает флажок "Больше не показывать".
+   */
+  function buildBody(firstRun) {
+    const el = document.createElement('div');
+    el.style.cssText = 'display:flex;flex-direction:column;gap:14px;';
+
+    const sections = [
+      ['◇ ' + I18n.t('onb.what.t'), I18n.t('onb.what.d')],
+      ['▤ ' + I18n.t('onb.stream.t'), I18n.t('onb.stream.d')],
+      ['◈ ' + I18n.t('onb.pin.t'), I18n.t('onb.pin.d')],
+      ['∿ ' + I18n.t('onb.drift.t'), I18n.t('onb.drift.d')],
+      ['⌘ ' + I18n.t('onb.modes.t'), I18n.t('onb.modes.d')],
+      ['◆ ' + I18n.t('onb.resonance.t'), I18n.t('onb.resonance.d')],
+      ['🗑 ' + I18n.t('onb.delete.t'), I18n.t('onb.delete.d')],
+    ];
+
+    sections.forEach(([title, desc]) => {
+      const s = document.createElement('div');
+      const t = document.createElement('div');
+      t.style.cssText = 'font-weight:700;font-size:13px;margin-bottom:3px;';
+      t.textContent = title;
+      
+      const d = document.createElement('div');
+      d.style.cssText = 'font-size:13px;color:var(--text-2);line-height:1.5;';
+      d.textContent = desc;
+      
+      s.appendChild(t);
+      s.appendChild(d);
+      el.appendChild(s);
+    });
+
+    let checkbox = null;
+    
+    if (firstRun) {
+      const label = document.createElement('label');
+      label.style.cssText = 'display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text-2);cursor:pointer;margin-top:4px;';
+      
+      checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      
+      label.appendChild(checkbox);
+      
+      const span = document.createElement('span');
+      span.textContent = I18n.t('onb.dontshow');
+      label.appendChild(span);
+      
+      el.appendChild(label);
+    }
+
+    return { el, checkbox };
+  }
+
+  function showHelp(firstRun) {
+    const { el, checkbox } = buildBody(!!firstRun);
+    
+    Modal.open({
+      title: I18n.t('onb.title'),
+      body: el,
+      buttons: [{
+        text: I18n.t('onb.gotit'),
+        primary: true,
+        onClick: () => {
+          if (firstRun && checkbox && checkbox.checked) {
+            Config.set('onboarded', true);
+          }
+          Modal.close();
+        },
+      }],
+    });
+  }
+
+  function init() {
+    if (Config.get('onboarded', false)) return;
+    
+    // Ждём загрузки модели, чтобы онбординг не перекрывал прогресс-бар
+    Embedder.load().then(() => {
+      showHelp(true);
+    });
+  }
+
+  return { init, showHelp };
+}, ['Config', 'Modal', 'I18n', 'Embedder']);
+// ─── UI/Onboarding ─── END ──────────────────────────────────────────────────
 
 // ─── UI/Modal ─── START
 // [заглушка: модуль будет выдан отдельным блоком по запросу]
