@@ -1732,7 +1732,7 @@ body.ready #app { display: flex; }
 // ═══════════════════════════════════════════════════════════════════════════════
 // ВЕРСИЯ ПРИЛОЖЕНИЯ
 // ═══════════════════════════════════════════════════════════════════════════════
-const APP_VERSION = '0.6.4';
+const APP_VERSION = '0.6.5';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CORE/DI - ПРЕАМБУЛА
@@ -3255,7 +3255,26 @@ self.onmessage = async function (e) {
         return resolve();
       }
 
+      // Таймаут загрузки модели: 120 секунд.
+      // Если Worker не прислал 'ready' за это время, переходим в demo mode.
+      // Это защищает от зависшего CDN или бесконечной загрузки.
+      const LOAD_TIMEOUT = 120000;
+      let resolved = false;
+      
+      const loadTimer = setTimeout(() => {
+        if (resolved) return;
+        resolved = true;
+        Logger.warn('Embedder: таймаут загрузки модели (' + LOAD_TIMEOUT / 1000 + 'с), demo mode');
+        cleanup();
+        mode = 'demo';
+        emitStatus();
+        resolve();
+      }, LOAD_TIMEOUT);
+
       worker.onerror = err => {
+        if (resolved) return;
+        resolved = true;
+        clearTimeout(loadTimer);
         Logger.warn('Embedder: ошибка Worker, demo mode', String(err && err.message || err));
         cleanup();
         mode = 'demo';
@@ -3285,12 +3304,18 @@ self.onmessage = async function (e) {
           } catch (_) {}
         }
         else if (msg.type === 'ready') {
+          if (resolved) return;
+          resolved = true;
+          clearTimeout(loadTimer);
           mode = 'model';
           emitStatus();
           Logger.info('Embedder: модель готова');
           resolve();
         }
         else if (msg.type === 'error' && msg.id === null) {
+          if (resolved) return;
+          resolved = true;
+          clearTimeout(loadTimer);
           Logger.warn('Embedder: ошибка загрузки модели, demo mode', msg.message);
           cleanup();
           mode = 'demo';
@@ -3763,7 +3788,11 @@ DI.register('Nostr', function (Config, bus, Logger) {
     const urls = relays();
     if (!urls.length) return Promise.reject(new Error('no relays configured'));
     
-    return new Promise((resolve, reject) => {
+    // Таймаут публикации: если ни один релей не ответил за 30 секунд, фейлим.
+    // Это защищает от зависших WebSocket-соединений, которые никогда не резолвятся.
+    const PUBLISH_TIMEOUT = 30000;
+    
+    const publishPromise = new Promise((resolve, reject) => {
       let settled = false;
       let failures = 0;
       
@@ -3787,6 +3816,12 @@ DI.register('Nostr', function (Config, bus, Logger) {
           });
       });
     });
+    
+    const timeoutPromise = new Promise((_, reject) => {
+      setTimeout(() => reject(new Error('publish timeout')), PUBLISH_TIMEOUT);
+    });
+    
+    return Promise.race([publishPromise, timeoutPromise]);
   }
 
   function subscribe(filters, handlers) {
@@ -3983,9 +4018,12 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
 
     const announceIds = outbox.announce.slice();
 
+    // Каждый task обрабатывается независимо.
+    // Если один зависнет или упадёт, остальные продолжат работу.
+    // Promise.allSettled вместо Promise.all — ждём завершения ВСЕХ,
+    // независимо от успеха/ошибки каждого.
     const tasks = announceIds.map(noteId => {
       return DB.get(noteId).then(note => {
-        // Заметка удалена, стала личной или уже опубликована — убираем из очереди.
         if (!note || !note.shared || !note.vector || note.eventId) {
           unqueueAnnounce(noteId);
           return;
@@ -4013,7 +4051,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
       });
     });
 
-    Promise.all(tasks).then(() => {
+    Promise.allSettled(tasks).then(() => {
       const deleteIds = outbox.del.slice();
 
       if (deleteIds.length) {
