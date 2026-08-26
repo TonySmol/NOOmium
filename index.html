@@ -1732,7 +1732,7 @@ body.ready #app { display: flex; }
 // ═══════════════════════════════════════════════════════════════════════════════
 // ВЕРСИЯ ПРИЛОЖЕНИЯ
 // ═══════════════════════════════════════════════════════════════════════════════
-const APP_VERSION = '0.6.2';
+const APP_VERSION = '0.6.3';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CORE/DI - ПРЕАМБУЛА
@@ -3952,7 +3952,16 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   }
 
   function onEvent(ev) {
-    if (!ev || seen.has(ev.id)) return;
+    if (!ev) return;
+
+    // Первое полученное событие подтверждает, что сеть работает
+    if (!hasReceivedEvent) {
+      hasReceivedEvent = true;
+      setStatus('connected');
+      flushPendingAnnounce();
+    }
+
+    if (seen.has(ev.id)) return;
     
     seen.add(ev.id);
     trimSeen();
@@ -4082,13 +4091,29 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     }).catch(e => Logger.warn('NetService: не мигрировать детей', String(e)));
   }
 
+  // Очередь заметок, ожидающих публикации
+  const pendingAnnounce = [];
+  let announceRetryTimer = null;
+
+  /**
+   * Публикация заметки в сеть с повторными попытками.
+   * Если publish фейлится, заметка попадает в очередь и повторяется через 5 секунд.
+   */
   function announceNote(note) {
     if (!note || !note.shared || !note.vector) return;
-    
+
+    // Если сеть не готова, ставим в очередь
+    if (!Nostr.isReady()) {
+      pendingAnnounce.push(note);
+      scheduleAnnounceRetry();
+      Logger.warn('NetService: сеть не готова, заметка ' + note.id + ' в очереди');
+      return;
+    }
+
     Nostr.publish(Protocol.noteEvent(note, room()))
       .then(ev => {
         Logger.info('NetService: анонс заметки ' + note.id);
-        
+
         if (ev && ev.id && note.id) {
           DB.get(note.id).then(cur => {
             if (cur && cur.eventId !== ev.id) {
@@ -4099,9 +4124,41 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
           });
         }
       })
-      .catch(e => Logger.warn('NetService: не анонсировать', String(e)));
+      .catch(e => {
+        Logger.warn('NetService: не анонсировать, повтор через 5с', String(e));
+        // Повторная попытка через 5 секунд
+        pendingAnnounce.push(note);
+        scheduleAnnounceRetry();
+      });
   }
 
+  /**
+   * Обработка очереди неопубликованных заметок.
+   */
+  function scheduleAnnounceRetry() {
+    if (announceRetryTimer) return;
+
+    announceRetryTimer = setTimeout(() => {
+      announceRetryTimer = null;
+
+      if (!pendingAnnounce.length) return;
+
+      const batch = pendingAnnounce.splice(0, pendingAnnounce.length);
+      batch.forEach(note => announceNote(note));
+    }, 5000);
+  }
+
+  /**
+   * Попытка опубликовать все накопившиеся заметки.
+   * Вызывается при успешном подключении к сети.
+   */
+  function flushPendingAnnounce() {
+    if (!pendingAnnounce.length) return;
+
+    Logger.info('NetService: публикую ' + pendingAnnounce.length + ' накопленных заметок');
+    const batch = pendingAnnounce.splice(0, pendingAnnounce.length);
+    batch.forEach(note => announceNote(note));
+  }
   function forgetNote(note) {
     if (!note || !note.eventId) return;
     
@@ -4152,6 +4209,8 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
       });
   }
 
+  let hasReceivedEvent = false;
+
   function subscribeToRoom() {
     const since = Math.floor(Date.now() / 1000) - currentWindow;
     const filters = [{
@@ -4159,18 +4218,18 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
       '#t': [room()],
       since,
     }];
-    
+
     const myEpoch = ++subEpoch;
-    
+
     if (subscription && typeof subscription.close === 'function') {
       try { subscription.close(); } catch (_) {}
     }
-    
+
     subscription = Nostr.subscribe(filters, {
       onevent: onEvent,
       onclose: () => {
         if (myEpoch !== subEpoch) return;
-        
+
         setStatus('reconnecting');
         setTimeout(() => {
           if (started && myEpoch === subEpoch) {
@@ -4179,6 +4238,21 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
         }, Config.get('reconnectBaseDelay', 1000));
       },
     });
+
+    // Ставим "подключение" только если подписка создалась.
+    // Реальный "онлайн" будет подтверждён первым событием или таймаутом.
+    if (subscription) {
+      setStatus('connecting');
+      
+      // Если через 5 секунд нет событий и подписка не закрылась,
+      // считаем что подключение установлено (рэлеи просто пустые).
+      setTimeout(() => {
+        if (myEpoch === subEpoch && started) {
+          setStatus('connected');
+          flushPendingAnnounce();
+        }
+      }, 5000);
+    }
   }
 
   function loadHistory() {
@@ -4272,6 +4346,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
    */
   function stop(full) {
     started = false;
+    hasReceivedEvent = false;
 
     if (subscription && typeof subscription.close === 'function') {
       try { subscription.close(); } catch (_) {}
