@@ -1732,7 +1732,7 @@ body.ready #app { display: flex; }
 // ═══════════════════════════════════════════════════════════════════════════════
 // ВЕРСИЯ ПРИЛОЖЕНИЯ
 // ═══════════════════════════════════════════════════════════════════════════════
-const APP_VERSION = '0.6.1';
+const APP_VERSION = '0.6.2';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CORE/DI - ПРЕАМБУЛА
@@ -4265,29 +4265,37 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     });
   }
 
-  function stop() {
+  /**
+   * Остановка сетевого слоя.
+   * @param {boolean} full - Если true, полная очистка (перед выгрузкой).
+   *                         Если false, мягкое переподключение (seen сохраняется).
+   */
+  function stop(full) {
     started = false;
-    
+
     if (subscription && typeof subscription.close === 'function') {
       try { subscription.close(); } catch (_) {}
     }
     subscription = null;
-    
+
     if (hbTimer) {
       clearInterval(hbTimer);
       hbTimer = null;
     }
-    
+
     if (contextUnsub) {
       try { contextUnsub(); } catch (_) {}
       contextUnsub = null;
     }
-    
-    peers.clear();
-    seen.clear();
-    contentSeen.clear();
-    peerNoteTimes.clear();
-    
+
+    if (full) {
+      peers.clear();
+      seen.clear();
+      contentSeen.clear();
+      peerQueryTimes.clear();
+      peerNoteBudgets.clear();
+    }
+
     setStatus('disconnected');
   }
 
@@ -5399,7 +5407,7 @@ DI.register('HeaderStatus', function (bus, I18n, Embedder) {
         try {
           const NetService = DI.resolve('NetService');
           if (NetService) {
-            NetService.stop();
+            NetService.stop(false);
             setTimeout(() => NetService.start(), 500);
           }
         } catch (_) {}
