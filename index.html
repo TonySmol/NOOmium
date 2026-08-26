@@ -3820,21 +3820,823 @@ DI.register('Nostr', function (Config, bus, Logger) {
 }, ['Config', 'EventBus', 'Logger']);
 // ─── NET/Nostr ─── END ──────────────────────────────────────────────────────
 
-// ─── NET/NetService ─── START
-// [заглушка: модуль будет выдан отдельным блоком по запросу]
-// ─── NET/NetService ─── END
+// ─── NET/NetService ─── START ───────────────────────────────────────────────
+/**
+ * Оркестрация Nostr-сети: подписки, публикация, обработка входящих событий.
+ *
+ * Безопасность:
+ * - Rate limit на исходящие запросы (queryRateLimit)
+ * - Rate limit на входящие запросы от одного пира (peerQueryTimes)
+ * - Rate limit на входящие заметки от одного пира (защита от флуда)
+ * - Дедупликация по event ID (seen) и по контенту (contentSeen)
+ * - Префильтр входящих запросов через центроиды (экономия CPU)
+ */
+DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Config, Logger, bus) {
+  let started = false;
+  let subscription = null;
+  let hbTimer = null;
+  let activeQueryId = null;
+  let lastQueryVec = null;
+  let lastQueryTime = 0;
+  let centroids = [];
+  let contextUnsub = null;
+  const seen = new Set();
+  const contentSeen = new Map();
+  const peers = new Map();
+  const peerQueryTimes = new Map();
+  const peerNoteTimes = new Map();
 
-// ─── DOMAIN/Notes ─── START
-// [заглушка: модуль будет выдан отдельным блоком по запросу]
-// ─── DOMAIN/Notes ─── END
+  let currentWindow = Config.get('subWindow', 300);
+  let historyLoading = false;
+  let subEpoch = 0;
 
-// ─── DOMAIN/Context ─── START
-// [заглушка: модуль будет выдан отдельным блоком по запросу]
-// ─── DOMAIN/Context ─── END
+  const kNote = () => Config.get('kNote', 1);
+  const kQuery = () => Config.get('kQuery', 21000);
+  const kAnswer = () => Config.get('kAnswer', 21001);
+  const kDelete = () => Config.get('kDelete', 5);
+  const room = () => Config.get('room', 'noomium-main');
 
-// ─── DOMAIN/Feed ─── START
-// [заглушка: модуль будет выдан отдельным блоком по запросу]
-// ─── DOMAIN/Feed ─── END
+  function setStatus(s) {
+    try { bus.emit('net:status', { status: s }); } catch (_) {}
+  }
+
+  function notifyPeers() {
+    try { bus.emit('net:peers', { count: peers.size }); } catch (_) {}
+  }
+
+  function emitHistory(loading, windowSec) {
+    try { bus.emit('net:history', { loading: loading, window: windowSec }); } catch (_) {}
+  }
+
+  function trimSeen() {
+    const max = Config.get('seenMaxSize', 1000);
+    if (seen.size <= max) return;
+    
+    const arr = Array.from(seen);
+    seen.clear();
+    
+    for (let i = arr.length - Math.floor(max / 2); i < arr.length; i++) {
+      seen.add(arr[i]);
+    }
+  }
+
+  function isContentDuplicate(pubkey, text) {
+    const key = pubkey + '::' + String(text || '').trim();
+    if (contentSeen.has(key)) return true;
+    
+    contentSeen.set(key, true);
+    
+    if (contentSeen.size > 2000) {
+      const first = contentSeen.keys().next().value;
+      contentSeen.delete(first);
+    }
+    
+    return false;
+  }
+
+  /**
+   * Rate limit на входящие заметки от одного пира.
+   * Если с момента последней заметки прошло меньше 500мс — флуд, пропускаем.
+   */
+  function isNoteRateLimited(pubkey) {
+    const now = Date.now();
+    const last = peerNoteTimes.get(pubkey) || 0;
+    
+    if (now - last < 500) {
+      return true;
+    }
+    
+    peerNoteTimes.set(pubkey, now);
+    return false;
+  }
+
+  function rebuildCentroids() {
+    DB.all().then(notes => {
+      const vecs = notes.filter(n => n.shared && n.vector).map(n => n.vector);
+      if (!vecs.length) {
+        centroids = [];
+        return;
+      }
+      
+      centroids = Vec.kmeans(
+        vecs,
+        Math.min(Config.get('centroidCount', 12), vecs.length),
+        8
+      );
+    }).catch(() => {});
+  }
+
+  /**
+   * Префильтр входящих запросов: пропускаем только те, что хотя бы
+   * отдалённо близки к нашим центроидам. Экономит вычисления.
+   *
+   * Для Granite R2 (рабочий диапазон ~0.55–0.93) берём мягкий порог:
+   * floor = threshold - 0.20. При threshold=0.81 это 0.61.
+   */
+  function passesPrefilter(queryVector) {
+    if (!centroids.length) return true;
+    
+    const floor = Config.get('threshold', 0.81) - 0.20;
+    for (const c of centroids) {
+      if (Vec.cosine(queryVector, c) >= floor) return true;
+    }
+    
+    return false;
+  }
+
+  function onEvent(ev) {
+    if (!ev || seen.has(ev.id)) return;
+    
+    seen.add(ev.id);
+    trimSeen();
+    
+    if (ev.pubkey === Nostr.getPubkey()) return;
+
+    if (ev.kind === kNote()) {
+      handleIncomingNote(ev);
+    } else if (ev.kind === kQuery()) {
+      handleIncomingQuery(ev);
+    } else if (ev.kind === kAnswer()) {
+      handleIncomingAnswer(ev);
+    } else if (ev.kind === kDelete()) {
+      handleIncomingDelete(ev);
+    }
+  }
+
+  function handleIncomingNote(ev) {
+    const note = Protocol.decodeNote(ev);
+    if (!note) return;
+    
+    // Защита от флуда: не более одной заметки в 500мс от одного пира
+    if (isNoteRateLimited(note.authorPubkey)) return;
+    
+    if (isContentDuplicate(note.authorPubkey, note.text)) return;
+    
+    DB.cacheGet(note.id).then(existing => {
+      if (existing && existing.createdAt && note.createdAt && existing.createdAt > note.createdAt) {
+        return;
+      }
+      
+      peers.set(note.authorPubkey, Date.now());
+      DB.cachePut(note);
+      notifyPeers();
+    });
+  }
+
+  function handleIncomingQuery(ev) {
+    const q = Protocol.decodeQuery(ev);
+    if (!q) return;
+    
+    const now = Date.now();
+    const last = peerQueryTimes.get(ev.pubkey) || 0;
+    
+    if (now - last < Config.get('queryRateLimit', 3000)) return;
+    
+    peerQueryTimes.set(ev.pubkey, now);
+    
+    if (!passesPrefilter(q.vector)) return;
+
+    DB.all().then(notes => {
+      const candidates = notes.filter(n => n.shared && n.vector);
+      if (!candidates.length) return null;
+      
+      const byId = new Map(candidates.map(n => [n.id, n]));
+      const items = candidates.map(n => ({ id: n.id, vector: n.vector }));
+      
+      return Ranker.cosineBatch(q.vector, items).then(scored => {
+        const top = scored
+          .filter(s => s.score >= Config.get('threshold', 0.81))
+          .slice(0, q.maxResponses || Config.get('maxResponses', 8));
+        
+        top.forEach((s, i) => {
+          const note = byId.get(s.id);
+          if (!note) return;
+          
+          setTimeout(() => {
+            Nostr.publish(Protocol.answerEvent(note, s.score, q.queryId, room()))
+              .catch(e => Logger.warn('NetService: не отправить ответ', String(e)));
+          }, i * 250);
+        });
+      });
+    }).catch(e => Logger.warn('NetService: ошибка обработки запроса', String(e)));
+  }
+
+  function handleIncomingAnswer(ev) {
+    const a = Protocol.decodeAnswer(ev);
+    if (!a) return;
+    
+    if (a.queryId !== activeQueryId) return;
+    if (isContentDuplicate(a.authorPubkey, a.text)) return;
+    
+    peers.set(a.authorPubkey, Date.now());
+    
+    DB.cachePut({
+      id: a.id,
+      text: a.text,
+      vector: a.vector,
+      shared: true,
+      authorPubkey: a.authorPubkey,
+      createdAt: a.createdAt,
+      score: a.score,
+    });
+    
+    notifyPeers();
+  }
+
+  function handleIncomingDelete(ev) {
+    const del = Protocol.decodeDelete(ev);
+    if (!del) return;
+    
+    del.eventIds.forEach(eventId => {
+      if (eventId) DB.cacheDel(eventId);
+    });
+    
+    if (del.authorPubkey) peers.set(del.authorPubkey, Date.now());
+    notifyPeers();
+  }
+
+  /**
+   * При публикации локальной заметки ей присваивается eventId (Nostr event ID).
+   * Дети, привязанные к локальному id, мигрируют на eventId.
+   */
+  function migrateChildrenParentId(oldParentId, newParentId) {
+    if (!oldParentId || !newParentId || oldParentId === newParentId) return;
+    
+    DB.all().then(notes => {
+      const children = notes.filter(n => n && n.parentId === oldParentId);
+      if (!children.length) return;
+      
+      Logger.info('NetService: мигрирую parentId у ' + children.length + ' детей');
+      
+      children.forEach(child => {
+        child.parentId = newParentId;
+        DB.put(child).catch(e => Logger.warn('NetService: не обновить дочку', String(e)));
+      });
+    }).catch(e => Logger.warn('NetService: не мигрировать детей', String(e)));
+  }
+
+  function announceNote(note) {
+    if (!note || !note.shared || !note.vector) return;
+    
+    Nostr.publish(Protocol.noteEvent(note, room()))
+      .then(ev => {
+        Logger.info('NetService: анонс заметки ' + note.id);
+        
+        if (ev && ev.id && note.id) {
+          DB.get(note.id).then(cur => {
+            if (cur && cur.eventId !== ev.id) {
+              cur.eventId = ev.id;
+              DB.put(cur);
+              migrateChildrenParentId(cur.id, cur.eventId);
+            }
+          });
+        }
+      })
+      .catch(e => Logger.warn('NetService: не анонсировать', String(e)));
+  }
+
+  function forgetNote(note) {
+    if (!note || !note.eventId) return;
+    
+    const ev = Protocol.deleteEvent(note.eventId, room());
+    if (!ev) return;
+    
+    Nostr.publish(ev)
+      .then(() => Logger.info('NetService: запрос удаления с рэлеев ' + note.id))
+      .catch(e => Logger.warn('NetService: не удалить с рэлеев', String(e)));
+  }
+
+  /**
+   * Отправка запроса в сеть при изменении контекста (пин или дрейф).
+   * Использует duplicateThreshold для предотвращения повторных запросов:
+   * если новый вектор похож на предыдущий >= 0.88, запрос не отправляется.
+   */
+  function maybeSendQuery() {
+    const ctx = Store.get('context');
+    
+    if ((ctx.source !== 'pin' && ctx.source !== 'drift') || !ctx.vector) {
+      lastQueryVec = null;
+      return;
+    }
+    
+    const now = Date.now();
+    if (now - lastQueryTime < Config.get('queryRateLimit', 3000)) return;
+    
+    if (lastQueryVec && Ranker.isSimilar(lastQueryVec, ctx.vector)) return;
+    
+    lastQueryVec = ctx.vector;
+    lastQueryTime = now;
+    
+    const tpl = Protocol.queryEvent(
+      ctx.vector,
+      Config.get('maxResponses', 8),
+      Config.get('responseWindow', 6000)
+    );
+    
+    Nostr.publish(tpl)
+      .then(ev => {
+        activeQueryId = ev.id;
+        Logger.info('NetService: запрос ' + ev.id.slice(0, 8) + '…');
+      })
+      .catch(e => {
+        lastQueryVec = null;
+        lastQueryTime = 0;
+        Logger.warn('NetService: не отправить запрос', String(e));
+      });
+  }
+
+  function subscribeToRoom() {
+    const since = Math.floor(Date.now() / 1000) - currentWindow;
+    const filters = [{
+      kinds: [kNote(), kQuery(), kAnswer(), kDelete()],
+      '#t': [room()],
+      since,
+    }];
+    
+    const myEpoch = ++subEpoch;
+    
+    if (subscription && typeof subscription.close === 'function') {
+      try { subscription.close(); } catch (_) {}
+    }
+    
+    subscription = Nostr.subscribe(filters, {
+      onevent: onEvent,
+      onclose: () => {
+        if (myEpoch !== subEpoch) return;
+        
+        setStatus('reconnecting');
+        setTimeout(() => {
+          if (started && myEpoch === subEpoch) {
+            subscribeToRoom();
+          }
+        }, Config.get('reconnectBaseDelay', 1000));
+      },
+    });
+  }
+
+  function loadHistory() {
+    if (!started || historyLoading) return;
+    
+    const maxWindow = Config.get('historyMaxWindow', 2592000);
+    if (currentWindow >= maxWindow) {
+      emitHistory(false, currentWindow);
+      return;
+    }
+    
+    historyLoading = true;
+    emitHistory(true, currentWindow);
+    
+    currentWindow = Math.min(maxWindow, Math.max(currentWindow * 4, 86400));
+    
+    try {
+      subscribeToRoom();
+      Logger.info('NetService: окно истории → ' + currentWindow + 's');
+    } finally {
+      setTimeout(() => {
+        historyLoading = false;
+        emitHistory(false, currentWindow);
+      }, 1200);
+    }
+  }
+
+  function startHeartbeat() {
+    if (hbTimer) clearInterval(hbTimer);
+    
+    hbTimer = setInterval(() => {
+      const now = Date.now();
+      const ttl = Config.get('peerTTL', 60000);
+      let changed = false;
+      
+      peers.forEach((ts, pk) => {
+        if (now - ts > ttl) {
+          peers.delete(pk);
+          changed = true;
+        }
+      });
+      
+      if (changed) notifyPeers();
+      trimSeen();
+    }, Config.get('heartbeat', 30000));
+  }
+
+  function start() {
+    if (started) return Promise.resolve();
+    
+    return Nostr.init().then(() => {
+      started = true;
+      
+      subscribeToRoom();
+      
+      bus.on('note:created', note => {
+        if (note && note.shared) announceNote(note);
+      });
+      
+      bus.on('note:shared', note => {
+        if (note && note.shared) announceNote(note);
+      });
+      
+      bus.on('note:unshared', note => {
+        if (note && !note.shared && note.eventId) forgetNote(note);
+      });
+      
+      bus.on('note:deleted', note => {
+        if (note && note.shared && note.eventId) forgetNote(note);
+      });
+      
+      bus.on('db:change', () => rebuildCentroids());
+      
+      contextUnsub = Store.subscribe(s => s.context, () => maybeSendQuery());
+      
+      startHeartbeat();
+      rebuildCentroids();
+      
+      setStatus('connected');
+      Logger.info('NetService: запущен, комната #' + room());
+    }).catch(e => {
+      Logger.error('NetService: не стартовать', String(e && e.message || e));
+      setStatus('failed');
+    });
+  }
+
+  function stop() {
+    started = false;
+    
+    if (subscription && typeof subscription.close === 'function') {
+      try { subscription.close(); } catch (_) {}
+    }
+    subscription = null;
+    
+    if (hbTimer) {
+      clearInterval(hbTimer);
+      hbTimer = null;
+    }
+    
+    if (contextUnsub) {
+      try { contextUnsub(); } catch (_) {}
+      contextUnsub = null;
+    }
+    
+    peers.clear();
+    seen.clear();
+    contentSeen.clear();
+    peerNoteTimes.clear();
+    
+    setStatus('disconnected');
+  }
+
+  return { start, stop, loadHistory };
+}, ['Nostr', 'Protocol', 'DB', 'Ranker', 'Vec', 'Store', 'Config', 'Logger', 'EventBus']);
+// ─── NET/NetService ─── END ─────────────────────────────────────────────────
+
+// ─── DOMAIN/Notes ─── START ─────────────────────────────────────────────────
+/**
+ * CRUD для локальных заметок.
+ * Каждая заметка при создании/редактировании получает вектор через Embedder.
+ * События: note:created, note:updated, note:deleted, note:shared, note:unshared.
+ */
+DI.register('Notes', function (DB, Embedder, bus, Logger, Utils) {
+  function emit(event, payload) {
+    try { bus.emit(event, payload); } catch (_) {}
+  }
+
+  /**
+   * Создание заметки.
+   * @param {string} text - Текст заметки.
+   * @param {string} mode - 'private' или 'world'.
+   * @param {string|null} parentId - ID родительской заметки (для связи «по мотивам»).
+   */
+  function create(text, mode, parentId) {
+    const t = (text || '').trim();
+    if (!t) return Promise.resolve(null);
+    
+    return Embedder.embed(t).then(vector => {
+      const note = {
+        id: Utils.uid('n'),
+        text: t,
+        vector: vector ? Array.from(vector) : null,
+        shared: mode === 'world',
+        parentId: parentId || null,
+        parentPubkey: null,
+        createdAt: Date.now(),
+      };
+      
+      return DB.put(note).then(() => {
+        emit('note:created', note);
+        return note;
+      });
+    });
+  }
+
+  /**
+   * Редактирование заметки. Пересчитывает вектор.
+   * Публичные заметки редактировать нельзя (immutable в Nostr).
+   */
+  function edit(id, newText) {
+    const t = (newText || '').trim();
+    if (!t) return Promise.resolve(null);
+    
+    return DB.get(id).then(note => {
+      if (!note) return null;
+      
+      return Embedder.embed(t).then(vector => {
+        note.text = t;
+        note.vector = vector ? Array.from(vector) : null;
+        note.updatedAt = Date.now();
+        
+        return DB.put(note).then(() => {
+          emit('note:updated', note);
+          return note;
+        });
+      });
+    });
+  }
+
+  function remove(id) {
+    return DB.get(id).then(note => {
+      if (!note) return null;
+      
+      return DB.del(id).then(() => {
+        emit('note:deleted', note);
+        return note;
+      });
+    });
+  }
+
+  /**
+   * Переключение видимости: личное ↔ мир.
+   * При публикации отправляет анонс в сеть (через NetService, слушает note:shared).
+   */
+  function toggleShared(id) {
+    return DB.get(id).then(note => {
+      if (!note) return null;
+      
+      note.shared = !note.shared;
+      
+      return DB.put(note).then(() => {
+        emit(note.shared ? 'note:shared' : 'note:unshared', note);
+        return note;
+      });
+    });
+  }
+
+  function get(id) {
+    return DB.get(id);
+  }
+
+  return { create, edit, remove, toggleShared, get };
+}, ['DB', 'Embedder', 'EventBus', 'Logger', 'Utils']);
+// ─── DOMAIN/Notes ─── END ───────────────────────────────────────────────────
+
+// ─── DOMAIN/Context ─── START ───────────────────────────────────────────────
+/**
+ * Управление текущим контекстом поиска.
+ *
+ * Состояния контекста:
+ * - 'pin':   Заметка закреплена (клик по карточке). Лента показывает созвучное.
+ * - 'drift': Закреплена заметка + пользователь печатает. Контекст плавно
+ *            смещается от закреплённой мысли к вводимому тексту.
+ * - 'input': Пользователь печатает без закреплённой заметки.
+ * - null:    Контекста нет. Лента в хронологическом порядке.
+ *
+ * Событие 'note:pin' от NoteView/FeedView активирует пин.
+ */
+DI.register('Context', function (Store, Embedder, Config, Utils, bus) {
+  let inputText = '';
+  let inputVector = null;
+  let pinNote = null;
+
+  /**
+   * Вычисление активного контекста на основе текущего состояния.
+   * Приоритет: drift > pin > input > none.
+   */
+  function activeContext() {
+    const hasInput = !!inputText.trim();
+    
+    if (pinNote && hasInput) {
+      return {
+        source: 'drift',
+        noteId: pinNote.id,
+        text: inputText.trim(),
+        vector: inputVector,
+        pinText: pinNote.text,
+      };
+    }
+    
+    if (pinNote) {
+      return {
+        source: 'pin',
+        noteId: pinNote.id,
+        text: pinNote.text,
+        vector: pinNote.vector,
+      };
+    }
+    
+    if (hasInput) {
+      return {
+        source: 'input',
+        noteId: null,
+        text: inputText.trim(),
+        vector: inputVector,
+      };
+    }
+    
+    return {
+      source: null,
+      noteId: null,
+      text: '',
+      vector: null,
+      pinText: null,
+    };
+  }
+
+  function push() {
+    Store.setState({ context: activeContext() });
+  }
+
+  /**
+   * Дебаунс для эмбеддинга вводимого текста.
+   * Если пользователь быстро печатает, вектор пересчитывается
+   * только после паузы в `debounce` мс.
+   */
+  const debouncedEmbed = Utils.debounce(() => {
+    const t = inputText.trim();
+    if (!t) {
+      inputVector = null;
+      push();
+      return;
+    }
+    
+    Embedder.embed(t).then(v => {
+      // Защита от race condition: если текст изменился пока считался вектор,
+      // не применяем устаревший результат.
+      if (inputText.trim() === t) {
+        inputVector = v;
+        push();
+      }
+    });
+  }, Config.get('debounce', 350));
+
+  return {
+    setInput(text) {
+      inputText = text || '';
+      if (!inputText.trim()) inputVector = null;
+      push();
+      debouncedEmbed();
+    },
+
+    setPin(note) {
+      if (!note || !note.vector) return;
+      pinNote = { 
+        id: note.id, 
+        eventId: note.eventId || null,
+        text: note.text, 
+        vector: note.vector 
+      };
+      push();
+    },
+
+    clearPin() {
+      pinNote = null;
+      push();
+    },
+
+    clear() {
+      inputText = '';
+      inputVector = null;
+      pinNote = null;
+      debouncedEmbed.cancel();
+      push();
+    },
+
+    getVector() {
+      return activeContext().vector;
+    },
+    
+    getActive() {
+      return activeContext();
+    },
+    
+    getPin() {
+      return pinNote;
+    },
+
+    init() {
+      bus.on('note:pin', note => {
+        if (note) this.setPin(note);
+      });
+    },
+  };
+}, ['Store', 'Embedder', 'Config', 'Utils', 'EventBus']);
+// ─── DOMAIN/Context ─── END ─────────────────────────────────────────────────
+
+// ─── DOMAIN/Feed ─── START ──────────────────────────────────────────────────
+/**
+ * Формирование ленты.
+ *
+ * Два режима:
+ * 1. Без контекста (source === null):
+ *    Все заметки (локальные + сетевые) в хронологическом порядке.
+ *
+ * 2. С контекстом (pin / drift / input):
+ *    Ранжирование по косинусному сходству с вектором контекста.
+ *    Разделение на relevant (>= threshold) и serendipity (ниже порога,
+ *    но в пределах окна озарений).
+ *
+ * Обновление триггерится:
+ * - Изменением контекста (подписка на Store)
+ * - Изменением локальной БД (db:change)
+ * - Изменением сетевого кэша (db:cache)
+ */
+DI.register('Feed', function (DB, Ranker, Store, bus, Logger) {
+  let seq = 0;
+  let unsubs = [];
+
+  function refresh() {
+    const my = ++seq;
+    const ctx = Store.get('context');
+
+    return Promise.all([DB.all(), DB.cacheAll()]).then(([local, cached]) => {
+      if (my !== seq) return;
+
+      if (!ctx.source) {
+        // Режим 1: без контекста — хронологический поток
+        const merged = [
+          ...local.map(n => Object.assign({}, n, { own: true })),
+          ...cached.map(n => Object.assign({}, n, { own: false })),
+        ].sort((x, y) => (y.createdAt || 0) - (x.createdAt || 0));
+        
+        Store.setState({
+          feed: merged,
+          lists: { local: [], world: [], seren: [] },
+        });
+        
+        return;
+      }
+
+      if (!ctx.vector) return;
+
+      // Режим 2: ранжирование по сходству
+      const items = [];
+      const dataMap = new Map();
+      
+      for (const n of local) {
+        if (n && n.vector) {
+          items.push({ id: n.id, vector: n.vector });
+          dataMap.set(n.id, Object.assign({}, n, { own: true }));
+        }
+      }
+      
+      for (const n of cached) {
+        if (n && n.vector) {
+          items.push({ id: n.id, vector: n.vector });
+          dataMap.set(n.id, Object.assign({}, n, { own: false }));
+        }
+      }
+
+      return Ranker.cosineBatch(ctx.vector, items).then(scored => {
+        if (my !== seq) return;
+        
+        const { relevant, seren } = Ranker.split(scored);
+        
+        const toRes = s => {
+          const n = dataMap.get(s.id);
+          return n ? Object.assign({}, n, { score: s.score }) : null;
+        };
+        
+        const rel = relevant.map(toRes).filter(Boolean);
+        
+        Store.setState({
+          lists: {
+            local: rel.filter(n => n.own),
+            world: rel.filter(n => !n.own),
+            seren: seren.map(toRes).filter(Boolean),
+          },
+          feed: [],
+        });
+      });
+    }).catch(err => {
+      Logger.warn('Feed: ошибка refresh', String(err && err.message || err));
+    });
+  }
+
+  function init() {
+    unsubs.push(Store.subscribe(s => s.context, () => refresh(), Store.shallowEqual));
+    unsubs.push(bus.on('db:change', () => refresh()));
+    unsubs.push(bus.on('db:cache', () => refresh()));
+    
+    refresh();
+  }
+
+  function destroy() {
+    unsubs.forEach(u => {
+      try { u(); } catch (_) {}
+    });
+    unsubs = [];
+  }
+
+  return { init, destroy, refresh };
+}, ['DB', 'Ranker', 'Store', 'EventBus', 'Logger']);
+// ─── DOMAIN/Feed ─── END ────────────────────────────────────────────────────
 
 // ─── DOMAIN/Provenance ─── START
 // [заглушка: модуль будет выдан отдельным блоком по запросу]
