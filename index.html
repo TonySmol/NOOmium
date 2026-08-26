@@ -1755,37 +1755,1297 @@ const DI = (() => {
   return { register, resolve };
 })();
 
-// ─── CORE/Config ─── START
-// [заглушка: модуль будет выдан отдельным блоком по запросу]
-// ─── CORE/Config ─── END
+// ─── CORE/Config ─── START ──────────────────────────────────────────────────
+/**
+ * Глобальная конфигурация приложения с поддержкой миграций схемы.
+ * 
+ * Единственный источник истины для всех настраиваемых параметров.
+ * При добавлении нового параметра:
+ * 1. Добавить в `defaults`
+ * 2. При необходимости добавить миграцию в `migrations`
+ * 3. Поднять `SCHEMA_VERSION`
+ */
+DI.register('Config', function () {
+  const KEY = 'noomium:cfg';
+  const SCHEMA_VERSION = 7;
 
-// ─── CORE/EventBus ─── START
-// [заглушка: модуль будет выдан отдельным блоком по запросу]
-// ─── CORE/EventBus ─── END
+  const defaults = Object.freeze({
+    schemaVersion: SCHEMA_VERSION,
+    room: 'noomium-main',
+    theme: 'dark',
+    lang: null,
+    onboarded: false,
+    logLevel: 'info',
 
-// ─── CORE/Logger ─── START
-// [заглушка: модуль будет выдан отдельным блоком по запросу]
-// ─── CORE/Logger ─── END
+    // AI / Embedding
+    model: 'onnx-community/granite-embedding-97m-multilingual-r2-ONNX',
+    dim: 384,
+    aiCacheLimit: 300,
+    aiEmbedTimeout: 15000,
 
-// ─── CORE/Utils ─── START
-// [заглушка: модуль будет выдан отдельным блоком по запросу]
-// ─── CORE/Utils ─── END
+    // Ранжирование (адаптировано под Granite R2, диапазон ~0.55–0.93)
+    threshold: 0.81,
+    serendipity: 0.07,
+    duplicateThreshold: 0.88,
 
-// ─── CORE/I18n ─── START
-// [заглушка: модуль будет выдан отдельным блоком по запросу]
-// ─── CORE/I18n ─── END
+    // Отображение сходства: 'signal' (индикатор + текст) или 'percent' (сырые %)
+    similarityDisplay: 'signal',
 
-// ─── CORE/Store ─── START
-// [заглушка: модуль будет выдан отдельным блоком по запросу]
-// ─── CORE/Store ─── END
+    // Nostr / сеть
+    relays: [
+      'wss://relay.damus.io',
+      'wss://relay.primal.net',
+      'wss://offchain.pub',
+      'wss://nos.lol',
+      'wss://nostr.oxtr.dev',
+      'wss://relay.mostr.pub',
+    ],
+    kNote: 1,
+    kQuery: 21000,
+    kAnswer: 21001,
+    kDelete: 5,
+    queryRateLimit: 3000,
+    maxResponses: 8,
+    responseWindow: 6000,
+    centroidCount: 12,
+    peerTTL: 60000,
+    heartbeat: 30000,
+    subWindow: 300,
+    historyMaxWindow: 2592000,
+    relayErrorThreshold: 5,
+    relayCircuitBreakTime: 120000,
+    relayBackoff1: 15000,
+    relayBackoff2: 30000,
+    reconnectMaxAttempts: 10,
+    reconnectBaseDelay: 1000,
+    reconnectMaxDelay: 60000,
+    seenMaxSize: 1000,
+    maxAnswerTextLength: 10000,
+    maxNoteTextLength: 10000,
+    maxIncomingNotesPerPeer: 20,
 
-// ─── DATA/Vec ─── START
-// [заглушка: модуль будет выдан отдельным блоком по запросу]
-// ─── DATA/Vec ─── END
+    // Хранилище
+    dbName: 'noomium_v2',
+    storeName: 'notes',
+    cacheStoreName: 'cache',
 
-// ─── DATA/DB ─── START
-// [заглушка: модуль будет выдан отдельным блоком по запросу]
-// ─── DATA/DB ─── END
+    // UI / UX
+    debounce: 350,
+    baseSearchDebounce: 200,
+    truncateTextLength: 140,
+    toastMaxVisible: 3,
+    toastDefaultDuration: 2200,
+    maxPasswordAttempts: 3,
+    influenceWeightByAge: true,
+    indexerUrl: null,
+    premiumRelay: null,
+    gpuRanking: false,
+    cloudView: false,
+
+    // Лимиты длины поста
+    maxPostLength: 2500,
+    softLimit: 1200,
+    hardLimit: 2000,
+
+    // Telegram: если пользователь вручную выбрал тему, игнорируем themeChanged
+    userThemeOverride: false,
+  });
+
+  const migrations = {
+    // Исторические миграции (оставлены для совместимости цикла)
+    1: s => s,
+    2: s => s,
+    3: s => s,
+    4: s => s,
+
+    // v5: адаптация порогов под Granite R2
+    5: s => {
+      if (typeof s.threshold === 'number' && s.threshold === 0.65) {
+        s.threshold = defaults.threshold;
+      }
+      if (typeof s.serendipity === 'number' && s.serendipity === 0.25) {
+        s.serendipity = defaults.serendipity;
+      }
+      if (typeof s.vectorSimilarityThreshold === 'number' && s.vectorSimilarityThreshold === 0.98) {
+        s.vectorSimilarityThreshold = 0.95;
+      }
+      return s;
+    },
+
+    // v6: добавлен режим отображения сходства
+    6: s => {
+      if (typeof s.similarityDisplay !== 'string') {
+        s.similarityDisplay = defaults.similarityDisplay;
+      }
+      return s;
+    },
+
+    // v7: переименование vectorSimilarityThreshold → duplicateThreshold
+    7: s => {
+      if ('vectorSimilarityThreshold' in s) {
+        s.duplicateThreshold = s.vectorSimilarityThreshold;
+        delete s.vectorSimilarityThreshold;
+      }
+      if (typeof s.duplicateThreshold !== 'number') {
+        s.duplicateThreshold = defaults.duplicateThreshold;
+      }
+      return s;
+    },
+  };
+
+  const state = Object.assign({}, defaults);
+
+  try {
+    const raw = localStorage.getItem(KEY);
+    if (raw) {
+      let saved = JSON.parse(raw);
+      if (saved && typeof saved === 'object') {
+        let v = saved.schemaVersion || saved.version || 1;
+        while (v < SCHEMA_VERSION) {
+          const migrate = migrations[v];
+          if (typeof migrate === 'function') {
+            saved = migrate(saved);
+          }
+          v++;
+        }
+        saved.schemaVersion = SCHEMA_VERSION;
+        for (const k of Object.keys(defaults)) {
+          if (k in saved) state[k] = saved[k];
+        }
+      }
+    }
+  } catch (_) {}
+
+  function persist() {
+    try {
+      localStorage.setItem(KEY, JSON.stringify(state));
+    } catch (_) {}
+  }
+
+  return {
+    get(k, def) { return (k in state) ? state[k] : def; },
+    set(k, v) { state[k] = v; persist(); },
+    save: persist,
+    defaults() { return Object.assign({}, defaults); },
+    all() { return Object.assign({}, state); },
+    schemaVersion() { return SCHEMA_VERSION; },
+    reset() {
+      for (const k of Object.keys(defaults)) state[k] = defaults[k];
+      persist();
+    },
+  };
+});
+// ─── CORE/Config ─── END ────────────────────────────────────────────────────
+
+// ─── CORE/EventBus ─── START ────────────────────────────────────────────────
+/**
+ * Простая шина событий с поддержкой точечных подписок и wildcard ('*').
+ * Все модули общаются исключительно через неё, избегая прямых ссылок друг на друга.
+ */
+DI.register('EventBus', function () {
+  const map = new Map();
+  const wild = new Set();
+
+  /**
+   * Подписаться на событие.
+   * @param {string} event - Имя события или '*' для перехвата всех.
+   * @param {Function} fn - Обработчик.
+   * @returns {Function} Функция отписки.
+   */
+  function on(event, fn) {
+    if (typeof fn !== 'function') return () => {};
+    if (event === '*') {
+      wild.add(fn);
+      return () => wild.delete(fn);
+    }
+    if (!map.has(event)) map.set(event, new Set());
+    map.get(event).add(fn);
+    return () => {
+      const s = map.get(event);
+      if (s) {
+        s.delete(fn);
+        if (!s.size) map.delete(event);
+      }
+    };
+  }
+
+  /**
+   * Подписаться на одно срабатывание.
+   */
+  function once(event, fn) {
+    const off = on(event, (...a) => {
+      off();
+      fn(...a);
+    });
+    return off;
+  }
+
+  /**
+   * Отписаться (альтернатива вызову функции отписки).
+   */
+  function off(event, fn) {
+    if (event === '*') {
+      wild.delete(fn);
+      return;
+    }
+    const s = map.get(event);
+    if (s) {
+      s.delete(fn);
+      if (!s.size) map.delete(event);
+    }
+  }
+
+  /**
+   * Эмит события. Ошибки в обработчиках логируются, но не прерывают цепочку.
+   */
+  function emit(event, payload) {
+    const s = map.get(event);
+    if (s) {
+      for (const fn of Array.from(s)) {
+        try {
+          fn(payload);
+        } catch (e) {
+          console.error('[bus:' + event + ']', e);
+        }
+      }
+    }
+    if (wild.size) {
+      for (const fn of Array.from(wild)) {
+        try {
+          fn(event, payload);
+        } catch (e) {
+          console.error('[bus:*]', e);
+        }
+      }
+    }
+  }
+
+  return { on, once, off, emit };
+});
+// ─── CORE/EventBus ─── END ──────────────────────────────────────────────────
+
+// ─── CORE/Logger ─── START ──────────────────────────────────────────────────
+/**
+ * Логгер с уровнями, цветным выводом в консоль и кольцевым буфером истории.
+ */
+DI.register('Logger', function () {
+  const LEVELS = { debug: 10, info: 20, warn: 30, error: 40 };
+  const COLORS = {
+    debug: 'color:#56c2b8',
+    info: 'color:#e8a33d',
+    warn: 'color:#e5c156',
+    error: 'color:#e5646e;font-weight:bold',
+  };
+
+  let threshold = LEVELS.info;
+  const ring = [];
+  const RING_MAX = 200;
+
+  const ts = () => new Date().toISOString().substr(11, 12);
+
+  function write(level, msg, data) {
+    const time = ts();
+    ring.push({ ts: time, level, msg, data });
+    if (ring.length > RING_MAX) ring.shift();
+
+    if (LEVELS[level] < threshold) return;
+    const fn = console[level] || console.log;
+    const prefix = '%c[' + time + '][' + level.toUpperCase() + ']';
+    if (data === undefined) {
+      fn(prefix, COLORS[level], msg);
+    } else {
+      fn(prefix, COLORS[level], msg, data);
+    }
+  }
+
+  return {
+    setLevel(l) {
+      if (LEVELS[l]) threshold = LEVELS[l];
+    },
+    debug(m, d) { write('debug', m, d); },
+    info(m, d) { write('info', m, d); },
+    warn(m, d) { write('warn', m, d); },
+    error(m, d) { write('error', m, d); },
+    history() { return ring.slice(); },
+    dump() {
+      for (const r of ring) {
+        const fn = console[r.level] || console.log;
+        fn('[' + r.ts + '][' + r.level.toUpperCase() + ']', r.msg, r.data === undefined ? '' : r.data);
+      }
+    },
+  };
+});
+// ─── CORE/Logger ─── END ────────────────────────────────────────────────────
+
+// ─── CORE/Utils ─── START ───────────────────────────────────────────────────
+/**
+ * Утилиты: экранирование, плюрализация, форматирование дат, debounce.
+ */
+DI.register('Utils', function () {
+  const ESC = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+
+  /**
+   * HTML-экранирование.
+   * ВНИМАНИЕ: в текущей версии приложения весь пользовательский контент
+   * рендерится через `textContent`, поэтому эта функция зарезервирована
+   * на случай будущего rich-text рендеринга.
+   */
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, c => ESC[c]);
+  }
+
+  function escRe(s) {
+    return String(s == null ? '' : s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
+  function plural(n, one, few, many) {
+    n = Math.abs(n);
+    const a = n % 10, b = n % 100;
+    if (a === 1 && b !== 11) return one;
+    if (a >= 2 && a <= 4 && (b < 10 || b >= 20)) return few;
+    return many;
+  }
+
+  const words = {
+    symbols: (n, l) => n + ' ' + (l === 'en' ? plural(n, 'char', 'chars', 'chars') : plural(n, 'символ', 'символа', 'символов')),
+    peers: (n, l) => n + ' ' + (l === 'en' ? plural(n, 'peer', 'peers', 'peers') : plural(n, 'узел', 'узла', 'узлов')),
+    thoughts: (n, l) => n + ' ' + (l === 'en' ? plural(n, 'note', 'notes', 'notes') : plural(n, 'мысль', 'мысли', 'мыслей')),
+    descendants: (n, l) => n + ' ' + (l === 'en' ? plural(n, 'heir', 'heirs', 'heirs') : plural(n, 'потомок', 'потомка', 'потомков')),
+  };
+
+  function word(key, n, lang) {
+    const fn = words[key];
+    return fn ? fn(n, lang) : String(n);
+  }
+
+  function fmtDate(ts, lang) {
+    if (!ts) return '';
+    try {
+      return new Date(ts).toLocaleDateString(lang === 'en' ? 'en-US' : 'ru-RU', {
+        day: '2-digit',
+        month: 'short',
+      });
+    } catch (_) {
+      return '';
+    }
+  }
+
+  function fmtTime(ts, lang) {
+    if (!ts) return '';
+    try {
+      return new Date(ts).toLocaleTimeString(lang === 'en' ? 'en-US' : 'ru-RU', {
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+    } catch (_) {
+      return '';
+    }
+  }
+
+  function fmtRelativeTime(ts, lang, t) {
+    if (!ts || typeof t !== 'function') return '';
+    const diff = Date.now() - ts;
+    if (diff < 0) return '';
+    const sec = Math.floor(diff / 1000);
+    if (sec < 60) return t('time.now');
+    const min = Math.floor(sec / 60);
+    if (min < 60) {
+      const form = plural(min, t('time.min.one'), t('time.min.few'), t('time.min.many'));
+      return min + ' ' + form;
+    }
+    const hr = Math.floor(min / 60);
+    if (hr < 24) {
+      const form = plural(hr, t('time.hr.one'), t('time.hr.few'), t('time.hr.many'));
+      return hr + ' ' + form;
+    }
+    const day = Math.floor(hr / 24);
+    if (day < 30) {
+      const form = plural(day, t('time.day.one'), t('time.day.few'), t('time.day.many'));
+      return day + ' ' + form;
+    }
+    return fmtDate(ts, lang);
+  }
+
+  const shortPk = pk => (pk ? pk.slice(0, 8) + '…' : '');
+
+  function uid(prefix) {
+    return (prefix || 'n') + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+  }
+
+  function debounce(fn, ms) {
+    let timer = null;
+    function debounced(...args) {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => {
+        timer = null;
+        fn(...args);
+      }, ms);
+    }
+    debounced.cancel = () => {
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+    };
+    return debounced;
+  }
+
+  return { esc, escRe, plural, word, fmtDate, fmtTime, fmtRelativeTime, shortPk, uid, debounce };
+});
+// ─── CORE/Utils ─── END ─────────────────────────────────────────────────────
+
+// ─── CORE/I18n ─── START ────────────────────────────────────────────────────
+/**
+ * Интернационализация (ru/en).
+ * Словари хранятся в одном месте. Все тексты интерфейса берутся только отсюда.
+ */
+DI.register('I18n', function (Config, bus) {
+  const dicts = Object.create(null);
+  const listeners = [];
+  let current = 'ru';
+
+  const saved = Config.get('lang', null);
+  if (saved === 'ru' || saved === 'en') {
+    current = saved;
+  } else {
+    current = (navigator.language || 'ru').toLowerCase().indexOf('ru') === 0 ? 'ru' : 'en';
+  }
+
+  function format(str, params) {
+    const s = String(str == null ? '' : str);
+    if (!params) return s;
+    return s.replace(/\{(\w+)\}/g, (m, k) => (params[k] != null ? String(params[k]) : m));
+  }
+
+  function t(key, params, fallback) {
+    const d = dicts[current] || {};
+    let val = Object.prototype.hasOwnProperty.call(d, key) ? d[key] : undefined;
+    if (val === undefined) {
+      const en = dicts['en'] || {};
+      val = Object.prototype.hasOwnProperty.call(en, key) ? en[key] : undefined;
+    }
+    return format(val !== undefined ? val : (fallback !== undefined ? fallback : key), params);
+  }
+
+  function addDict(lang, dict) {
+    dicts[lang] = Object.assign(dicts[lang] || {}, dict || {});
+  }
+
+  function applyToDOM() {
+    try {
+      document.querySelectorAll('[data-i18n]').forEach(el => {
+        const key = el.getAttribute('data-i18n');
+        if (key) el.textContent = t(key);
+      });
+      document.querySelectorAll('[data-i18n-ph]').forEach(el => {
+        const key = el.getAttribute('data-i18n-ph');
+        if (key) el.setAttribute('placeholder', t(key));
+      });
+      document.querySelectorAll('[data-i18n-aria]').forEach(el => {
+        const key = el.getAttribute('data-i18n-aria');
+        if (key) el.setAttribute('aria-label', t(key));
+      });
+    } catch (_) {}
+  }
+
+  function setLang(lang) {
+    if (lang !== 'ru' && lang !== 'en') return;
+    current = lang;
+    Config.set('lang', current);
+    applyToDOM();
+    for (const fn of listeners.slice()) {
+      try {
+        fn(current);
+      } catch (_) {}
+    }
+    try {
+      bus.emit('i18n:change', { lang: current });
+    } catch (_) {}
+  }
+
+  const getLang = () => current;
+
+  function onChange(fn) {
+    if (typeof fn === 'function') listeners.push(fn);
+  }
+
+  // Русский словарь
+  addDict('ru', {
+    'st.net': 'сеть',
+    'st.ai.loading': 'модель',
+    'st.ai.ready': 'ии',
+    'st.ai.demo': 'ии/хеш',
+    'st.net.online': 'онлайн',
+    'st.net.connecting': 'соединение',
+    'st.net.reconnecting': 'пересоединение',
+    'st.net.failed': 'нет сети',
+
+    'progress.title': 'Загружаем модель',
+
+    'ed.placeholder': 'О чём думаешь?',
+    'ed.chars': 'симв.',
+    'ed.limit.soft': 'Для точного поиска пиши короче',
+    'ed.limit.hard': 'Вектор обрезается, качество поиска низкое',
+    'ed.limit.max': 'Максимум {max} символов',
+
+    'btn.private': 'Личное',
+    'btn.public': 'Мир',
+    'btn.save': 'Сохранить',
+    'btn.send.aria': 'Отправить',
+    'btn.menu.aria': 'Меню',
+    'btn.base.aria': 'Моя база',
+    'btn.ctx.clear.aria': 'Снять контекст',
+
+    'tab.stream': 'Поток',
+    'tab.base': 'База',
+
+    'seg.local': 'Моё',
+    'seg.world': 'Мир',
+    'seg.seren': 'Озарения',
+
+    'ctx.pinned': 'пин',
+    'ctx.drift': 'дрейф от',
+
+    'sim.score': 'похожа на',
+    'sim.level.high': 'В тему',
+    'sim.level.mid': 'Озарение',
+
+    'inf.resonance': 'резонанс',
+    'inf.linked': 'по мотивам',
+    'inf.openparent': 'Открыть заметку-источник',
+    'inf.children': 'Потомки',
+    'inf.nochildren': 'Потомков пока нет',
+    'inf.lineage': 'Линейка «по мотивам»',
+    'inf.noancestors': 'Это корень — предков нет',
+    'inf.orphan.hint': 'Родитель этой заметки был удалён',
+
+    'empty.local.t': 'Пока нет мыслей',
+    'empty.world.t': 'Никто не думает так же',
+    'empty.seren.t': 'Озарений нет',
+    'empty.base.t': 'База пуста',
+    'empty.base.empty': 'Ничего не найдено',
+
+    'base.search': 'поиск...',
+    'base.sort.new': 'новые',
+    'base.sort.old': 'старые',
+    'base.sort.az': 'а-я',
+    'base.stat.total': 'всего',
+    'base.stat.open': 'открыто',
+    'base.stat.priv': 'лично',
+    'base.tag.private': 'лично',
+    'base.tag.shared': 'открыто',
+    'base.wipe': 'Стереть базу',
+    'base.wipe.confirm': 'Удалить все ваши заметки навсегда?',
+
+    'btn.open': 'Открыть',
+    'btn.edit': 'Развить',
+    'btn.del': 'Удалить',
+    'btn.pin': 'Пин',
+    'btn.pin.aria': 'Закрепить для поиска',
+    'btn.cancel': 'Отмена',
+    'btn.close': 'Закрыть',
+    'btn.toggle.priv': 'Скрыть',
+    'btn.toggle.pub': 'Открыть',
+
+    'toast.pinned': 'закреплено',
+    'toast.saved.private': 'сохранено лично',
+    'toast.saved.public': 'опубликовано',
+    'toast.copied': 'скопировано',
+    'toast.deleted': 'удалено',
+    'toast.copy.fail': 'не удалось',
+    'toast.empty': 'напиши что-нибудь',
+    'toast.base.wiped': 'база очищена',
+    'toast.edit.saved': 'сохранено',
+
+    'menu.settings': 'Настройки',
+    'menu.theme': 'Тема',
+    'menu.lang': 'Язык',
+    'menu.help': 'Как это работает',
+    'menu.fullreset': 'Полный сброс',
+    'menu.fullreset.confirm': 'Удалить ВСЕ данные из браузера (заметки, кэш, модель) и перезагрузить? Это как первый запуск.',
+    'menu.fullreset.done': 'перезагрузка через 1.5 сек...',
+    'menu.ranking': 'Настройки поиска',
+
+    'ranking.threshold': 'Порог релевантности',
+    'ranking.threshold.hint': 'Минимальное сходство для показа в ленте (5%–95%)',
+    'ranking.serendipity': 'Диапазон озарений',
+    'ranking.serendipity.hint': 'Насколько широкие связи показывать как озарения (5%–30%)',
+    'ranking.similarity': 'Порог одинаковости',
+    'ranking.similarity.hint': 'Сходство, выше которого заметки считаются одинаковыми (88%–99%)',
+    'ranking.reset': 'Сбросить настройки',
+    'ranking.saved': 'Настройки сохранены',
+    'ranking.display': 'Отображение сходства',
+    'ranking.display.signal': 'Индикатор сигнала',
+    'ranking.display.percent': 'Проценты (отладка)',
+
+    'del.confirm': 'Удалить эту заметку навсегда?',
+
+    'net.loadmore': 'Загрузить ещё',
+    'net.loading': 'Загружаю…',
+
+    'note.public.noedit': 'Публичные заметки нельзя редактировать',
+    'note.edit.placeholder': 'Текст заметки',
+
+    'onb.title': 'Как это работает',
+    'onb.dontshow': 'Больше не показывать',
+    'onb.gotit': 'Понятно',
+    'onb.what.t': 'NOOmium',
+    'onb.what.d': 'Соцсеть смыслов: мысли ищутся не по словам и не по лайкам, а по значению. Каждая мысль превращается в вектор — точку в пространстве смыслов.',
+    'onb.stream.t': 'Лента',
+    'onb.stream.d': 'Показывает свежие мысли — твои и из сети. Просто читай.',
+    'onb.pin.t': 'Пин',
+    'onb.pin.d': 'Кликни по мысли — она станет контекстом: лента покажет созвучное из твоей базы и из сети. Закреплённая мысль становится «мамой» для всего, что ты напишешь следом.',
+    'onb.drift.t': 'Дрейф',
+    'onb.drift.d': 'Начни печатать при пине — контекст плавно перейдёт к твоему тексту. Так можно органично уйти от исходной мысли к своей.',
+    'onb.modes.t': 'Личное и Мир',
+    'onb.modes.d': 'Личное остаётся только у тебя. Мир — делится мыслью с сетью, и другие смогут найти её по смыслу.',
+    'onb.resonance.t': 'Резонанс ◆',
+    'onb.resonance.d': 'Сколько чужих мыслей родила твоя. «↳ по мотивам» ведёт к заметке-источнику, клик по ◆ показывает потомков.',
+    'onb.delete.t': 'Удаление',
+    'onb.delete.d': 'Удаление в Nostr — это просьба к релеям удалить заметку. Большинство рэлеев её выполнят, но те, кто уже увидел заметку, могут её сохранить. Полное удаление возможно только на своём релее.',
+
+    'time.now': 'только что',
+    'time.min.one': 'минуту назад',
+    'time.min.few': 'минуты назад',
+    'time.min.many': 'минут назад',
+    'time.hr.one': 'час назад',
+    'time.hr.few': 'часа назад',
+    'time.hr.many': 'часов назад',
+    'time.day.one': 'день назад',
+    'time.day.few': 'дня назад',
+    'time.day.many': 'дней назад',
+  });
+
+  // Английский словарь
+  addDict('en', {
+    'st.net': 'net',
+    'st.ai.loading': 'model',
+    'st.ai.ready': 'ai',
+    'st.ai.demo': 'ai/hash',
+    'st.net.online': 'online',
+    'st.net.connecting': 'connecting',
+    'st.net.reconnecting': 'reconnecting',
+    'st.net.failed': 'offline',
+
+    'progress.title': 'Loading model',
+
+    'ed.placeholder': 'What are you thinking?',
+    'ed.chars': 'chars',
+    'ed.limit.soft': 'Shorter text = more precise search',
+    'ed.limit.hard': 'Vector will be truncated, search quality drops',
+    'ed.limit.max': 'Maximum {max} characters',
+
+    'btn.private': 'Private',
+    'btn.public': 'World',
+    'btn.save': 'Save',
+    'btn.send.aria': 'Send',
+    'btn.menu.aria': 'Menu',
+    'btn.base.aria': 'My base',
+    'btn.ctx.clear.aria': 'Clear context',
+
+    'tab.stream': 'Stream',
+    'tab.base': 'Base',
+
+    'seg.local': 'Mine',
+    'seg.world': 'World',
+    'seg.seren': 'Insights',
+
+    'ctx.pinned': 'pinned',
+    'ctx.drift': 'drift from',
+
+    'sim.score': 'similarity',
+    'sim.level.high': 'On topic',
+    'sim.level.mid': 'Insight',
+
+    'inf.resonance': 'resonance',
+    'inf.linked': 'inspired by',
+    'inf.openparent': 'Open source note',
+    'inf.children': 'Descendants',
+    'inf.nochildren': 'No descendants yet',
+    'inf.lineage': '"Inspired by" lineage',
+    'inf.noancestors': 'This is the root — no ancestors',
+    'inf.orphan.hint': 'The parent of this note was deleted',
+
+    'empty.local.t': 'No thoughts yet',
+    'empty.world.t': 'Nobody thinks alike',
+    'empty.seren.t': 'No insights',
+    'empty.base.t': 'Base is empty',
+    'empty.base.empty': 'Nothing found',
+
+    'base.search': 'search...',
+    'base.sort.new': 'newest',
+    'base.sort.old': 'oldest',
+    'base.sort.az': 'a-z',
+    'base.stat.total': 'total',
+    'base.stat.open': 'open',
+    'base.stat.priv': 'private',
+    'base.tag.private': 'private',
+    'base.tag.shared': 'open',
+    'base.wipe': 'Wipe base',
+    'base.wipe.confirm': 'Delete all your notes forever?',
+
+    'btn.open': 'Open',
+    'btn.edit': 'Develop',
+    'btn.del': 'Delete',
+    'btn.pin': 'Pin',
+    'btn.pin.aria': 'Pin for search',
+    'btn.cancel': 'Cancel',
+    'btn.close': 'Close',
+    'btn.toggle.priv': 'Hide',
+    'btn.toggle.pub': 'Share',
+
+    'toast.pinned': 'pinned',
+    'toast.saved.private': 'saved privately',
+    'toast.saved.public': 'shared',
+    'toast.copied': 'copied',
+    'toast.deleted': 'deleted',
+    'toast.copy.fail': 'copy failed',
+    'toast.empty': 'write something',
+    'toast.base.wiped': 'base wiped',
+    'toast.edit.saved': 'saved',
+
+    'menu.settings': 'Settings',
+    'menu.theme': 'Theme',
+    'menu.lang': 'Language',
+    'menu.help': 'How it works',
+    'menu.fullreset': 'Full reset',
+    'menu.fullreset.confirm': 'Delete ALL data from browser (notes, cache, model) and reload? This is like first launch.',
+    'menu.fullreset.done': 'reloading in 1.5 sec...',
+    'menu.ranking': 'Search settings',
+
+    'ranking.threshold': 'Relevance threshold',
+    'ranking.threshold.hint': 'Minimum similarity to show in feed (5%–95%)',
+    'ranking.serendipity': 'Serendipity range',
+    'ranking.serendipity.hint': 'How broad connections to show as insights (5%–30%)',
+    'ranking.similarity': 'Duplicate threshold',
+    'ranking.similarity.hint': 'Similarity above which notes are considered identical (88%–99%)',
+    'ranking.reset': 'Reset settings',
+    'ranking.saved': 'Settings saved',
+    'ranking.display': 'Similarity display',
+    'ranking.display.signal': 'Signal indicator',
+    'ranking.display.percent': 'Percentages (debug)',
+
+    'del.confirm': 'Delete this note forever?',
+
+    'net.loadmore': 'Load more',
+    'net.loading': 'Loading…',
+
+    'note.public.noedit': 'Public notes cannot be edited',
+    'note.edit.placeholder': 'Note text',
+
+    'onb.title': 'How it works',
+    'onb.dontshow': "Don't show again",
+    'onb.gotit': 'Got it',
+    'onb.what.t': 'NOOmium',
+    'onb.what.d': 'A social network of meaning: thoughts are found not by words or likes, but by sense. Each thought becomes a vector — a point in meaning-space.',
+    'onb.stream.t': 'Feed',
+    'onb.stream.d': 'Shows fresh thoughts — yours and from the network. Just read.',
+    'onb.pin.t': 'Pin',
+    'onb.pin.d': 'Click a thought to make it the context: the feed shows what resonates, from your base and the network. The pinned thought becomes the "mother" of what you write next.',
+    'onb.drift.t': 'Drift',
+    'onb.drift.d': 'Start typing while pinned — the context shifts toward your text. A natural way to drift from the original thought to your own.',
+    'onb.modes.t': 'Private & World',
+    'onb.modes.d': 'Private stays with you. World shares the thought with the network so others can find it by meaning.',
+    'onb.resonance.t': 'Resonance ◆',
+    'onb.resonance.d': 'How many thoughts yours inspired. "↳ inspired by" leads to the source note; click ◆ to see descendants.',
+    'onb.delete.t': 'Deletion',
+    'onb.delete.d': 'Deletion in Nostr is a request to relays to delete a note. Most relays will honor it, but those who already saw the note may keep it. Full deletion is only possible on your own relay.',
+
+    'time.now': 'just now',
+    'time.min.one': 'min ago',
+    'time.min.few': 'min ago',
+    'time.min.many': 'min ago',
+    'time.hr.one': 'hr ago',
+    'time.hr.few': 'hrs ago',
+    'time.hr.many': 'hrs ago',
+    'time.day.one': 'day ago',
+    'time.day.few': 'days ago',
+    'time.day.many': 'days ago',
+  });
+
+  function init() {
+    applyToDOM();
+  }
+
+  return { t, addDict, setLang, getLang, onChange, applyToDOM, init };
+}, ['Config', 'EventBus']);
+// ─── CORE/I18n ─── END ──────────────────────────────────────────────────────
+
+// ─── CORE/Store ─── START ───────────────────────────────────────────────────
+/**
+ * Минимальный синхронный стор приложения.
+ * Не содержит бизнес-логики — только состояние и подписки.
+ */
+DI.register('Store', function () {
+  const state = {
+    view: 'stream',
+    seg: 'local',
+    context: { source: null, noteId: null, text: '', vector: null, pinText: null },
+    sendMode: 'private',
+    lists: { local: [], world: [], seren: [] },
+    feed: [],
+  };
+
+  const listeners = [];
+
+  function shallowEqual(a, b) {
+    if (Object.is(a, b)) return true;
+    if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return false;
+    const ka = Object.keys(a), kb = Object.keys(b);
+    if (ka.length !== kb.length) return false;
+    for (const k of ka) {
+      if (!Object.is(a[k], b[k])) return false;
+    }
+    return true;
+  }
+
+  const snapshot = () => Object.freeze(Object.assign({}, state));
+
+  function notify() {
+    const snap = snapshot();
+    for (const l of listeners.slice()) {
+      try {
+        l(snap);
+      } catch (e) {
+        console.error('[store]', e);
+      }
+    }
+  }
+
+  const getState = () => snapshot();
+  const get = k => state[k];
+
+  function setState(partial) {
+    if (!partial || typeof partial !== 'object' || Array.isArray(partial)) return;
+    Object.assign(state, partial);
+    notify();
+  }
+
+  /**
+   * Подписка на изменения.
+   * Варианты:
+   *   subscribe(listener)
+   *   subscribe(selector, listener, equals?)
+   */
+  function subscribe(a, b, equals) {
+    if (typeof b === 'function') {
+      const selector = a, listener = b, eq = equals || Object.is;
+      let prev = selector(snapshot());
+      const wrap = s => {
+        const next = selector(s);
+        if (!eq(next, prev)) {
+          prev = next;
+          listener(next, s);
+        }
+      };
+      listeners.push(wrap);
+      return () => {
+        const i = listeners.indexOf(wrap);
+        if (i > -1) listeners.splice(i, 1);
+      };
+    }
+
+    listeners.push(a);
+    return () => {
+      const i = listeners.indexOf(a);
+      if (i > -1) listeners.splice(i, 1);
+    };
+  }
+
+  return { getState, get, setState, subscribe, shallowEqual };
+});
+// ─── CORE/Store ─── END ─────────────────────────────────────────────────────
+
+// ─── DATA/Vec ─── START ─────────────────────────────────────────────────────
+/**
+ * Векторные операции: нормализация, cosine similarity, сжатие в base64, k-means.
+ * Все векторы ожидаются нормализованными (единичная длина).
+ */
+DI.register('Vec', function () {
+  const f32 = v => (v instanceof Float32Array ? v : Float32Array.from(v || []));
+
+  /**
+   * Сериализация вектора в compact base64 (Int16 квантование).
+   * Используется для передачи векторов в Nostr-событиях.
+   */
+  function toB64(vec) {
+    const f = f32(vec);
+    const i16 = new Int16Array(f.length);
+
+    for (let i = 0; i < f.length; i++) {
+      let x = f[i];
+      if (x > 1) x = 1;
+      else if (x < -1) x = -1;
+      i16[i] = Math.round(x * 32767);
+    }
+
+    const bytes = new Uint8Array(i16.buffer, i16.byteOffset, i16.byteLength);
+    let bin = '';
+    for (let i = 0; i < bytes.length; i++) {
+      bin += String.fromCharCode(bytes[i]);
+    }
+
+    return btoa(bin);
+  }
+
+  /**
+   * Десериализация вектора из base64 + повторная нормализация.
+   */
+  function fromB64(b64) {
+    try {
+      const bin = atob(String(b64 || ''));
+      if (!bin || bin.length < 2 || bin.length % 2 !== 0) return null;
+
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) {
+        bytes[i] = bin.charCodeAt(i);
+      }
+
+      const i16 = new Int16Array(bytes.buffer);
+      const out = new Float32Array(i16.length);
+      for (let i = 0; i < i16.length; i++) {
+        out[i] = i16[i] / 32767;
+      }
+
+      return normalize(out);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /**
+   * Косинусное сходство для нормализованных векторов.
+   * Если векторы разной длины, сравниваем по минимальной длине.
+   */
+  function cosine(a, b) {
+    if (!a || !b) return 0;
+    const n = Math.min(a.length, b.length);
+    if (!n) return 0;
+
+    let s = 0;
+    for (let i = 0; i < n; i++) {
+      s += a[i] * b[i];
+    }
+
+    return s;
+  }
+
+  function normalize(v) {
+    const f = f32(v);
+    let norm = 0;
+
+    for (let i = 0; i < f.length; i++) {
+      norm += f[i] * f[i];
+    }
+
+    norm = Math.sqrt(norm);
+    const out = new Float32Array(f.length);
+    if (!norm) return out;
+
+    for (let i = 0; i < f.length; i++) {
+      out[i] = f[i] / norm;
+    }
+
+    return out;
+  }
+
+  function sqDist(a, b) {
+    const n = Math.min(a.length, b.length);
+    let s = 0;
+
+    for (let i = 0; i < n; i++) {
+      const d = a[i] - b[i];
+      s += d * d;
+    }
+
+    return s;
+  }
+
+  /**
+   * Упрощённый k-means с инициализацией k-means++.
+   * Используется для центроидов префильтра входящих запросов.
+   */
+  function kmeans(vectors, k, iterations) {
+    const iters = iterations || 10;
+    const n = vectors.length;
+
+    if (!n || !k) return [];
+    if (n <= k) return vectors.map(v => f32(v));
+
+    const dim = vectors[0].length;
+
+    const cents = [f32(vectors[0])];
+    while (cents.length < k) {
+      let bestI = 0, bestD = -1;
+
+      for (let i = 0; i < n; i++) {
+        let minD = Infinity;
+
+        for (const c of cents) {
+          const d = sqDist(vectors[i], c);
+          if (d < minD) minD = d;
+        }
+
+        if (minD > bestD) {
+          bestD = minD;
+          bestI = i;
+        }
+      }
+
+      cents.push(f32(vectors[bestI]));
+    }
+
+    for (let it = 0; it < iters; it++) {
+      const sums = Array.from({ length: k }, () => new Float32Array(dim));
+      const counts = new Array(k).fill(0);
+
+      for (let i = 0; i < n; i++) {
+        let best = 0, bestD = Infinity;
+
+        for (let c = 0; c < k; c++) {
+          const d = sqDist(vectors[i], cents[c]);
+          if (d < bestD) {
+            bestD = d;
+            best = c;
+          }
+        }
+
+        counts[best]++;
+        for (let d = 0; d < dim; d++) {
+          sums[best][d] += vectors[i][d];
+        }
+      }
+
+      for (let c = 0; c < k; c++) {
+        if (counts[c]) {
+          for (let d = 0; d < dim; d++) {
+            cents[c][d] = sums[c][d] / counts[c];
+          }
+        }
+      }
+    }
+
+    return cents;
+  }
+
+  return { toB64, fromB64, cosine, normalize, kmeans };
+});
+// ─── DATA/Vec ─── END ───────────────────────────────────────────────────────
+
+// ─── DATA/DB ─── START ──────────────────────────────────────────────────────
+/**
+ * Слой хранения: IndexedDB с fallback в память.
+ * Два хранилища:
+ * - notes: локальные заметки пользователя
+ * - cache: сетевые заметки/ответы
+ */
+DI.register('DB', function (Config, bus, Logger) {
+  let db = null;
+  let mem = null;
+  let memCache = null;
+  let openPromise = null;
+
+  const NOTES = () => Config.get('storeName', 'notes');
+  const CACHE = () => Config.get('cacheStoreName', 'cache');
+
+  function emitChange() {
+    try { bus.emit('db:change'); } catch (_) {}
+  }
+
+  function emitCache() {
+    try { bus.emit('db:cache'); } catch (_) {}
+  }
+
+  function open() {
+    if (openPromise) return openPromise;
+
+    openPromise = new Promise(resolve => {
+      if (!window.indexedDB) {
+        mem = new Map();
+        memCache = new Map();
+        Logger.warn('DB: IndexedDB недоступен, in-memory fallback');
+        return resolve(null);
+      }
+
+      try {
+        const req = indexedDB.open(Config.get('dbName', 'noomium_v2'), 1);
+
+        req.onupgradeneeded = e => {
+          const d = e.target.result;
+
+          if (!d.objectStoreNames.contains(NOTES())) {
+            d.createObjectStore(NOTES(), { keyPath: 'id' });
+          }
+
+          if (!d.objectStoreNames.contains(CACHE())) {
+            d.createObjectStore(CACHE(), { keyPath: 'id' });
+          }
+        };
+
+        req.onsuccess = e => {
+          db = e.target.result;
+          resolve(db);
+        };
+
+        req.onerror = () => {
+          mem = new Map();
+          memCache = new Map();
+          Logger.warn('DB: ошибка открытия, fallback');
+          resolve(null);
+        };
+
+        req.onblocked = () => {
+          mem = new Map();
+          memCache = new Map();
+          Logger.warn('DB: open blocked, fallback');
+          resolve(null);
+        };
+      } catch (err) {
+        mem = new Map();
+        memCache = new Map();
+        Logger.warn('DB: не поддерживается, fallback', String(err));
+        resolve(null);
+      }
+    });
+
+    return openPromise;
+  }
+
+  function withStore(store, mode, fn, memFn) {
+    return open().then(d => {
+      if (!d) return memFn();
+
+      return new Promise((res, rej) => {
+        try {
+          const r = fn(d.transaction(store, mode).objectStore(store));
+          r.onsuccess = () => res(r.result);
+          r.onerror = () => rej(r.error);
+        } catch (e) {
+          rej(e);
+        }
+      });
+    });
+  }
+
+  function put(note) {
+    return withStore(
+      NOTES(),
+      'readwrite',
+      s => s.put(note),
+      () => { mem.set(note.id, note); return note.id; }
+    ).then(res => {
+      emitChange();
+      return res;
+    });
+  }
+
+  function get(id) {
+    return withStore(
+      NOTES(),
+      'readonly',
+      s => s.get(id),
+      () => mem.get(id)
+    );
+  }
+
+  function del(id) {
+    return withStore(
+      NOTES(),
+      'readwrite',
+      s => s.delete(id),
+      () => { mem.delete(id); }
+    ).then(res => {
+      emitChange();
+      return res;
+    });
+  }
+
+  function all() {
+    return withStore(
+      NOTES(),
+      'readonly',
+      s => s.getAll(),
+      () => Array.from(mem.values())
+    );
+  }
+
+  function reset() {
+    return open().then(d => {
+      if (!d) {
+        mem.clear();
+        memCache.clear();
+        return;
+      }
+
+      return new Promise((res, rej) => {
+        const t = d.transaction([NOTES(), CACHE()], 'readwrite');
+        t.objectStore(NOTES()).clear();
+        t.objectStore(CACHE()).clear();
+
+        t.oncomplete = () => res();
+        t.onerror = () => rej(t.error);
+      });
+    }).then(() => {
+      emitChange();
+      emitCache();
+    });
+  }
+
+  function cachePut(note) {
+    return withStore(
+      CACHE(),
+      'readwrite',
+      s => s.put(note),
+      () => { memCache.set(note.id, note); return note.id; }
+    ).then(res => {
+      emitCache();
+      return res;
+    });
+  }
+
+  function cacheGet(id) {
+    return withStore(
+      CACHE(),
+      'readonly',
+      s => s.get(id),
+      () => memCache.get(id)
+    );
+  }
+
+  function cacheAll() {
+    return withStore(
+      CACHE(),
+      'readonly',
+      s => s.getAll(),
+      () => Array.from(memCache.values())
+    );
+  }
+
+  function cacheDel(id) {
+    return withStore(
+      CACHE(),
+      'readwrite',
+      s => s.delete(id),
+      () => { memCache.delete(id); }
+    ).then(res => {
+      emitCache();
+      return res;
+    });
+  }
+
+  return {
+    put,
+    get,
+    del,
+    all,
+    reset,
+    cachePut,
+    cacheGet,
+    cacheAll,
+    cacheDel,
+  };
+}, ['Config', 'EventBus', 'Logger']);
+// ─── DATA/DB ─── END ────────────────────────────────────────────────────────
 
 // ─── AI/Embedder ─── START
 // [заглушка: модуль будет выдан отдельным блоком по запросу]
