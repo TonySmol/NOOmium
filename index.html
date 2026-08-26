@@ -1693,15 +1693,36 @@ body.ready #app { display: flex; }
       navigator.serviceWorker.register('./sw.js')
         .then(reg => {
           console.log('[SW] зарегистрирован:', reg.scope);
+          
+          // Проверяем обновления при загрузке
+          reg.update();
+          
+          // Проверяем обновления при возвращении вкладки в фокус
+          window.addEventListener('focus', () => reg.update());
+          
+          // Обнаружен новый SW
           reg.addEventListener('updatefound', () => {
             const newWorker = reg.installing;
+            console.log('[SW] найден новый worker');
+            
             if (newWorker) {
               newWorker.addEventListener('statechange', () => {
+                // Новый SW установлен — активируем его
                 if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
+                  console.log('[SW] новый worker готов, отправляю SKIP_WAITING');
                   newWorker.postMessage('SKIP_WAITING');
                 }
               });
             }
+          });
+          
+          // Обработка изменения controller (когда новый SW захватил страницу)
+          let refreshing = false;
+          navigator.serviceWorker.addEventListener('controllerchange', () => {
+            if (refreshing) return;
+            refreshing = true;
+            console.log('[SW] controller изменился, перезагружаю');
+            window.location.reload();
           });
         })
         .catch(err => console.warn('[SW] регистрация упала:', err));
@@ -1709,6 +1730,17 @@ body.ready #app { display: flex; }
   }
 </script>
 
+<script>
+  // Проверяем обновления каждые 30 минут
+  if ('serviceWorker' in navigator) {
+    setInterval(() => {
+      navigator.serviceWorker.ready.then(reg => {
+        reg.update();
+      });
+    }, 30 * 60 * 1000);
+  }
+</script>
+   
 <!-- ═══ TELEGRAM WEB APP API (безопасная загрузка) ═══ -->
 <script>
   (function () {
@@ -1732,7 +1764,7 @@ body.ready #app { display: flex; }
 // ═══════════════════════════════════════════════════════════════════════════════
 // ВЕРСИЯ ПРИЛОЖЕНИЯ
 // ═══════════════════════════════════════════════════════════════════════════════
-const APP_VERSION = '0.6.6';
+const APP_VERSION = '0.6.7';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CORE/DI - ПРЕАМБУЛА
