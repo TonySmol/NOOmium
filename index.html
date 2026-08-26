@@ -1764,7 +1764,7 @@ body.ready #app { display: flex; }
 // ═══════════════════════════════════════════════════════════════════════════════
 // ВЕРСИЯ ПРИЛОЖЕНИЯ
 // ═══════════════════════════════════════════════════════════════════════════════
-const APP_VERSION = '0.6.8';
+const APP_VERSION = '0.6.9';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CORE/DI - ПРЕАМБУЛА
@@ -3507,8 +3507,9 @@ DI.register('Ranker', function (Vec, Config) {
     const threshold = Config.get('threshold', 0.81);
     const serendipity = Config.get('serendipity', 0.07);
 
-    // Динамический нижний порог: не ниже 0.40, не выше (threshold - serendipity)
-    const lowerBound = Math.max(0.40, threshold - serendipity - 0.05);
+    // Нижний порог: не ниже 0.40, не выше (threshold - serendipity)
+    // Это гарантирует, что окно серендипити точно соответствует настройке пользователя.
+    const lowerBound = Math.max(0.40, threshold - serendipity);
     
     const relevant = [];
     const seren = [];
@@ -7233,6 +7234,28 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboar
       group.appendChild(hintEl);
       body.appendChild(group);
     });
+
+    // Живой предпросмотр: что значит текущая настройка
+    const previewEl = document.createElement('div');
+    previewEl.style.cssText = 'font-size:12px;color:var(--text-2);padding:8px 0;border-bottom:1px solid var(--line);';
+    
+    function updatePreview() {
+      const threshold = parseFloat(valueEls['threshold'].slider.value);
+      const serendipity = parseFloat(valueEls['serendipity'].slider.value);
+      const lowerBound = Math.max(0.40, threshold - serendipity);
+      
+      previewEl.textContent = 
+        'Релевантно: >= ' + Math.round(threshold * 100) + '% | ' +
+        'Озарения: ' + Math.round(lowerBound * 100) + '–' + Math.round(threshold * 100) + '% | ' +
+        'Скрыто: < ' + Math.round(lowerBound * 100) + '%';
+    }
+    
+    updatePreview();
+    body.appendChild(previewEl);
+    
+    // Привязываем обновление предпросмотра к движению ползунков
+    valueEls['threshold'].slider.addEventListener('input', updatePreview);
+    valueEls['serendipity'].slider.addEventListener('input', updatePreview);
 
     // Режим отображения сходства: signal / percent
     let pendingDisplay = Config.get('similarityDisplay', 'signal');
