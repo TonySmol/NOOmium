@@ -38,7 +38,7 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 // ВЕРСИЯ ПРИЛОЖЕНИЯ
 // ═══════════════════════════════════════════════════════════════════════════════
-const APP_VERSION = '0.7.0';
+const APP_VERSION = '0.7.2';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CORE/DI — ПРЕАМБУЛА
@@ -2405,7 +2405,7 @@ DI.register('Ranker', function (Vec, Config) {
 
 // ─── NET/Crypto ─── START ───────────────────────────────────────────────────
 /**
- * Криптография аккаунта (НОВЫЙ модуль).
+ * Криптография аккаунта.
  *
  * Две зоны ответственности:
  *
@@ -2418,10 +2418,16 @@ DI.register('Ranker', function (Vec, Config) {
  *    - npub — публичный адрес (безопасен для показа);
  *    - ncryptsec (NIP-49) — ключ, обёрнутый паролем (scrypt + ChaCha20).
  *
+ * ВАЖНО (выявлено в продакшене): в сборке nostr-tools@2.7.2 с CDN (+esm)
+ * модуль nip49 может отсутствовать — тогда encryptKey/decryptKey
+ * возвращают null. Потребители обязаны это обрабатывать: Account при
+ * недоступности NIP-49 выдаёт ключ в формате nsec, UI адаптируется
+ * через Account.canWrapKey() / Crypto.hasNip49().
+ *
  * Все методы ждут Nostr.init() — загрузка nostr-tools асинхронная.
  * Методы форматов возвращают null при неудаче (UI показывает тост);
- * encryptSelf/decryptSelf бросают исключение (вызовы обёрнуты в try/catch
- * в Protocol).
+ * encryptSelf/decryptSelf бросают исключение (вызовы обёрнуты в
+ * try/catch в Protocol).
  *
  * NIP-49 API-drift защита: nostr-tools в разных версиях возвращал из
  * decrypt() то Uint8Array, то {data}, то {secretKey} — поддержаны все
@@ -2483,6 +2489,21 @@ DI.register('Crypto', function (Nostr, Logger) {
   }
 
   /**
+   * Доступность NIP-49 в загруженной сборке nostr-tools.
+   * При false: encryptKey/decryptKey бесполезны, ключ следует выдавать
+   * в формате nsec (без парольной обёртки).
+   * @returns {Promise<boolean>}
+   */
+  async function hasNip49() {
+    try {
+      const n = await lib();
+      return !!(n.nip49 && typeof n.nip49.encrypt === 'function' && typeof n.nip49.decrypt === 'function');
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /**
    * Классификация ввода ключа (синхронно, по префиксу).
    * @param {*} input - Строка от пользователя.
    * @returns {'nsec'|'ncryptsec'|'hex'|null} Тип или null.
@@ -2525,8 +2546,7 @@ DI.register('Crypto', function (Nostr, Logger) {
 
   /**
    * Обернуть ключ паролем → ncryptsec (NIP-49).
-   * scrypt с logn=16 (~1–2 сек на мобильном) — осознанная цена
-   * для экспорта ключа.
+   * Возвращает null, если NIP-49 недоступен в сборке или при ошибке.
    * @param {Uint8Array} sk - Приватный ключ.
    * @param {string} password - Пароль.
    * @returns {Promise<string|null>} Строка ncryptsec1… или null.
@@ -2599,6 +2619,7 @@ DI.register('Crypto', function (Nostr, Logger) {
   return {
     encryptSelf,
     decryptSelf,
+    hasNip49,
     classifyKeyInput,
     decodeSecret,
     encryptKey,
@@ -5364,6 +5385,8 @@ DI.register('Influence', function (DB, bus, Logger) {
  * Ответственность модуля:
  * - состояние аккаунта (pubkey, keyExported, syncEnabled — снапшот);
  * - показ ключа: npub (безопасен), ncryptsec (NIP-49, пароль опционален);
+ *   ПРИ НЕДОСТУПНОСТИ NIP-49 в сборке nostr-tools — fallback на nsec
+ *   (незашифрованный ключ; вход по нему работает через decodeSecret);
  * - вход по ключу (nsec/hex/ncryptsec): замена ключа, сброс локальной базы,
  *   перезапуск сети. Релеи НЕ чистятся — старые заметки принадлежат старому
  *   ключу и остаются доступными при возврате к нему;
@@ -5413,10 +5436,30 @@ DI.register('Account', function (Config, Nostr, Crypto, DB, bus, Logger) {
   }
 
   /**
-   * Ключ в формате ncryptsec (NIP-49). Пароль опционален (пустая строка
-   * допустима). При успехе помечает keyExported = true.
-   * @param {string} [password] - Пароль (может быть пустым).
-   * @returns {Promise<string|null>} Строка ncryptsec1… или null при ошибке.
+   * Можно ли обернуть ключ паролем (NIP-49 доступен в окружении).
+   * Если нет — ключ будет выдан в формате nsec, UI скрывает поле пароля.
+   * @returns {Promise<boolean>}
+   */
+  async function canWrapKey() {
+    try {
+      return await Crypto.hasNip49();
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /**
+   * Ключ для передачи на другое устройство.
+   *
+   * Приоритет: ncryptsec (NIP-49, с паролем или без). Если NIP-49
+   * недоступен в сборке nostr-tools с CDN — fallback: nsec
+   * (незашифрованный ключ, nip19 гарантированно доступен).
+   *
+   * При успехе помечает keyExported = true.
+   *
+   * @param {string} [password] - Пароль (имеет смысл только при
+   *   доступном NIP-49; может быть пустым).
+   * @returns {Promise<string|null>} Строка nsec1…/ncryptsec1… или null.
    */
   async function getWrappedKey(password) {
     const sk = Nostr.getSecretKey();
@@ -5425,8 +5468,18 @@ DI.register('Account', function (Config, Nostr, Crypto, DB, bus, Logger) {
     const wrapped = await Crypto.encryptKey(sk, String(password || ''));
     if (wrapped) {
       Config.set('keyExported', true);
+      return wrapped;
     }
-    return wrapped;
+
+    // Fallback: NIP-49 недоступен — выдаём nsec.
+    const nsec = await Crypto.encodeNsec(sk);
+    if (nsec) {
+      Logger.warn('Account: NIP-49 недоступен, ключ выдан в формате nsec');
+      Config.set('keyExported', true);
+      return nsec;
+    }
+
+    return null;
   }
 
   /**
@@ -5486,7 +5539,9 @@ DI.register('Account', function (Config, Nostr, Crypto, DB, bus, Logger) {
 
   /**
    * Собрать JSON-архив: заметки + настройки + опционально ключ.
-   * @param {boolean} [includeKey] - Включить ncryptsec в архив.
+   * Ключ в архиве — в том же формате, что выдаёт getWrappedKey
+   * (ncryptsec или nsec-fallback при недоступном NIP-49).
+   * @param {boolean} [includeKey] - Включить ключ в архив.
    * @param {string} [keyPassword] - Пароль для ключа в архиве.
    * @returns {Promise<{json: string, filename: string}|null>}
    */
@@ -5688,6 +5743,7 @@ DI.register('Account', function (Config, Nostr, Crypto, DB, bus, Logger) {
   return {
     getAccountInfo,
     getNpub,
+    canWrapKey,
     getWrappedKey,
     enterKey,
     exportArchive,
@@ -7576,8 +7632,9 @@ DI.register('NoteView', function (DB, Notes, NoteActions, I18n, Utils, Toast, bu
  *
  * Разделы экрана:
  * 1. Публичный адрес (npub) — всегда виден, безопасен.
- * 2. Ключ: маска по умолчанию; «Показать» → опциональный пароль →
- *    ncryptsec в key-box + автокопирование (ставит keyExported).
+ * 2. Ключ: маска по умолчанию; «Показать» → ncryptsec (при доступном
+ *    NIP-49, поле пароля опционально) или nsec-fallback (пароль-поле
+ *    скрыто — обёртка невозможна). Показ = автокопирование + keyExported.
  * 3. Вход по ключу: nsec/hex/ncryptsec (+пароль) → подтверждение
  *    замены аккаунта → Account.enterKey.
  * 4. Экспорт: файл JSON (с ключом или без); импорт: файл → предпросмотр →
@@ -7587,8 +7644,6 @@ DI.register('NoteView', function (DB, Notes, NoteActions, I18n, Utils, Toast, bu
  *    на всё время работы, в init, без накопления при переоткрытиях).
  *
  * Стили — секции 16–17 style.css (.acc-*, .key-box, .field-*).
- * Класс .acc-sync-txt — только JS-хук для поиска элемента, CSS-правила
- * не требует (наследование от .acc-sync).
  */
 DI.register('AccountView', function (Account, Modal, Toast, I18n, Config, bus) {
   let unsubs = [];
@@ -7611,28 +7666,37 @@ DI.register('AccountView', function (Account, Modal, Toast, I18n, Config, bus) {
   // ─── Раздел: ключ ─────────────────────────────────────────────────────────
 
   /**
-   * Модалка показа ключа: пароль (опционально) → ncryptsec.
+   * Модалка показа ключа.
+   * Адаптивна к доступности NIP-49: если обёртка паролем невозможна
+   * (нет nip49 в сборке nostr-tools), поле пароля не показывается,
+   * а «Показать» выдаст nsec — незашифрованный ключ.
    */
-  function openShowKey() {
+  async function openShowKey() {
+    const wrapAvailable = await Account.canWrapKey().catch(() => false);
+
     const body = document.createElement('div');
     body.className = 'acc-body';
 
-    // Пароль (опционально)
-    const pwField = document.createElement('div');
-    pwField.className = 'field';
+    // Пароль (опционально) — только когда NIP-49 доступен
+    let pwInput = null;
 
-    const pwLabel = document.createElement('span');
-    pwLabel.className = 'field-label';
-    pwLabel.textContent = I18n.t('account.password.set');
-    pwField.appendChild(pwLabel);
+    if (wrapAvailable) {
+      const pwField = document.createElement('div');
+      pwField.className = 'field';
 
-    const pwInput = document.createElement('input');
-    pwInput.type = 'password';
-    pwInput.className = 'field-input';
-    pwInput.placeholder = I18n.t('account.password.hint');
-    pwField.appendChild(pwInput);
+      const pwLabel = document.createElement('span');
+      pwLabel.className = 'field-label';
+      pwLabel.textContent = I18n.t('account.password.set');
+      pwField.appendChild(pwLabel);
 
-    body.appendChild(pwField);
+      pwInput = document.createElement('input');
+      pwInput.type = 'password';
+      pwInput.className = 'field-input';
+      pwInput.placeholder = I18n.t('account.password.hint');
+      pwField.appendChild(pwInput);
+
+      body.appendChild(pwField);
+    }
 
     const hint = document.createElement('div');
     hint.className = 'field-hint';
@@ -7646,7 +7710,7 @@ DI.register('AccountView', function (Account, Modal, Toast, I18n, Config, bus) {
 
     const reveal = () => {
       keyBox.textContent = '…';
-      Account.getWrappedKey(pwInput.value).then(wrapped => {
+      Account.getWrappedKey(wrapAvailable && pwInput ? pwInput.value : '').then(wrapped => {
         if (!wrapped) {
           keyBox.textContent = I18n.t('account.nsec.masked');
           Toast.show('err', I18n.t('toast.copy.fail'));
@@ -7900,7 +7964,8 @@ DI.register('AccountView', function (Account, Modal, Toast, I18n, Config, bus) {
    */
   function confirmImport(archive) {
     /**
-     * @param {string} password - Пароль ncryptsec (может быть пустым).
+     * @param {string} password - Пароль ncryptsec (может быть пустым;
+     *   для nsec из архива игнорируется).
      */
     const apply = async (password) => {
       if (archive.ncryptsec && archive.pubkey) {
@@ -8125,7 +8190,7 @@ DI.register('AccountView', function (Account, Modal, Toast, I18n, Config, bus) {
 
     const keyActions = document.createElement('div');
     keyActions.className = 'acc-actions';
-    keyActions.appendChild(actionBtn(I18n.t('btn.show'), openShowKey));
+    keyActions.appendChild(actionBtn(I18n.t('btn.show'), () => { openShowKey(); }));
     keyActions.appendChild(actionBtn(I18n.t('account.enter.title'), openEnterKey));
     keySec.appendChild(keyActions);
 
