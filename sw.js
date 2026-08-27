@@ -1,8 +1,10 @@
 // ═══════════════════════════════════════════════════════════════════════════
 // NOOmium Service Worker
 // Стратегия:
-// - network-first: навигация + shell-файлы (index.html, style.css, app.js)
-//   → все три файла всегда одной версии (критично после сплита на файлы);
+// - network-first с cache:'reload': навигация + shell-файлы (index.html,
+//   style.css, app.js). 'reload' заставляет fetch идти мимо HTTP-кэша —
+//   GitHub Pages держит ответы до 10 минут, и без этого обновления версии
+//   могли «застревать» даже при живой сети;
 // - cache-first: остальная same-origin статика (иконки, скриншоты, манифест);
 // - pass-through: внешние CDN и WebSocket (SW их не трогает).
 // ═══════════════════════════════════════════════════════════════════════════
@@ -10,8 +12,6 @@
 const CACHE_VERSION = 'noomium-v0.7.1';
 
 // App shell: кэшируем сразу при установке.
-// app.js и style.css теперь отдельные файлы — обязаны быть в precache,
-// иначе офлайн-режим после первого запуска отдаст HTML без стилей и логики.
 const PRECACHE_URLS = [
   './',
   './index.html',
@@ -113,8 +113,6 @@ self.addEventListener('fetch', event => {
   }
 
   // Shell-файлы (app.js, style.css): тоже network-first.
-  // При сплите на файлы cache-first дал бы рассинхрон версий:
-  // свежий index.html + старый app.js из кэша после деплоя.
   if (isShellAsset(url)) {
     event.respondWith(networkFirstThenCache(req));
     return;
@@ -140,9 +138,17 @@ function isShellAsset(url) {
 // СТРАТЕГИИ
 // ═══════════════════════════════════════════════════════════════════════════
 
+/**
+ * Network-first с обходом HTTP-кэша (cache: 'reload').
+ * Свежесть shell-файлов важнее экономии трафика: без 'reload' fetch
+ * мог возвращать протухший ответ из кэша CDN (GitHub Pages, max-age 600).
+ * Офлайн — fallback на кэш SW.
+ * @param {Request} req
+ * @returns {Promise<Response>}
+ */
 async function networkFirstThenCache(req) {
   try {
-    const netRes = await fetch(req);
+    const netRes = await fetch(req, { cache: 'reload' });
     // Успех — обновляем кэш свежей копией
     if (netRes && netRes.status === 200) {
       const cache = await caches.open(CACHE_VERSION);
