@@ -1,22 +1,28 @@
 // ═══════════════════════════════════════════════════════════════════════════
 // NOOmium Service Worker
-// Стратегия: network-first для навигации, cache-first для статики,
-// pass-through для внешних CDN и WebSocket.
+// Стратегия:
+// - network-first: навигация + shell-файлы (index.html, style.css, app.js)
+//   → все три файла всегда одной версии (критично после сплита на файлы);
+// - cache-first: остальная same-origin статика (иконки, скриншоты, манифест);
+// - pass-through: внешние CDN и WebSocket (SW их не трогает).
 // ═══════════════════════════════════════════════════════════════════════════
 
-const CACHE_VERSION = 'noomium-v0.6.12';
+const CACHE_VERSION = 'noomium-v0.7.1';
 
-// Ресурсы, которые кэшируем сразу при установке (app shell)
+// App shell: кэшируем сразу при установке.
+// app.js и style.css теперь отдельные файлы — обязаны быть в precache,
+// иначе офлайн-режим после первого запуска отдаст HTML без стилей и логики.
 const PRECACHE_URLS = [
   './',
   './index.html',
+  './style.css',
+  './app.js',
   './manifest.json',
   './icon-192.png',
   './icon-512.png',
 ];
 
 // Ресурсы, которые кэшируем "по ходу" (не блокируют установку, если отсутствуют)
-// НОВОЕ: добавлены скриншоты для офлайн-доступа
 const OPTIONAL_URLS = [
   './icon-maskable.png',
   './screenshot-narrow.png',
@@ -98,19 +104,37 @@ self.addEventListener('fetch', event => {
   }
 
   // Cross-origin (CDN, relays, Telegram): не трогаем, пусть идёт напрямую.
-  // SW не может корректно кэшировать их из-за CORS и особенностей (WS, ESM).
   if (url.origin !== self.location.origin) return;
 
   // Навигация (HTML-страницы): network-first с fallback на кэш.
-  // Это даёт офлайн-работу, но всегда свежую версию при сети.
   if (req.mode === 'navigate') {
     event.respondWith(networkFirstThenCache(req));
     return;
   }
 
-  // Всё остальное (CSS, JS, иконки, картинки из same-origin): cache-first.
+  // Shell-файлы (app.js, style.css): тоже network-first.
+  // При сплите на файлы cache-first дал бы рассинхрон версий:
+  // свежий index.html + старый app.js из кэша после деплоя.
+  if (isShellAsset(url)) {
+    event.respondWith(networkFirstThenCache(req));
+    return;
+  }
+
+  // Всё остальное (иконки, скриншоты, манифест): cache-first.
   event.respondWith(cacheFirstThenNetwork(req));
 });
+
+/**
+ * Проверка, является ли URL shell-файлом приложения.
+ * Сравнение по концу пути — работает и при деплое в подкаталог.
+ * @param {URL} url - Разобранный URL запроса.
+ * @returns {boolean}
+ */
+function isShellAsset(url) {
+  const p = url.pathname;
+  return p.endsWith('/style.css') || p.endsWith('/app.js')
+      || p.endsWith('style.css') || p.endsWith('app.js');
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // СТРАТЕГИИ
@@ -164,8 +188,9 @@ self.addEventListener('message', event => {
     self.skipWaiting();
   }
   if (event.data === 'CLEAR_CACHE') {
-    caches.delete(CACHE_VERSION).then(() => {
-      console.log('[SW] cache cleared on demand');
-    });
+    // Полный сброс: чистим ВСЕ кэши (не только текущей версии)
+    caches.keys()
+      .then(keys => Promise.all(keys.map(k => caches.delete(k))))
+      .then(() => console.log('[SW] все кэши очищены по запросу'));
   }
 });
