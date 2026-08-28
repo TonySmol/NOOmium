@@ -38,7 +38,7 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 // ВЕРСИЯ ПРИЛОЖЕНИЯ
 // ═══════════════════════════════════════════════════════════════════════════════
-const APP_VERSION = '0.7.6';
+const APP_VERSION = '0.7.7';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CORE/DI — ПРЕАМБУЛА
@@ -6407,31 +6407,38 @@ DI.register('Onboarding', function (Config, Modal, I18n, Embedder) {
  * - hardLimit: красная подсветка, подсказка «вектор обрезается»
  * - maxPostLength: блокировка ввода через maxlength + блокировка кнопки
  *
- * Подсказка лимитов — элемент #ed-hint с классами .warn/.err
- * (style.css, секция 9).
- *
- * Обработка виртуальной клавиатуры:
- * При открытии клавиатуры сжимаем #app до видимой области через
- * VisualViewport API, чтобы композер оставался в потоке.
- *
- * Отличия от v0.6:
- * - удалён мёртвый канал note:edit-request и режим редактирования
- *   (правка живёт в NoteView со своим редактором);
- * - ФИКС модели v0.7: parentId = pin.id (uid своей заметки или eventId
- *   чужой). В v0.6 передавался pin.eventId || pin.id — для опубликованной
- *   своей заметки это eventId, что противоречит uid-модели: после unshare
- *   родителя (сброс eventId) дети оставались сиротами. pin.id всегда
- *   стабилен; NetService сам резолвит uid → eventId при публикации
- *   проекции (buildNoteEvent).
+ * v0.7.6 (визуальный пакет, ревизия):
+ * - Иконка отправки — стрелка вверх в круге (SEND_ICON). Вставляется
+ *   в init() ПЕРВОЙ операцией + фолбэк-таймер: если через 300мс кнопка
+ *   пуста (рассинхрон кэша HTML/JS — в HTML заглушка span.send-icon),
+ *   иконка вставляется принудительно. «Пустой рыжей кнопки» больше нет.
+ * - Состояние «отправляется» — спиннер .btn-spinner.
+ * - Подсказка лимитов #ed-hint — ПОСЛЕ #ed-foot, строкой под футером.
  */
 DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils, Config) {
-  let ta, cnt, sendBtn, toggle;
+  let ta, cnt, sendBtn, toggle, footEl;
   let sending = false;
   let unsubs = [];
   let vvCleanup = null;
+  let iconTimer = null;
 
-  // SVG-иконка отправки (paper plane). Единый источник — совпадает с HTML.
-  const SEND_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4 20-7z"/></svg>';
+  // Иконка отправки: стрелка вверх — симметрична в обеих осях.
+  const SEND_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></svg>';
+
+  // Спиннер состояния отправки.
+  const SEND_SPINNER = '<span class="btn-spinner"></span>';
+
+  /**
+   * Вставить иконку отправки, если кнопка пуста.
+   * Идемпотентно: не трогает спиннер и уже вставленную иконку.
+   */
+  function ensureSendIcon() {
+    if (!sendBtn || sending) return;
+    // Пусто (заглушка-span без содержимого или совсем ничего) — вставляем.
+    if (!sendBtn.querySelector('svg, .btn-spinner')) {
+      sendBtn.innerHTML = SEND_ICON;
+    }
+  }
 
   /**
    * Обновление счётчика символов, подсветки и состояния кнопки отправки.
@@ -6474,7 +6481,7 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
 
   /**
    * Показ/скрытие/обновление подсказки лимитов (#ed-hint).
-   * Класс warn — янтарная, err — розовая (style.css, секция 9).
+   * Вставляется ПОСЛЕ #ed-foot — строкой под футером композера.
    * @param {string|null} text - Текст подсказки или null для скрытия.
    * @param {'warn'|'err'|null} [level] - Уровень (цвет).
    */
@@ -6489,7 +6496,9 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
     if (!hintEl) {
       hintEl = document.createElement('div');
       hintEl.id = 'ed-hint';
-      cnt.parentNode.insertBefore(hintEl, cnt.nextSibling);
+      if (footEl && footEl.parentNode) {
+        footEl.parentNode.insertBefore(hintEl, footEl.nextSibling);
+      }
     }
 
     hintEl.textContent = text;
@@ -6509,25 +6518,19 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
   }
 
   /**
-   * Переключение кнопки отправки в состояние «отправляется» и обратно.
+   * Переключение кнопки отправки: спиннер ↔ стрелка.
    * @param {boolean} on - true — отправка идёт.
    */
   function setSendingUI(on) {
     if (!sendBtn) return;
     sendBtn.disabled = on;
     sendBtn.classList.toggle('sending', on);
-
-    if (on) {
-      sendBtn.innerHTML = '<span style="font-size:16px;line-height:1;display:block;">…</span>';
-    } else {
-      sendBtn.innerHTML = SEND_SVG;
-    }
+    sendBtn.innerHTML = on ? SEND_SPINNER : SEND_ICON;
   }
 
   /**
    * Отправка: создание заметки.
-   * parentId = pin.id: uid своей закреплённой заметки или eventId чужой
-   * (модель v0.7 — см. докстринг модуля).
+   * parentId = pin.id: uid своей закреплённой заметки или eventId чужой.
    */
   function send() {
     if (sending) return;
@@ -6576,8 +6579,7 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
 
   /**
    * Обработка виртуальной клавиатуры через VisualViewport API.
-   * При открытии клавиатуры сжимаем #app до видимой области,
-   * чтобы композер оставался в потоке, а лента корректно скроллилась.
+   * При открытии клавиатуры сжимаем #app до видимой области.
    */
   function setupKeyboardHandler() {
     if (!window.visualViewport) return;
@@ -6609,15 +6611,25 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
   }
 
   /**
-   * Инициализация: привязка DOM, слушатели, подписки.
+   * Инициализация: иконка отправки ПЕРВОЙ (устраняет пустую кнопку при
+   * любом рассинхроне кэша), далее привязка DOM, слушатели, подписки.
    */
   function init() {
     ta = document.getElementById('ed-ta');
     cnt = document.getElementById('ed-cnt');
     sendBtn = document.getElementById('btn-send');
     toggle = document.getElementById('mode-toggle');
+    footEl = document.getElementById('ed-foot');
 
     if (!ta) return;
+
+    // Иконка — первой операцией
+    ensureSendIcon();
+
+    // Фолбэк: если что-то затёрло кнопку после init (частичная загрузка,
+    // гонка кэшей) — иконка вернётся сама.
+    if (iconTimer) clearTimeout(iconTimer);
+    iconTimer = setTimeout(ensureSendIcon, 300);
 
     // Блокировка ввода на уровне браузера
     ta.setAttribute('maxlength', Config.get('maxPostLength', 2500));
@@ -6661,12 +6673,17 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
     updateCounter();
   }
 
-  /** Отписки и очистка VisualViewport-листенеров. */
+  /** Отписки и очистка. */
   function destroy() {
     unsubs.forEach(u => {
       try { u(); } catch (_) {}
     });
     unsubs = [];
+
+    if (iconTimer) {
+      clearTimeout(iconTimer);
+      iconTimer = null;
+    }
 
     if (vvCleanup) {
       try { vvCleanup(); } catch (_) {}
