@@ -1,8 +1,17 @@
 /* ═══════════════════════════════════════════════════════════════════════════════
-   NOOmium — style.css
+   NOOmium — style.css (v0.7.5)
    Дизайн-система: нейтральная высококонтрастная палитра (Linear / Vercel / Stripe).
    Тёмная тема по умолчанию, светлая через [data-theme="light"].
-   Все новые секции согласованы с существующими токенами.
+
+   Принципы v0.7.5:
+   - Шкала высот: 34 (компакт: btn-send, mode-toggle) / 40 (кнопки, поля) /
+     46 (строки меню). Промежуточных высот нет.
+   - Микроподписи uppercase: единый letter-spacing 0.05em.
+   - Две роли янтарного: --amber (текст/иконки) и --amber-btn (фон кнопок).
+     В тёмной теме совпадают; в светлой кнопка остаётся яркой (#f59e0b),
+     текст/иконки — глубокими (#b45309).
+   - Шрифты: Inter / JetBrains Mono первыми в стеках (подключение — index.html;
+     без него корректный фолбэк на системные).
    ═══════════════════════════════════════════════════════════════════════════════ */
 
 /* ═══════════════════════════════════════════════════════════════════════════════
@@ -17,17 +26,18 @@
   --surface-2: #1c1c20;
   --surface-3: #26262c;
 
-  --line: rgba(255, 255, 255, 0.07);
-  --line-2: rgba(255, 255, 255, 0.13);
+  --line: rgba(255, 255, 255, 0.08);
+  --line-2: rgba(255, 255, 255, 0.15);
 
   --text: #fafafa;
-  --text-2: #a1a1aa;
-  --text-3: #71717a;
+  --text-2: #a8a8b3;
+  --text-3: #83838e;
 
   /* Акценты */
-  --amber: #f59e0b;
+  --amber: #f59e0b;                          /* текст/иконки/бордеры */
+  --amber-btn: #f59e0b;                      /* фон primary-кнопок */
+  --amber-hover: #d97706;                    /* hover primary-кнопок */
   --amber-glow: rgba(245, 158, 11, 0.12);
-  --amber-hover: #d97706;
 
   --teal: #14b8a6;
   --teal-glow: rgba(20, 184, 166, 0.12);
@@ -41,8 +51,8 @@
   --green-glow: rgba(34, 197, 94, 0.12);
 
   /* Шрифты */
-  --font: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, sans-serif;
-  --display: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, sans-serif;
+  --font: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --display: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   --mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
 
   /* Радиусы */
@@ -67,33 +77,36 @@
 
 /* Светлая тема */
 [data-theme="light"] {
-  --bg: #fafafa;
+  --bg: #f4f4f5;
   --bg-2: #ffffff;
   --surface: #ffffff;
   --surface-2: #f4f4f5;
   --surface-3: #e4e4e7;
 
-  --line: rgba(0, 0, 0, 0.06);
-  --line-2: rgba(0, 0, 0, 0.12);
+  --line: rgba(0, 0, 0, 0.08);
+  --line-2: rgba(0, 0, 0, 0.14);
 
   --text: #18181b;
-  --text-2: #52525b;
-  --text-3: #a1a1aa;
+  --text-2: #3f3f46;
+  --text-3: #71717a;
 
-  --amber: #d97706;
-  --amber-glow: rgba(217, 119, 6, 0.1);
-  --amber-hover: #b45309;
+  /* Кнопки — тот же яркий янтарный, что и в тёмной;
+     текст/иконки — глубокий читаемый */
+  --amber: #b45309;
+  --amber-btn: #f59e0b;
+  --amber-hover: #d97706;
+  --amber-glow: rgba(245, 158, 11, 0.15);
 
   --teal: #0d9488;
-  --teal-glow: rgba(13, 148, 136, 0.1);
+  --teal-glow: rgba(13, 148, 136, 0.12);
   --teal-hover: #0f766e;
 
   --rose: #e11d48;
-  --rose-glow: rgba(225, 29, 72, 0.1);
+  --rose-glow: rgba(225, 29, 72, 0.10);
   --rose-hover: #be123c;
 
   --green: #16a34a;
-  --green-glow: rgba(22, 163, 74, 0.1);
+  --green-glow: rgba(22, 163, 74, 0.12);
 
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
   --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.08);
@@ -125,7 +138,7 @@ html, body {
 }
 
 /* Глобальный запрет выделения текста.
-   Исключения: поля ввода и режим редактирования заметок. */
+   Исключения: поля ввода, ключи, редактирование заметок. */
 body {
   background-image:
     radial-gradient(720px 460px at 92% -6%, var(--amber-glow), transparent 60%),
@@ -196,11 +209,12 @@ select:focus-visible {
 }
 
 [data-theme="light"] ::selection {
-  background: rgba(217, 119, 6, 0.2);
+  background: rgba(180, 83, 9, 0.18);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════════
    3. УНИВЕРСАЛЬНАЯ СИСТЕМА КНОПОК
+   Шкала высот: 34 (компакт) / 40 (стандарт) / 46 (строки меню).
    Модификаторы: .primary, .danger, .ghost, .icon
    ═══════════════════════════════════════════════════════════════════════════════ */
 
@@ -241,7 +255,7 @@ select:focus-visible {
 }
 
 .btn.primary {
-  background: var(--amber);
+  background: var(--amber-btn);
   color: #1a1206;
   border-color: transparent;
   box-shadow: var(--shadow-sm);
@@ -279,6 +293,22 @@ select:focus-visible {
   width: 16px;
   height: 16px;
   flex-shrink: 0;
+}
+
+/* Спиннер для кнопок в состоянии «отправляется».
+   Заменяет текстовое «…» — всегда оптически по центру. */
+.btn-spinner {
+  display: block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(26, 18, 6, 0.25);
+  border-top-color: #1a1206;
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════════
@@ -617,19 +647,18 @@ body.ready #app { display: flex; }
   font: 400 11px / 1 var(--mono);
   color: var(--text-3);
   flex-wrap: wrap;
-  letter-spacing: 0;
   margin-top: auto;
   padding-top: 10px;
 }
 
-/* Теги */
+/* Теги — микроподписи: единый letter-spacing 0.05em */
 .note-tag {
   padding: 3px 7px;
   border-radius: 4px;
   font-size: 10px;
   font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.05em;
   line-height: 1;
   flex-shrink: 0;
   white-space: nowrap;
@@ -695,7 +724,6 @@ body.ready #app { display: flex; }
   font-weight: 600;
   font-size: 11px;
   font-family: var(--mono);
-  letter-spacing: 0;
   white-space: nowrap;
   flex-shrink: 0;
   color: var(--amber);
@@ -713,12 +741,12 @@ body.ready #app { display: flex; }
 .sig-bar.sig-full { background: var(--amber); }
 .sig-bar.sig-empty { background: var(--surface-3); }
 
-/* Текстовая метка рядом с индикатором */
+/* Текстовая метка — микроподпись: 0.05em */
 .sig-label {
   font-size: 10px;
   font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.03em;
+  letter-spacing: 0.05em;
   color: var(--text-2);
 }
 
@@ -727,7 +755,6 @@ body.ready #app { display: flex; }
   color: var(--text-3);
   font-size: 11px;
   font-family: var(--mono);
-  letter-spacing: 0;
   white-space: nowrap;
   flex-shrink: 0;
   margin-left: auto;
@@ -790,7 +817,7 @@ body.ready #app { display: flex; }
   margin: 8px 0 10px;
   padding: 8px 18px;
   border-radius: 999px;
-  background: var(--surface-2);
+  background: var(--surface);
   border: 1px solid var(--line);
   color: var(--text-2);
   font-size: 12px;
@@ -815,6 +842,7 @@ body.ready #app { display: flex; }
    ═══════════════════════════════════════════════════════════════════════════════ */
 
 #composer {
+  position: relative;
   margin: 0 14px 12px;
   padding: 10px 12px;
   padding-bottom: calc(10px + var(--safe-bot));
@@ -854,15 +882,15 @@ body.ready #app { display: flex; }
 #ed-cnt {
   font: 400 11px / 1 var(--mono);
   color: var(--text-3);
-  letter-spacing: 0;
   flex-shrink: 0;
 }
 
-/* Подсказка лимитов (создаётся из JS) */
+/* Подсказка лимитов: живёт ПОД футером (вставляется в #composer,
+ * после #ed-foot — см. Composer), а не внутри flex-строки. */
 #ed-hint {
   font-size: 11px;
   color: var(--text-3);
-  padding-top: 4px;
+  padding: 6px 2px 0;
   transition: color 0.15s var(--ease);
 }
 
@@ -935,13 +963,14 @@ body.ready #app { display: flex; }
   background: var(--amber-glow);
 }
 
-/* Кнопка отправки */
+/* Кнопка отправки. Иконка — стрелка вверх (не самолётик);
+   в состоянии отправки — спиннер .btn-spinner (идеальный центризм). */
 #btn-send {
   width: 40px;
   height: 34px;
   padding: 0;
   border-radius: 999px;
-  background: var(--amber);
+  background: var(--amber-btn);
   color: #1a1206;
   display: flex;
   align-items: center;
@@ -949,19 +978,17 @@ body.ready #app { display: flex; }
   transition: transform 0.1s var(--ease), background 0.15s var(--ease), opacity 0.15s var(--ease);
   box-shadow: var(--shadow-sm);
   flex-shrink: 0;
-  font-size: 14px;
-  font-weight: 600;
 }
 
 #btn-send svg {
-  width: 16px;
-  height: 16px;
+  width: 17px;
+  height: 17px;
   display: block;
 }
 
 #btn-send:hover:not(:disabled) { background: var(--amber-hover); }
 #btn-send:active:not(:disabled) { transform: scale(0.95); }
-#btn-send.sending { opacity: 0.6; cursor: wait; }
+#btn-send.sending { opacity: 0.75; cursor: wait; }
 
 /* ═══════════════════════════════════════════════════════════════════════════════
    10. БАЗА (BASE VIEW)
@@ -1095,7 +1122,6 @@ body.ready #app { display: flex; }
   align-items: center;
   font: 400 11px / 1 var(--mono);
   color: var(--text-3);
-  letter-spacing: 0;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════════
@@ -1181,8 +1207,10 @@ body.ready #app { display: flex; }
   min-height: 0;
 }
 
+/* Футер модалки: перенос на узких экранах вместо вылезания */
 #modal-f {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
   gap: 8px;
   padding: 14px 16px;
@@ -1190,12 +1218,12 @@ body.ready #app { display: flex; }
   flex-shrink: 0;
 }
 
-/* Кнопки в футере модалок */
+/* Кнопки в футере модалок — высота 40 (шкала) */
 .mbtn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 9px 18px;
+  padding: 9px 14px;
   border-radius: var(--r-sm);
   font-weight: 600;
   font-size: 13px;
@@ -1204,13 +1232,13 @@ body.ready #app { display: flex; }
   color: var(--text);
   background: var(--surface-2);
   line-height: 1;
-  min-height: 38px;
+  min-height: 40px;
 }
 
 .mbtn:hover:not(:disabled) { background: var(--surface-3); }
 
 .mbtn.primary {
-  background: var(--amber);
+  background: var(--amber-btn);
   color: #1a1206;
   border-color: transparent;
   box-shadow: var(--shadow-sm);
@@ -1302,7 +1330,7 @@ body.ready #app { display: flex; }
 #progress.on { display: flex; }
 
 [data-theme="light"] #progress {
-  background: rgba(250, 250, 250, 0.85);
+  background: rgba(244, 244, 245, 0.88);
 }
 
 .prog-c {
@@ -1327,7 +1355,7 @@ body.ready #app { display: flex; }
 .prog-fill {
   height: 100%;
   width: 0;
-  background: linear-gradient(90deg, var(--amber), var(--amber-hover));
+  background: linear-gradient(90deg, var(--amber-btn), var(--amber-hover));
   border-radius: 2px;
   transition: width 0.3s var(--ease);
 }
@@ -1447,7 +1475,7 @@ body.ready #app { display: flex; }
   color: #fff;
 }
 
-/* Выбранная опция среди группы кнопок (режим отображения сходства) */
+/* Выбранная опция среди группы кнопок (режим отображения, вкл/выкл ключа) */
 .nv-act.selected {
   border-color: var(--amber);
   color: var(--amber);
@@ -1480,7 +1508,8 @@ body.ready #app { display: flex; }
 
 /* ═══════════════════════════════════════════════════════════════════════════════
    15. НАСТРОЙКИ РАНЖИРОВАНИЯ (СЛАЙДЕРЫ)
-   Кастомные ползунки в стиле дизайн-системы (замена нативных accent-color).
+   Кастомные ползунки: трек 6px, ручка 18px, зона касания 24px.
+   Переключатели-пары — grid 1fr 1fr: равная ширина на любом разрешении.
    ═══════════════════════════════════════════════════════════════════════════════ */
 
 .range-body {
@@ -1522,17 +1551,23 @@ body.ready #app { display: flex; }
   line-height: 1.4;
 }
 
-/* Кастомный ползунок: трек + круглая ручка с бордюром от фона */
+/* Кастомный ползунок: прозрачный инпут 24px (зона касания),
+   трек рисуется отдельными псевдоэлементами */
 .no-range {
   -webkit-appearance: none;
   appearance: none;
   width: 100%;
+  height: 24px;
+  background: transparent;
+  outline: none;
+  cursor: pointer;
+  margin: 0;
+}
+
+.no-range::-webkit-slider-runnable-track {
   height: 6px;
   border-radius: 3px;
   background: var(--surface-3);
-  outline: none;
-  cursor: pointer;
-  margin: 6px 0;
 }
 
 .no-range::-webkit-slider-thumb {
@@ -1545,6 +1580,7 @@ body.ready #app { display: flex; }
   border: 3px solid var(--surface);
   box-shadow: var(--shadow-sm);
   cursor: pointer;
+  margin-top: -6px;
   transition: transform 0.1s var(--ease);
 }
 
@@ -1553,6 +1589,12 @@ body.ready #app { display: flex; }
 
 .no-range.teal::-webkit-slider-thumb { background: var(--teal); }
 .no-range.rose::-webkit-slider-thumb { background: var(--rose); }
+
+.no-range::-moz-range-track {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--surface-3);
+}
 
 .no-range::-moz-range-thumb {
   width: 18px;
@@ -1566,12 +1608,6 @@ body.ready #app { display: flex; }
 
 .no-range.teal::-moz-range-thumb { background: var(--teal); }
 .no-range.rose::-moz-range-thumb { background: var(--rose); }
-
-.no-range::-moz-range-track {
-  height: 6px;
-  border-radius: 3px;
-  background: var(--surface-3);
-}
 
 /* Живой предпросмотр: три строки, без переносов */
 .range-preview {
@@ -1588,7 +1624,8 @@ body.ready #app { display: flex; }
   white-space: nowrap;
 }
 
-/* Переключатель режима отображения (signal / percent) */
+/* Парные переключатели (signal/percent, вкл/выкл ключа):
+   grid гарантирует ровные равные кнопки на любом экране */
 .range-display {
   display: flex;
   flex-direction: column;
@@ -1604,20 +1641,23 @@ body.ready #app { display: flex; }
 }
 
 .range-display-btns {
-  display: flex;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
   gap: 6px;
 }
 
 .range-display-btns .nv-act {
-  flex: 1;
+  width: 100%;
+  min-width: 0;
   font-size: 12px;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   padding: 8px 6px;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════════
    16. АККАУНТ И КЛЮЧ (AccountView)
-   Новый экран: ключ ncryptsec, вход по nsec, экспорт/импорт.
    ═══════════════════════════════════════════════════════════════════════════════ */
 
 .acc-body {
@@ -1668,7 +1708,7 @@ body.ready #app { display: flex; }
   letter-spacing: 2px;
 }
 
-/* Ряд действий под ключом */
+/* Ряд действий */
 .acc-actions {
   display: flex;
   gap: 6px;
@@ -1704,7 +1744,7 @@ body.ready #app { display: flex; }
 .acc-sync .dot.err  { background: var(--rose); box-shadow: 0 0 6px var(--rose-glow); }
 
 /* ═══════════════════════════════════════════════════════════════════════════════
-   17. УНИВЕРСАЛЬНЫЕ ПОЛЯ ВВОДА (модалки: пароль, nsec)
+   17. УНИВЕРСАЛЬНЫЕ ПОЛЯ ВВОДА (модалки: пароль, nsec, JSON)
    ═══════════════════════════════════════════════════════════════════════════════ */
 
 .field {
@@ -1777,12 +1817,13 @@ body.ready #app { display: flex; }
   .mt-opt,
   .mt-thumb,
   .menu-row,
-  .no-range::-webkit-slider-thumb {
+  .no-range::-webkit-slider-thumb,
+  .btn-spinner {
     transition: none !important;
     transform: none !important;
+    animation: none !important;
   }
 }
-
 
 @media (max-width: 480px) {
   .logo { font-size: 17px; }
@@ -1812,6 +1853,11 @@ body.ready #app { display: flex; }
   .note { padding: 12px; }
 
   .note-meta { gap: 6px; }
+
+  /* На узких экранах пары-переключатели стекаются вертикально */
+  .range-display-btns {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (min-width: 768px) {
@@ -1823,7 +1869,7 @@ body.ready #app { display: flex; }
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════════
-   19. СПИСОК МЕНЮ (новый дизайн настроек: строки со значением справа)
+   19. СПИСОК МЕНЮ (настройки: строки со значением справа)
    ═══════════════════════════════════════════════════════════════════════════════ */
 
 .menu-list {
