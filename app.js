@@ -38,7 +38,7 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 // ВЕРСИЯ ПРИЛОЖЕНИЯ
 // ═══════════════════════════════════════════════════════════════════════════════
-const APP_VERSION = '0.7.9';
+const APP_VERSION = '0.7.10';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CORE/DI — ПРЕАМБУЛА
@@ -120,13 +120,11 @@ DI.register('Config', function () {
 
     // Nostr / сеть
     relays: [
-      'wss://nostr.wine',
       'wss://relay.primal.net',
       'wss://nostr.mom',
       'wss://nos.lol',
       'wss://purplerelay.com',
       'wss://nostr.oxtr.dev',
-      'wss://relay.nostr.press',
     ],
     kNote: 1,
     kPrivate: 30078,
