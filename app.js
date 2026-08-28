@@ -38,7 +38,7 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 // ВЕРСИЯ ПРИЛОЖЕНИЯ
 // ═══════════════════════════════════════════════════════════════════════════════
-const APP_VERSION = '0.7.10';
+const APP_VERSION = '0.8.0';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CORE/DI — ПРЕАМБУЛА
@@ -653,7 +653,10 @@ DI.register('Utils', function () {
 // ─── CORE/I18n ─── START ────────────────────────────────────────────────────
 /**
  * Интернационализация (ru/en).
- * Словари хранятся в одном месте. Все тексты интерфейса берутся только отсюда.
+ *
+ * v0.8: обновлён inf.orphan.hint (новая семантика: «недоступен», не
+ * «удалён» — приватность автора не раскрывается), добавлен
+ * inf.parent.unavailable для будущего различения статусов.
  */
 DI.register('I18n', function (Config, bus) {
   /** @type {Object<string, Object<string, string>>} */
@@ -670,7 +673,7 @@ DI.register('I18n', function (Config, bus) {
   }
 
   /**
-   * Подстановка параметров: 'Максимум {max} символов' + {max: 2500}.
+   * Подстановка параметров.
    * @param {string} str - Шаблон.
    * @param {Object} [params] - Параметры.
    * @returns {string}
@@ -699,7 +702,7 @@ DI.register('I18n', function (Config, bus) {
   }
 
   /**
-   * Зарегистрировать словарь (merges поверх существующего).
+   * Зарегистрировать словарь.
    * @param {string} lang - Код языка.
    * @param {Object} dict - Словарь ключ → строка.
    */
@@ -726,8 +729,7 @@ DI.register('I18n', function (Config, bus) {
   }
 
   /**
-   * Сменить язык. Сохраняет выбор, применяет к DOM, оповещает слушателей
-   * и шину ('i18n:change').
+   * Сменить язык.
    * @param {string} lang - 'ru' | 'en'.
    */
   function setLang(lang) {
@@ -749,7 +751,7 @@ DI.register('I18n', function (Config, bus) {
 
   /**
    * Подписаться на смену языка.
-   * @param {Function} fn - Колбэк (lang) => {}.
+   * @param {Function} fn - Колбэк.
    */
   function onChange(fn) {
     if (typeof fn === 'function') listeners.push(fn);
@@ -788,9 +790,9 @@ DI.register('I18n', function (Config, bus) {
     'btn.download': 'Скачать',
     'btn.import': 'Импорт',
     'btn.confirm': 'Подтвердить',
+    'btn.paste': 'Вставить из буфера',
     'btn.on': 'Вкл',
     'btn.off': 'Выкл',
-    'btn.paste': 'Вставить из буфера',
 
     'tab.stream': 'Поток',
     'tab.base': 'База',
@@ -814,7 +816,8 @@ DI.register('I18n', function (Config, bus) {
     'inf.nochildren': 'Потомков пока нет',
     'inf.lineage': 'Линейка «по мотивам»',
     'inf.noancestors': 'Это корень — предков нет',
-    'inf.orphan.hint': 'Родитель этой заметки был удалён',
+    'inf.orphan.hint': 'Источник недоступен',
+    'inf.parent.unavailable': 'Источник недоступен: скрыт автором или удалён',
 
     'empty.local.t': 'Пока нет мыслей',
     'empty.world.t': 'Никто не думает так же',
@@ -878,7 +881,6 @@ DI.register('I18n', function (Config, bus) {
     'ranking.display.signal': 'Индикатор сигнала',
     'ranking.display.percent': 'Проценты (отладка)',
 
-    // Три строки предпросмотра (без переносов)
     'preview.relevant': 'Релевантно: ≥ {lo}%',
     'preview.seren': 'Озарения: {lo}%–{hi}%',
     'preview.hidden': 'Скрыто: < {lo}%',
@@ -891,7 +893,6 @@ DI.register('I18n', function (Config, bus) {
     'note.public.noedit': 'Публичные заметки нельзя редактировать',
     'note.edit.placeholder': 'Текст заметки',
 
-    // Аккаунт, ключ, синхронизация, экспорт/импорт
     'account.title': 'Аккаунт и ключ',
     'account.identity': 'Ваш ключ',
     'account.identity.desc': 'Ключ — это вы. Заметки синхронизируются между устройствами через зашифрованные события на вашем релее. Контент видите только вы.',
@@ -1005,9 +1006,9 @@ DI.register('I18n', function (Config, bus) {
     'btn.download': 'Download',
     'btn.import': 'Import',
     'btn.confirm': 'Confirm',
+    'btn.paste': 'Paste from clipboard',
     'btn.on': 'On',
     'btn.off': 'Off',
-    'btn.paste': 'Paste from clipboard',
 
     'tab.stream': 'Stream',
     'tab.base': 'Base',
@@ -1031,7 +1032,8 @@ DI.register('I18n', function (Config, bus) {
     'inf.nochildren': 'No descendants yet',
     'inf.lineage': '"Inspired by" lineage',
     'inf.noancestors': 'This is the root — no ancestors',
-    'inf.orphan.hint': 'The parent of this note was deleted',
+    'inf.orphan.hint': 'Source unavailable',
+    'inf.parent.unavailable': 'Source unavailable: hidden by author or deleted',
 
     'empty.local.t': 'No thoughts yet',
     'empty.world.t': 'Nobody thinks alike',
@@ -2930,11 +2932,19 @@ DI.register('Nostr', function (Config, bus, Logger) {
  * - kind 21001: Ответ (заметка + скор)
  * - kind 5:     Удаление публичных проекций (список event ID)
  *
- * Формат payload kind 30078 (до шифрования):
- *   { v: 1, text, vec: base64|null, parent: uid|null, shared: bool,
- *     ev: eventId|null, ts: ms }
- * Tombstone (удаление через replaceable-семантику):
- *   { v: 1, del: true, ts: ms }
+ * МОДЕЛЬ СВЯЗЕЙ v0.8.0 (без обратной совместимости):
+ * Родитель определяется парой (parentUid, parentPk):
+ * - parentUid — стабильный uid заметки-родителя;
+ * - parentPk  — pubkey автора родителя; null = родитель мой
+ *   (резолв в своей базе по uid).
+ * В публичной проекции: тег ['parent', uid, pk] — pk всегда явно
+ * (чужому клиенту нужен для резолва).
+ * eventId НЕ участвует в семейных связях — это только адрес события
+ * (отзыв/переиздание родителя больше не ломает дерево).
+ *
+ * Кэш чужих заметок: каждая запись хранит srcUid/srcPk — uid автора
+ * из тега uid и его pubkey. Индекс (srcUid, srcPk) → заметка —
+ * фундамент резолва в Provenance.
  *
  * КРИТИЧНО: created_at для 30078 строго монотонен (счётчик ниже) —
  * иначе релей не заменит предыдущую версию.
@@ -2980,20 +2990,17 @@ DI.register('Protocol', function (Config, Vec, Crypto) {
 
   /**
    * Событие публичной проекции заметки.
+   * v0.8: тег parent = [parentUid, parentPk|null] — резолв на стороне
+   * читателя по паре (uid, pk). Никакого eventId в связях.
    * @param {Object} note - Заметка (id = uid).
    * @param {string} room - Имя комнаты (тег t).
-   * @param {string} [parentRef] - Ссылка на родителя для тега parent.
-   *   По умолчанию note.parentId. NetService передаёт eventId родителя,
-   *   если родитель опубликован (иначе сеть увидит неразрешимый uid).
-   * @param {string} [parentPubkey] - Публичный ключ автора родителя
-   *   (для чужих родителей). По умолчанию note.parentPubkey.
    * @returns {Object} Шаблон события (без подписи).
    */
-  function noteEvent(note, room, parentRef, parentPubkey) {
+  function noteEvent(note, room) {
     const tags = [['t', room], ['uid', note.id]];
     if (note.vector) tags.push(['v', Vec.toB64(note.vector)]);
-    if (note.parentId) {
-      tags.push(['parent', parentRef || note.parentId, parentPubkey !== undefined ? parentPubkey : (note.parentPubkey || '')]);
+    if (note.parentUid) {
+      tags.push(['parent', note.parentUid, note.parentPk || '']);
     }
 
     return {
@@ -3006,6 +3013,8 @@ DI.register('Protocol', function (Config, Vec, Crypto) {
 
   /**
    * Декодирование чужой публичной заметки (kind 1).
+   * v0.8: вычитывает uid автора (тег uid) в srcUid — фундамент
+   * семейного резолва у читателя.
    * @param {Object} ev - Nostr-событие.
    * @returns {Object|null} Заметка-кандидат для сетевого кэша.
    */
@@ -3017,6 +3026,7 @@ DI.register('Protocol', function (Config, Vec, Crypto) {
 
     const vTag = findTag(ev.tags, 'v');
     const pTag = findTag(ev.tags, 'parent');
+    const uidTag = findTag(ev.tags, 'uid');
 
     return {
       id: ev.id,
@@ -3024,8 +3034,11 @@ DI.register('Protocol', function (Config, Vec, Crypto) {
       vector: vTag ? Vec.fromB64(vTag[1]) : null,
       shared: true,
       authorPubkey: ev.pubkey,
-      parentId: pTag ? pTag[1] : null,
-      parentPubkey: pTag ? (pTag[2] || null) : null,
+      // uid автора из тега: кто опубликовал, у того всегда есть
+      srcUid: uidTag ? uidTag[1] : null,
+      srcPk: ev.pubkey,
+      parentUid: pTag ? pTag[1] : null,
+      parentPk: pTag ? (pTag[2] || null) : null,
       createdAt: (ev.created_at || 0) * 1000,
     };
   }
@@ -3034,16 +3047,18 @@ DI.register('Protocol', function (Config, Vec, Crypto) {
 
   /**
    * Событие приватного канона заметки. Полная версия (upsert).
+   * v0.8: parent → parentUid/parentPk (пара вместо одного поля).
    * @param {Object} note - Локальная заметка (id = uid).
    * @returns {Promise<Object>} Шаблон события с зашифрованным content.
    * @throws {Error} При недоступности NIP-44.
    */
   async function privateEvent(note) {
     const payload = {
-      v: 1,
+      v: 2,
       text: note.text || '',
       vec: note.vector ? Vec.toB64(note.vector) : null,
-      parent: note.parentId || null,
+      parentUid: note.parentUid || null,
+      parentPk: note.parentPk || null,
       shared: note.shared === true,
       ev: note.eventId || null,
       ts: Number(note.updatedAt || note.createdAt) || Date.now(),
@@ -3061,14 +3076,12 @@ DI.register('Protocol', function (Config, Vec, Crypto) {
 
   /**
    * Tombstone приватного канона: «заметка удалена».
-   * Заменяет собой последнюю версию 30078 на релеях — все устройства
-   * при синхронизации удалят локальную копию.
    * @param {string} uid - Идентификатор заметки.
    * @returns {Promise<Object>} Шаблон события.
    * @throws {Error} При недоступности NIP-44.
    */
   async function privateTombstone(uid) {
-    const content = await Crypto.encryptSelf(JSON.stringify({ v: 1, del: true, ts: Date.now() }));
+    const content = await Crypto.encryptSelf(JSON.stringify({ v: 2, del: true, ts: Date.now() }));
 
     return {
       kind: Config.get('kPrivate', 30078),
@@ -3084,9 +3097,10 @@ DI.register('Protocol', function (Config, Vec, Crypto) {
    *
    * @param {Object} ev - Nostr-событие kind 30078.
    * @returns {Promise<Object|null>}
-   *   При полной версии: объект заметки для DB.put (id = uid, authorPubkey
-   *   = null — заметка своя, own-семантика сохранена) + syncTs для LWW.
-   *   При tombstone: {id, deleted: true, syncTs}.
+   *   Полная версия: {id, text, vector, shared, parentUid, parentPk,
+   *   parentPubkey (всегда null — заметка своя), eventId, createdAt,
+   *   updatedAt, syncTs}.
+   *   Tombstone: {id, deleted: true, syncTs}.
    *   null — событие невалидно или не наше.
    */
   async function decodePrivate(ev) {
@@ -3137,7 +3151,8 @@ DI.register('Protocol', function (Config, Vec, Crypto) {
       text: data.text,
       vector,
       shared: data.shared === true,
-      parentId: (typeof data.parent === 'string' && data.parent) ? data.parent : null,
+      parentUid: (typeof data.parentUid === 'string' && data.parentUid) ? data.parentUid : null,
+      parentPk: (typeof data.parentPk === 'string' && data.parentPk) ? data.parentPk : null,
       parentPubkey: null,
       authorPubkey: null,
       eventId: (typeof data.ev === 'string' && data.ev) ? data.ev : null,
@@ -3196,7 +3211,8 @@ DI.register('Protocol', function (Config, Vec, Crypto) {
   }
 
   /**
-   * Событие ответа (kind 21001).
+   * Событие ответа (kind 21001). Ответ всегда про публичную заметку —
+   * связи в ответе не участвуют (reader резолвит сам).
    * @param {Object} note - Локальная заметка.
    * @param {number} score - Скор сходства.
    * @param {string} queryId - ID запроса.
@@ -3322,13 +3338,19 @@ DI.register('Protocol', function (Config, Vec, Crypto) {
  * 3. Исходящая публикация: приватный канон (30078) + публичная проекция
  *    (kind 1) для shared.
  *
+ * МОДЕЛЬ v0.8 (связи через (parentUid, parentPk)):
+ * - Публикация проекции — тупая упаковка (Protocol.noteEvent(note, room)),
+ *   БЕЗ резолва родителя: резолв происходит у читателя по паре.
+ *   buildNoteEvent удалён.
+ * - Приём чужой проекции: cachePut с чисткой старых версий того же
+ *   источника (srcUid + srcPk, другой id) — Provenance.bySrc не плодит
+ *   дублей при переиздании источника.
+ * - Эхо своих переизданий отсекается по srcUid (мой uid в теге чужого
+ *   события = моя проекция вернулась).
+ * - unshare: eventId сбрасывается (для повторной публикации), дети
+ *   НЕ трогаются — их ссылки на uid стабильны.
+ *
  * LWW-модель канона: syncTs, tombstone-удаления, canonTs (самолечение).
- *
- * Фикс unshare: eventId сбрасывается СРАЗУ при переходе в личное —
- * повторный «в мир» публикует новую проекцию. Старая удаляется kind 5.
- *
- * Метод resync(): полное переподключение (комната + свой канон + сброс
- * outbox-таймера) — кнопка «Синхронизировать» и клик по статусу сети.
  */
 DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Config, Logger, bus) {
   let started = false;
@@ -3369,7 +3391,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   const OUTBOX_KEY = 'noomium:outbox';
 
   /**
-   * Загрузка outbox (четыре очереди, устойчиво к формату v0.6).
+   * Загрузка outbox (четыре очереди).
    * @returns {{announce: string[], del: string[], priv: string[], privdel: string[]}}
    */
   function loadOutbox() {
@@ -3570,6 +3592,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
       }
 
       // Фаза 2: публичные проекции — параллельно.
+      // v0.8: Protocol.noteEvent(note, room) — без резолва родителя.
       const announceIds = outbox.announce.slice();
       const tasks = announceIds.map(async noteId => {
         const note = await DB.get(noteId).catch(() => null);
@@ -3578,7 +3601,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
           return;
         }
         try {
-          const tpl = await buildNoteEvent(note);
+          const tpl = Protocol.noteEvent(note, room());
           const ev = await Nostr.publish(tpl);
           unqueueAnnounce(noteId);
 
@@ -3705,29 +3728,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   }
 
   /**
-   * Резолв ссылки на родителя для публичной проекции: если родитель —
-   * своя опубликованная заметка, тег parent получает её eventId.
-   * @param {Object} note - Заметка.
-   * @returns {Promise<Object>} Шаблон события kind 1.
-   */
-  async function buildNoteEvent(note) {
-    let parentRef;
-    let parentPubkey;
-
-    if (note.parentId) {
-      const parent = await DB.get(note.parentId).catch(() => null);
-      if (parent && parent.eventId) {
-        parentRef = parent.eventId;
-        parentPubkey = note.parentPubkey || '';
-      }
-    }
-
-    return Protocol.noteEvent(note, room(), parentRef, parentPubkey);
-  }
-
-  /**
-   * Одноразовый backsweep: публикация канона для всех локальных заметок
-   * (миграция v0.6 → v0.7).
+   * Одноразовый backsweep: публикация канона для всех локальных заметок.
    * @returns {Promise<void>}
    */
   async function runBacksweep() {
@@ -3771,6 +3772,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
 
   /**
    * Применить входящий канон (LWW по syncTs, tombstone = удаление).
+   * v0.8: новые поля parentUid/parentPk из decodePrivate.
    * @param {Object} d - Результат Protocol.decodePrivate.
    * @returns {Promise<void>}
    */
@@ -3797,8 +3799,8 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
           text: d.text,
           vector: d.vector,
           shared: d.shared,
-          parentId: d.parentId,
-          parentPubkey: d.parentPubkey,
+          parentUid: d.parentUid || null,
+          parentPk: d.parentPk || null,
           authorPubkey: null,
           eventId: d.eventId,
           createdAt: d.createdAt,
@@ -3816,8 +3818,8 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
           text: d.text,
           vector: d.vector,
           shared: d.shared,
-          parentId: d.parentId,
-          parentPubkey: d.parentPubkey,
+          parentUid: d.parentUid || null,
+          parentPk: d.parentPk || null,
           authorPubkey: null,
           eventId: d.eventId,
           createdAt: cur.createdAt || d.createdAt,
@@ -4061,6 +4063,12 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   }
 
   /**
+   * Приём чужой публичной заметки.
+   * v0.8:
+   * - эхо своих проекций отсекается и по eventId, и по srcUid
+   *   (переизданная проекция несёт мой uid в теге);
+   * - перед cachePut чистятся старые версии того же источника
+   *   (srcUid + srcPk, другой id) — Provenance.bySrc без дублей.
    * @param {Object} ev
    * @returns {boolean}
    */
@@ -4079,15 +4087,33 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
 
     peers.set(note.authorPubkey, Date.now());
 
+    // Эхо своей проекции: по id события или по моему uid в теге.
     if (DB.hasLocal(note.id)) return true;
+    if (note.srcUid && DB.hasLocal(note.srcUid)) return true;
 
-    DB.cacheGet(note.id).then(existing => {
-      if (existing && existing.createdAt && note.createdAt && existing.createdAt > note.createdAt) {
-        return;
+    DB.cacheAll().then(cached => {
+      // Чистка старых версий того же источника (переиздание).
+      if (note.srcUid && note.srcPk) {
+        const stale = cached.filter(c =>
+          c && c.srcUid === note.srcUid && c.srcPk === note.srcPk && c.id !== note.id
+        );
+        if (stale.length) {
+          Promise.all(stale.map(c => DB.cacheDel(c.id).catch(() => {})))
+            .then(() => DB.cachePut(note))
+            .then(() => notifyPeers())
+            .catch(() => {});
+          return;
+        }
       }
 
-      DB.cachePut(note);
-      notifyPeers();
+      DB.cacheGet(note.id).then(existing => {
+        if (existing && existing.createdAt && note.createdAt && existing.createdAt > note.createdAt) {
+          return;
+        }
+
+        DB.cachePut(note);
+        notifyPeers();
+      }).catch(() => {});
     }).catch(() => {});
 
     return true;
@@ -4198,7 +4224,9 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   // ─── Исходящие операции ───────────────────────────────────────────────────
 
   /**
-   * Анонс публичной проекции (kind 1). eventId сохраняется и уезжает в канон.
+   * Анонс публичной проекции (kind 1).
+   * v0.8: Protocol.noteEvent(note, room) — тупая упаковка тегов,
+   * без резолва родителя (резолв у читателя).
    * @param {Object} note
    * @returns {Promise<void>}
    */
@@ -4216,7 +4244,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     }
 
     try {
-      const tpl = await buildNoteEvent(note);
+      const tpl = Protocol.noteEvent(note, room());
       const ev = await Nostr.publish(tpl);
       unqueueAnnounce(note.id);
       Logger.info('NetService: анонс заметки ' + note.id);
@@ -4237,6 +4265,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
 
   /**
    * Запрос удаления публичной проекции (kind 5).
+   * v0.8: дети заметки не трогаются — их ссылки на uid стабильны.
    * @param {Object} note - Заметка (нужны id и eventId).
    * @returns {Promise<void>}
    */
@@ -4458,8 +4487,8 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
           if (note.id) unqueueAnnounce(note.id);
 
           if (!note.shared && note.eventId) {
-            // ФИКС: сбрасываем eventId СРАЗУ — иначе повторный «в мир»
-            // никогда не опубликует новую проекцию. Старую удаляем kind 5.
+            // Сброс eventId для повторной публикации проекции.
+            // v0.8: дети не трогаются — их ссылки (parentUid) стабильны.
             const oldEventId = note.eventId;
 
             DB.get(note.id).then(cur => {
@@ -4548,13 +4577,10 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   }
 
   /**
-   * Полное переподключение без потери состояния: пересоздаёт обе подписки,
-   * сбрасывает счётчик реконнектов и немедленно флашит outbox.
-   * Кнопка «Синхронизировать» и клик по статусу сети.
+   * Полное переподключение без потери состояния.
    */
   function resync() {
     if (!Nostr.isReady()) {
-      // Библиотека ещё не загрузилась — полный старт.
       start();
       return;
     }
@@ -4684,15 +4710,12 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
  * Каждая заметка при создании/редактировании получает вектор через Embedder.
  * События: note:created, note:updated, note:deleted, note:shared, note:unshared.
  *
- * Модель v0.7:
- * - id — стабильный uid (Utils.uid('n')), никогда не меняется;
- * - parentId — всегда uid родителя (никаких eventId в ссылках);
- * - syncTs — метка последнего локального изменения; NetService использует
- *   её для LWW при синхронизации канона (kind 30078). Ставится при каждом
- *   изменении: равенство syncTs у входящего события = эхо собственной
- *   публикации, событие не применяется;
- * - eventId — ссылка на публичную проекцию (kind 1), проставляется
- *   NetService'ом после анонса.
+ * МОДЕЛЬ v0.8:
+ * - id — стабильный uid, никогда не меняется;
+ * - parentUid — uid родителя; parentPk — pubkey автора родителя
+ *   (null = родитель мой). Никаких eventId в связях;
+ * - syncTs — метка последнего локального изменения (LWW канона);
+ * - eventId — ссылка на публичную проекцию, проставляется NetService'ом.
  */
 DI.register('Notes', function (DB, Embedder, bus, Logger, Utils) {
   /**
@@ -4708,10 +4731,12 @@ DI.register('Notes', function (DB, Embedder, bus, Logger, Utils) {
    * Создание заметки.
    * @param {string} text - Текст заметки.
    * @param {string} mode - 'private' или 'world'.
-   * @param {string|null} parentId - uid родительской заметки (связь «по мотивам»).
+   * @param {string|null} parentUid - uid родительской заметки.
+   * @param {string|null} [parentPk] - Pubkey автора родителя
+   *   (null/undefined = родитель мой).
    * @returns {Promise<Object|null>} Созданная заметка или null при пустом тексте.
    */
-  function create(text, mode, parentId) {
+  function create(text, mode, parentUid, parentPk) {
     const t = (text || '').trim();
     if (!t) return Promise.resolve(null);
 
@@ -4722,7 +4747,8 @@ DI.register('Notes', function (DB, Embedder, bus, Logger, Utils) {
         text: t,
         vector: vector ? Array.from(vector) : null,
         shared: mode === 'world',
-        parentId: parentId || null,
+        parentUid: parentUid || null,
+        parentPk: parentPk || null,
         parentPubkey: null,
         createdAt: now,
         updatedAt: now,
@@ -4739,7 +4765,7 @@ DI.register('Notes', function (DB, Embedder, bus, Logger, Utils) {
   /**
    * Редактирование заметки. Пересчитывает вектор.
    * Публичные заметки редактировать нельзя (immutable в Nostr) —
-   * проверяется на уровне UI (NoteView), здесь не блокируется.
+   * проверяется на уровне UI (NoteView).
    * @param {string} id - uid заметки.
    * @param {string} newText - Новый текст.
    * @returns {Promise<Object|null>} Обновлённая заметка или null.
@@ -4784,8 +4810,7 @@ DI.register('Notes', function (DB, Embedder, bus, Logger, Utils) {
 
   /**
    * Переключение видимости: личное ↔ мир.
-   * При публикации NetService (слушает note:shared/note:unshared)
-   * обновляет канон и анонсирует/удаляет публичную проекцию.
+   * При публикации NetService обновляет канон и анонсирует/удаляет проекцию.
    * @param {string} id - uid заметки.
    * @returns {Promise<Object|null>} Обновлённая заметка или null.
    */
@@ -4830,9 +4855,8 @@ DI.register('Notes', function (DB, Embedder, bus, Logger, Utils) {
  *
  * Событие 'note:pin' от NoteView/FeedView активирует пин.
  *
- * pinNote хранит eventId, если родитель опубликован: Composer передаёт
- * parentId = eventId || id (v0.6-семантика), NetService дополнительно
- * резолвит ссылку родителя при публикации проекции.
+ * v0.8: снапшот пина хранит authorPubkey — Composer передаёт пару
+ * (parentUid, parentPk) при создании потомка (pk = null для своих).
  */
 DI.register('Context', function (Store, Embedder, Config, Utils, bus) {
   /** @type {string} */
@@ -4843,8 +4867,7 @@ DI.register('Context', function (Store, Embedder, Config, Utils, bus) {
   let pinNote = null;
 
   /**
-   * Вычисление активного контекста на основе текущего состояния.
-   * Приоритет: drift > pin > input > none.
+   * Вычисление активного контекста. Приоритет: drift > pin > input > none.
    * @returns {Object} Контекст для Store.
    */
   function activeContext() {
@@ -4894,8 +4917,6 @@ DI.register('Context', function (Store, Embedder, Config, Utils, bus) {
 
   /**
    * Дебаунс для эмбеддинга вводимого текста.
-   * Если пользователь быстро печатает, вектор пересчитывается
-   * только после паузы в `debounce` мс.
    */
   const debouncedEmbed = Utils.debounce(() => {
     const t = inputText.trim();
@@ -4906,8 +4927,7 @@ DI.register('Context', function (Store, Embedder, Config, Utils, bus) {
     }
 
     Embedder.embed(t).then(v => {
-      // Защита от race condition: если текст изменился пока считался вектор,
-      // не применяем устаревший результат.
+      // Защита от race condition.
       if (inputText.trim() === t) {
         inputVector = v;
         push();
@@ -4936,6 +4956,7 @@ DI.register('Context', function (Store, Embedder, Config, Utils, bus) {
       pinNote = {
         id: note.id,
         eventId: note.eventId || null,
+        authorPubkey: note.authorPubkey || null,
         text: note.text,
         vector: note.vector,
       };
@@ -4983,7 +5004,6 @@ DI.register('Context', function (Store, Embedder, Config, Utils, bus) {
 
     /**
      * Инициализация: подписка на note:pin из шины.
-     * Вызывается через Context.init() (метод, не деструктуризация).
      */
     init() {
       bus.on('note:pin', note => {
@@ -5134,18 +5154,22 @@ DI.register('Feed', function (DB, Ranker, Store, bus, Logger) {
 /**
  * Построение генеалогических связей между заметками.
  *
- * Заметки связаны через поле parentId:
- * - свои заметки (в т.ч. пришедшие из приватного канона): parentId = uid;
- * - чужие заметки: parentId = eventId публичной проекции родителя.
+ * МОДЕЛЬ v0.8: родитель = пара (parentUid, parentPk).
+ * - parentPk = null → родитель мой: резолв по uid в локальной базе.
+ * - parentPk ≠ null → родитель чужой: резолв по (srcUid, srcPk)
+ *   в сетевом кэше. srcUid/srcPk вычитываются из тега uid публичных
+ *   проекций (Protocol.decodeNote, волна 1).
  *
- * Поэтому поиск родителя/детей всегда проверяет оба поля (id и eventId).
+ * Связи переживают отзыв/переиздание родителя: uid стабилен,
+ * eventId в семейной логике не участвует.
  *
- * Отличие от v0.6: кэш предков (TTL 5с) инвалидируется сам — модуль
- * подписан на db:change / db:cache в теле фабрики. Внешний вызов
- * clearCache из MenuView удалён (мёртвый код в новой версии).
+ * Статусы нерезолва для UI:
+ * - 'hidden' — родитель не найден (приватный у автора ИЛИ отозван ИЛИ
+ *   удалён; для читателя эти случаи неотличимы по приватности).
+ *   FeedView показывает приглушённую нерабочую стрелку без «удалён».
  *
- * Модуль инстанцируется при резолве FeedView (BOOT, шаг 5) — до
- * первого сетевого события, подписка безопасна.
+ * Самоинвалидация кэша предков: подписка на db:change / db:cache
+ * в теле фабрики.
  */
 DI.register('Provenance', function (DB, bus) {
   /** @type {Map<string, {chain: Array, timestamp: number}>} */
@@ -5161,41 +5185,113 @@ DI.register('Provenance', function (DB, bus) {
   }
 
   /**
-   * Прямые дети заметки по её id или eventId.
-   * @param {string} id - uid или eventId заметки.
+   * Построить индексы по всем заметкам.
+   * @param {Array<Object>} all - Все заметки (свои + кэш).
+   * @returns {{byId: Map, bySrc: Map}}
+   *   byId: id|eventId → заметка (eventId — только для совместимости
+   *   отображения, не для семейного резолва);
+   *   bySrc: "srcUid::srcPk" → заметка (чужие источники).
+   */
+  function buildIndexes(all) {
+    const byId = new Map();
+    const bySrc = new Map();
+
+    all.forEach(n => {
+      if (!n) return;
+      if (n.id) byId.set(n.id, n);
+      if (n.eventId) byId.set(n.eventId, n);
+      if (n.srcUid && n.srcPk) bySrc.set(n.srcUid + '::' + n.srcPk, n);
+    });
+
+    return { byId, bySrc };
+  }
+
+  /**
+   * Резолв родителя по ссылке заметки.
+   * @param {Object} note - Заметка со ссылкой (parentUid/parentPk).
+   * @param {{byId: Map, bySrc: Map}} idx - Индексы.
+   * @returns {Object|null} Заметка-родитель или null (недоступен).
+   */
+  function resolveParent(note, idx) {
+    if (!note.parentUid) return null;
+
+    if (note.parentPk) {
+      // Чужой родитель: пара (srcUid, srcPk).
+      return idx.bySrc.get(note.parentUid + '::' + note.parentPk) || null;
+    }
+
+    // Мой родитель: uid в локальной базе (byId содержит свои по uid).
+    // Если по uid не найден — родитель удалён у меня.
+    return idx.byId.get(note.parentUid) || null;
+  }
+
+  /**
+   * Прямые дети заметки.
+   * Свои дети ссылаются на (uid, null); чужие — на (srcUid, srcPk).
+   * @param {string} id - uid своей заметки ИЛИ srcUid чужой
+   *   (для чужой обязателен второй параметр).
+   * @param {string} [pk] - Pubkey автора для чужой заметки.
    * @returns {Promise<Array<Object>>}
    */
-  function children(id) {
+  function children(id, pk) {
     if (!id) return Promise.resolve([]);
 
-    return loadAll().then(all => all.filter(n => n && n.parentId === id));
+    return loadAll().then(all => {
+      const myKey = pk ? id + '::' + pk : null;
+      return all.filter(n => {
+        if (!n || !n.parentUid) return false;
+        // Ребёнок на моего родителя: parentUid совпал и pk мой (null)
+        if (!pk && !n.parentPk && n.parentUid === id) return true;
+        // Ребёнок на чужого родителя: пара совпала
+        if (pk && n.parentPk === pk && n.parentUid === id) return true;
+        return false;
+      });
+    });
   }
 
   /**
    * Все потомки (BFS). Защита от циклов через seenIds.
-   * @param {string} id - uid или eventId заметки.
+   * @param {string} id - uid/srcUid заметки.
+   * @param {string} [pk] - Pubkey для чужой.
    * @returns {Promise<Array<Object>>}
    */
-  function descendants(id) {
+  function descendants(id, pk) {
     if (!id) return Promise.resolve([]);
 
     return loadAll().then(all => {
       const out = [];
-      const seenIds = new Set([id]);
+      const seenIds = new Set();
       let frontier = [id];
+      let frontierPk = pk || null;
 
       while (frontier.length) {
         const next = [];
+        const nextPks = [];
 
         for (const n of all) {
-          if (n && n.parentId && frontier.indexOf(n.parentId) !== -1 && !seenIds.has(n.id)) {
+          if (!n || !n.parentUid) continue;
+
+          const parentMatch = frontier.some((fid, i) => {
+            const fpk = frontierPk !== null ? frontierPk : null;
+            if (!n.parentPk && !fpk) return n.parentUid === fid;
+            if (n.parentPk && fpk) return n.parentUid === fid && n.parentPk === fpk;
+            return false;
+          });
+
+          if (parentMatch && !seenIds.has(n.id)) {
             seenIds.add(n.id);
             out.push(n);
+            // Потомки этого ребёнка: его id — uid (если мой) или srcUid.
             next.push(n.id);
+            nextPks.push(n.authorPubkey || null);
           }
         }
 
         frontier = next;
+        // Для следующего уровня: если frontier смешанный (свои + чужие),
+        // матчим без pk-ограничения по uid (свободный матчинг).
+        frontierPk = null;
+        if (next.length === 1 && nextPks[0]) frontierPk = nextPks[0];
       }
 
       return out;
@@ -5204,16 +5300,8 @@ DI.register('Provenance', function (DB, bus) {
 
   /**
    * Цепочка предков от текущей заметки до корня.
-   *
-   * Поиск родителя учитывает:
-   * 1. Точное совпадение по id (локальная/своя заметка, uid)
-   * 2. Совпадение по eventId (опубликованная проекция)
-   * 3. Локальная заметка с matching eventId
-   *
-   * Защита от циклов через seen.
-   *
-   * @param {string} id - uid или eventId заметки.
-   * @returns {Promise<Array<Object>>} Цепочка от непосредственного родителя к корню.
+   * @param {string} id - uid своей или id кэш-записи чужой.
+   * @returns {Promise<Array<Object>>} Цепочка от родителя к корню.
    */
   function ancestors(id) {
     if (!id) return Promise.resolve([]);
@@ -5224,43 +5312,25 @@ DI.register('Provenance', function (DB, bus) {
     }
 
     return loadAll().then(all => {
-      const byId = new Map();
+      const idx = buildIndexes(all);
 
-      all.forEach(n => {
-        if (!n) return;
-        if (n.id) byId.set(n.id, n);
-        if (n.eventId) byId.set(n.eventId, n);
-      });
-
-      function findNote(targetId) {
-        if (!targetId) return null;
-
-        // 1. Прямое совпадение по id или eventId
-        if (byId.has(targetId)) return byId.get(targetId);
-
-        // 2. Локальная заметка, которая была опубликована (имеет matching eventId)
-        const localPublished = all.find(n => n && n.id === targetId && n.eventId);
-        if (localPublished) return localPublished;
-
-        // 3. Сетевая заметка с matching eventId
-        const byEvent = all.find(n => n && n.eventId === targetId);
-        if (byEvent) return byEvent;
-
-        return null;
-      }
-
+      // Стартовая заметка: по id (свой uid или кэш-id).
+      let current = idx.byId.get(id) || null;
       const chain = [];
-      const seen = new Set();
-      let current = findNote(id);
+      const seen = new Set([id]);
 
-      while (current && current.parentId) {
-        if (seen.has(current.parentId)) break;
-        seen.add(current.parentId);
+      while (current && current.parentUid) {
+        const seenKey = (current.parentUid || '') + '::' + (current.parentPk || '');
+        if (seen.has(seenKey)) break;
+        seen.add(seenKey);
 
-        const parent = findNote(current.parentId);
+        const parent = resolveParent(current, idx);
         if (!parent) break;
 
         chain.push(parent);
+        const parentKey = parent.id;
+        if (seen.has(parentKey)) break;
+        seen.add(parentKey);
         current = parent;
       }
 
@@ -5270,8 +5340,21 @@ DI.register('Provenance', function (DB, bus) {
   }
 
   /**
+   * Резолвится ли родитель заметки (для UI: показывать ↳ рабочей).
+   * @param {Object} note - Заметка со ссылкой.
+   * @returns {Promise<boolean>}
+   */
+  function hasResolvableParent(note) {
+    if (!note || !note.parentUid) return Promise.resolve(false);
+
+    return loadAll().then(all => {
+      const idx = buildIndexes(all);
+      return !!resolveParent(note, idx);
+    });
+  }
+
+  /**
    * Принудительная очистка кеша предков.
-   * @returns {void}
    */
   function clearCache() {
     ancestorsCache.clear();
@@ -5281,7 +5364,7 @@ DI.register('Provenance', function (DB, bus) {
   bus.on('db:change', clearCache);
   bus.on('db:cache', clearCache);
 
-  return { children, descendants, ancestors, loadAll, clearCache };
+  return { children, descendants, ancestors, hasResolvableParent, loadAll, clearCache };
 }, ['DB', 'EventBus']);
 // ─── DOMAIN/Provenance ─── END ──────────────────────────────────────────────
 
@@ -5289,21 +5372,34 @@ DI.register('Provenance', function (DB, bus) {
 /**
  * Подсчёт резонанса: сколько уникальных авторов создали потомков заметки.
  *
- * Резонанс показывает влияние заметки на сеть. Если заметка A породила
- * 5 заметок от 3 разных авторов, её резонанс = 3 (уникальные авторы).
- * Свои потомки учитываются как автор 'self'.
+ * МОДЕЛЬ v0.8: ключи карты — стабильные uid источников.
+ * - свой источник → ключ = его uid;
+ * - чужой источник → ключ = его srcUid (вычисляется из кэш-записей,
+ *   у которых srcUid совпадает с id заметки-родителя по ссылке детей).
+ * Карта строится одним проходом: для каждой заметки-ребёнка её ссылка
+ * (parentUid, parentPk) нормализуется в ключ родителя.
  *
- * Карта resonanceMap перестраивается при изменении БД или создании/
- * удалении заметок; инкрементальное обновление при создании/обновлении.
- *
- * Ключи карты — значения parentId детей (uid для своих, eventId для
- * чужих). Consumers проверяют оба: resonance(n.id) + resonance(n.eventId).
+ * Трещина Т3 закрыта: переиздание родителя (новый eventId) не меняет
+ * uid → резонанс не обнуляется.
  */
 DI.register('Influence', function (DB, bus, Logger) {
-  /** @type {Map<string, Set<string>>} uid/eventId → множество авторов. */
+  /** @type {Map<string, Set<string>>} ключ-родителя → множество авторов. */
   const resonanceMap = new Map();
   /** Счётчик поколений для защиты от гонок. */
   let seq = 0;
+
+  /**
+   * Ключ родителя для карты резонанса.
+   * Для детей с parentPk=null родитель мой → ключ parentUid.
+   * Для детей с parentPk родитель чужой → ключ parentUid (его srcUid).
+   * В обоих случаях ключ = parentUid — единое пространство uid.
+   * @param {Object} note - Заметка-ребёнок.
+   * @returns {string|null}
+   */
+  function parentKey(note) {
+    if (!note || !note.parentUid) return null;
+    return note.parentUid;
+  }
 
   /**
    * Полная перестройка карты резонанса.
@@ -5318,10 +5414,10 @@ DI.register('Influence', function (DB, bus, Logger) {
       const map = new Map();
 
       own.concat(cached).forEach(n => {
-        if (n && n.parentId) {
-          if (!map.has(n.parentId)) map.set(n.parentId, new Set());
-          map.get(n.parentId).add(n.authorPubkey || 'self');
-        }
+        const key = parentKey(n);
+        if (!key) return;
+        if (!map.has(key)) map.set(key, new Set());
+        map.get(key).add(n.authorPubkey || 'self');
       });
 
       resonanceMap.clear();
@@ -5333,33 +5429,44 @@ DI.register('Influence', function (DB, bus, Logger) {
 
   /**
    * Инкрементальное обновление при создании/обновлении заметки.
-   * @param {Object} note - Заметка с parentId.
+   * @param {Object} note - Заметка с parentUid.
    */
   function updateForNote(note) {
-    if (!note || !note.parentId) return;
+    const key = parentKey(note);
+    if (!key) return;
 
-    if (!resonanceMap.has(note.parentId)) {
-      resonanceMap.set(note.parentId, new Set());
+    if (!resonanceMap.has(key)) {
+      resonanceMap.set(key, new Set());
     }
 
-    resonanceMap.get(note.parentId).add(note.authorPubkey || 'self');
+    resonanceMap.get(key).add(note.authorPubkey || 'self');
 
     try { bus.emit('influence:updated'); } catch (_) {}
   }
 
   /**
-   * Резонанс заметки по id (uid).
-   * @param {string} id - uid заметки.
-   * @returns {number} Число уникальных авторов потомков.
+   * Резонанс заметки.
+   * v0.8: для своей заметки — по её uid. Для чужой (кэш-запись) —
+   * по её srcUid (uid автора), потому что дети ссылаются на него.
+   * Consumers передают оба, метод сам выбирает.
+   * @param {string} id - uid своей / id кэш-записи.
+   * @param {string} [srcUid] - uid автора для чужих заметок.
+   * @returns {number}
    */
-  function resonance(id) {
-    if (!id) return 0;
-    const s = resonanceMap.get(id);
+  function resonance(id, srcUid) {
+    if (srcUid) return count(srcUid);
+    return count(id);
+  }
+
+  /** @param {string} key @returns {number} */
+  function count(key) {
+    if (!key) return 0;
+    const s = resonanceMap.get(key);
     return s ? s.size : 0;
   }
 
   /**
-   * Инициализация: подписки на изменения + первичная перестройка.
+   * Инициализация: подписки + первичная перестройка.
    */
   function init() {
     bus.on('note:created', updateForNote);
@@ -5382,21 +5489,18 @@ DI.register('Influence', function (DB, bus, Logger) {
  * Ответственность модуля:
  * - состояние аккаунта (pubkey, keyExported, syncEnabled — снапшот);
  * - показ ключа: npub (безопасен), ncryptsec (NIP-49, пароль опционален);
- *   ПРИ НЕДОСТУПНОСТИ NIP-49 в сборке nostr-tools — fallback на nsec
- *   (незашифрованный ключ; вход по нему работает через decodeSecret);
- * - вход по ключу (nsec/hex/ncryptsec): замена ключа, сброс локальной базы,
- *   перезапуск сети. Релеи НЕ чистятся — старые заметки принадлежат старому
- *   ключу и остаются доступными при возврате к нему;
- * - JSON-архив: экспорт ({version, app, pubkey, ncryptsec?, notes, config})
+ *   при недоступности NIP-49 — fallback на nsec;
+ * - вход по ключу (nsec/hex/ncryptsec): замена ключа, сброс базы,
+ *   перезапуск сети;
+ * - JSON-архив v2: экспорт ({version, app, pubkey, ncryptsec?, notes, config})
  *   и импорт с upsert по uid (LWW по syncTs/updatedAt).
  *
- * Интеграция с сетью:
- * - импортированные заметки эмитятся как note:created → существующий
- *   слушатель NetService публикует приватный канон для каждой;
- * - announceNote пропускает заметки с eventId из архива (повторный анонс
- *   не нужен, replaceable-семантика дорезает конфликты).
- *
- * UI-оркестрация (подтверждения, тосты, скачивание файла) — AccountView.
+ * Формат заметки архива v2 (модель связей 0.8):
+ *   { id, text, vector, shared, parentUid, parentPk, eventId,
+ *     createdAt, updatedAt, syncTs }
+ * Старые v0.7-архивы (поле parentId) читаются, поле отбрасывается —
+ * связи восстановятся только для заметок без родителя (осознанно:
+ * конвертации нет, вы строите базу с нуля).
  */
 DI.register('Account', function (Config, Nostr, Crypto, DB, bus, Logger) {
   /** Whitelist параметров конфига, переносимых из архива. */
@@ -5423,7 +5527,7 @@ DI.register('Account', function (Config, Nostr, Crypto, DB, bus, Logger) {
   }
 
   /**
-   * Публичный адрес (npub, bech32). Безопасен для показа и передачи.
+   * Публичный адрес (npub, bech32).
    * @returns {Promise<string|null>}
    */
   async function getNpub() {
@@ -5433,8 +5537,7 @@ DI.register('Account', function (Config, Nostr, Crypto, DB, bus, Logger) {
   }
 
   /**
-   * Можно ли обернуть ключ паролем (NIP-49 доступен в окружении).
-   * Если нет — ключ будет выдан в формате nsec, UI скрывает поле пароля.
+   * Можно ли обернуть ключ паролем (NIP-49 доступен).
    * @returns {Promise<boolean>}
    */
   async function canWrapKey() {
@@ -5447,16 +5550,9 @@ DI.register('Account', function (Config, Nostr, Crypto, DB, bus, Logger) {
 
   /**
    * Ключ для передачи на другое устройство.
-   *
-   * Приоритет: ncryptsec (NIP-49, с паролем или без). Если NIP-49
-   * недоступен в сборке nostr-tools с CDN — fallback: nsec
-   * (незашифрованный ключ, nip19 гарантированно доступен).
-   *
-   * При успехе помечает keyExported = true.
-   *
-   * @param {string} [password] - Пароль (имеет смысл только при
-   *   доступном NIP-49; может быть пустым).
-   * @returns {Promise<string|null>} Строка nsec1…/ncryptsec1… или null.
+   * Приоритет ncryptsec, fallback — nsec.
+   * @param {string} [password] - Пароль.
+   * @returns {Promise<string|null>}
    */
   async function getWrappedKey(password) {
     const sk = Nostr.getSecretKey();
@@ -5468,7 +5564,6 @@ DI.register('Account', function (Config, Nostr, Crypto, DB, bus, Logger) {
       return wrapped;
     }
 
-    // Fallback: NIP-49 недоступен — выдаём nsec.
     const nsec = await Crypto.encodeNsec(sk);
     if (nsec) {
       Logger.warn('Account: NIP-49 недоступен, ключ выдан в формате nsec');
@@ -5480,11 +5575,7 @@ DI.register('Account', function (Config, Nostr, Crypto, DB, bus, Logger) {
   }
 
   /**
-   * Вход по ключу с другого устройства: замена ключа, сброс локальной базы,
-   * перезапуск сети. Релеи не чистятся (заметки старого ключа остаются).
-   *
-   * Вызывать только после подтверждения пользователя (UI).
-   *
+   * Вход по ключу: замена ключа, сброс базы, перезапуск сети.
    * @param {string} input - nsec…, hex(64) или ncryptsec….
    * @param {string} [password] - Пароль для ncryptsec.
    * @returns {Promise<{ok: boolean, error?: string, pubkey?: string}>}
@@ -5510,14 +5601,12 @@ DI.register('Account', function (Config, Nostr, Crypto, DB, bus, Logger) {
       await Nostr.init();
       const pk = Nostr.setKey(sk);
 
-      // Локальная база принадлежит старому ключу — сбрасываем.
       await DB.reset();
 
       Config.set('keyExported', false);
 
       try { bus.emit('account:changed', { pubkey: pk }); } catch (_) {}
 
-      // Перезапуск сети: новая подписка на себя, restore канона.
       try {
         const NetService = DI.resolve('NetService');
         NetService.stop(false);
@@ -5535,11 +5624,9 @@ DI.register('Account', function (Config, Nostr, Crypto, DB, bus, Logger) {
   // ─── Экспорт архива ───────────────────────────────────────────────────────
 
   /**
-   * Собрать JSON-архив: заметки + настройки + опционально ключ.
-   * Ключ в архиве — в том же формате, что выдаёт getWrappedKey
-   * (ncryptsec или nsec-fallback при недоступном NIP-49).
+   * Собрать JSON-архив v2.
    * @param {boolean} [includeKey] - Включить ключ в архив.
-   * @param {string} [keyPassword] - Пароль для ключа в архиве.
+   * @param {string} [keyPassword] - Пароль для ключа.
    * @returns {Promise<{json: string, filename: string}|null>}
    */
   async function exportArchive(includeKey, keyPassword) {
@@ -5548,7 +5635,7 @@ DI.register('Account', function (Config, Nostr, Crypto, DB, bus, Logger) {
 
       const notes = await DB.all();
       const archive = {
-        version: 1,
+        version: 2,
         app: 'noomium',
         createdAt: Date.now(),
         pubkey: Nostr.getPubkey(),
@@ -5583,8 +5670,8 @@ DI.register('Account', function (Config, Nostr, Crypto, DB, bus, Logger) {
   }
 
   /**
-   * Валидация заметки перед записью в архив: копируем только известные поля.
-   * @param {Object} n - Заметка из DB.
+   * Валидация заметки для архива (v2: parentUid/parentPk).
+   * @param {Object} n - Заметка.
    * @returns {Object|null}
    */
   function sanitizeNoteForArchive(n) {
@@ -5601,7 +5688,8 @@ DI.register('Account', function (Config, Nostr, Crypto, DB, bus, Logger) {
       text: n.text,
       vector,
       shared: n.shared === true,
-      parentId: (typeof n.parentId === 'string' && n.parentId) ? n.parentId : null,
+      parentUid: (typeof n.parentUid === 'string' && n.parentUid) ? n.parentUid : null,
+      parentPk: (typeof n.parentPk === 'string' && n.parentPk) ? n.parentPk : null,
       eventId: (typeof n.eventId === 'string' && n.eventId) ? n.eventId : null,
       createdAt: typeof n.createdAt === 'number' ? n.createdAt : Date.now(),
       updatedAt: typeof n.updatedAt === 'number' ? n.updatedAt : null,
@@ -5612,11 +5700,9 @@ DI.register('Account', function (Config, Nostr, Crypto, DB, bus, Logger) {
   // ─── Импорт архива ────────────────────────────────────────────────────────
 
   /**
-   * Разобрать и валидировать текст архива (без применения).
+   * Разобрать и валидировать текст архива.
    * @param {string} text - Содержимое файла.
    * @returns {{ok: boolean, error?: string, archive?: Object}}
-   *   archive: {version, pubkey, ncryptsec: string|null,
-   *             notes: Array, config: Object, noteCount: number}
    */
   function parseArchive(text) {
     let data;
@@ -5660,13 +5746,7 @@ DI.register('Account', function (Config, Nostr, Crypto, DB, bus, Logger) {
   }
 
   /**
-   * Применить архив: upsert заметок по uid (LWW по syncTs/updatedAt),
-   * мердж whitelisted-конфига. Каждая применённая заметка эмитится как
-   * note:created → NetService публикует приватный канон.
-   *
-   * Ключ из архива НЕ применяется автоматически (для этого нужен пароль —
-   * оркестрация в AccountView: enterKey → importArchive).
-   *
+   * Применить архив: upsert заметок по uid (LWW), мердж конфига.
    * @param {Object} archive - Архив из parseArchive.
    * @returns {Promise<number>} Число применённых заметок.
    */
@@ -5690,8 +5770,8 @@ DI.register('Account', function (Config, Nostr, Crypto, DB, bus, Logger) {
           text: note.text,
           vector: note.vector,
           shared: note.shared,
-          parentId: note.parentId,
-          parentPubkey: null,
+          parentUid: note.parentUid || null,
+          parentPk: note.parentPk || null,
           authorPubkey: null,
           eventId: note.eventId,
           createdAt: note.createdAt,
@@ -5699,7 +5779,6 @@ DI.register('Account', function (Config, Nostr, Crypto, DB, bus, Logger) {
           syncTs: note.syncTs || note.updatedAt || note.createdAt,
         });
 
-        // Канон должен узнать об этой заметке (слушатель NetService).
         try { bus.emit('note:created', note); } catch (_) {}
 
         applied++;
@@ -5708,7 +5787,6 @@ DI.register('Account', function (Config, Nostr, Crypto, DB, bus, Logger) {
       }
     }
 
-    // Whitelisted-конфиг из архива.
     const cfg = archive.config || {};
     let cfgChanged = false;
     CONFIG_WHITELIST.forEach(k => {
@@ -5727,8 +5805,7 @@ DI.register('Account', function (Config, Nostr, Crypto, DB, bus, Logger) {
   }
 
   /**
-   * Переключить синхронизацию (канон 30078). Эмитит sync:toggle —
-   * NetService переконфигурирует подписку и запустит backsweep при включении.
+   * Переключить синхронизацию.
    * @param {boolean} enabled
    */
   function setSyncEnabled(enabled) {
@@ -6406,13 +6483,10 @@ DI.register('Onboarding', function (Config, Modal, I18n, Embedder) {
  * - hardLimit: красная подсветка, подсказка «вектор обрезается»
  * - maxPostLength: блокировка ввода через maxlength + блокировка кнопки
  *
- * v0.7.6 (визуальный пакет, ревизия):
- * - Иконка отправки — стрелка вверх в круге (SEND_ICON). Вставляется
- *   в init() ПЕРВОЙ операцией + фолбэк-таймер: если через 300мс кнопка
- *   пуста (рассинхрон кэша HTML/JS — в HTML заглушка span.send-icon),
- *   иконка вставляется принудительно. «Пустой рыжей кнопки» больше нет.
- * - Состояние «отправляется» — спиннер .btn-spinner.
- * - Подсказка лимитов #ed-hint — ПОСЛЕ #ed-foot, строкой под футером.
+ * v0.8: связь с родителем передаётся парой (parentUid, parentPk).
+ * Пин своей заметки → pk = null (родитель мой).
+ * Пин чужой заметки → pk = её автор (Notes.resolver справится на своей
+ * стороне; чужой uid в нашей базе не резолвится, поэтому pk обязателен).
  */
 DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils, Config) {
   let ta, cnt, sendBtn, toggle, footEl;
@@ -6428,12 +6502,10 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
   const SEND_SPINNER = '<span class="btn-spinner"></span>';
 
   /**
-   * Вставить иконку отправки, если кнопка пуста.
-   * Идемпотентно: не трогает спиннер и уже вставленную иконку.
+   * Вставить иконку отправки, если кнопка пуста. Идемпотентно.
    */
   function ensureSendIcon() {
     if (!sendBtn || sending) return;
-    // Пусто (заглушка-span без содержимого или совсем ничего) — вставляем.
     if (!sendBtn.querySelector('svg, .btn-spinner')) {
       sendBtn.innerHTML = SEND_ICON;
     }
@@ -6529,7 +6601,8 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
 
   /**
    * Отправка: создание заметки.
-   * parentId = pin.id: uid своей закреплённой заметки или eventId чужой.
+   * v0.8: parentId = pin.id, parentPk = null для своих,
+   * pin.authorPubkey для чужих.
    */
   function send() {
     if (sending) return;
@@ -6560,12 +6633,13 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
     };
 
     const pin = Context.getPin();
-    const parentId = pin ? pin.id : null;
+    const parentUid = pin ? pin.id : null;
+    const parentPk = (pin && pin.authorPubkey) ? pin.authorPubkey : null;
 
-    Notes.create(text, mode, parentId)
+    Notes.create(text, mode, parentUid, parentPk)
       .then(note => {
         Toast.show('ok', I18n.t(mode === 'world' ? 'toast.saved.public' : 'toast.saved.private')
-          + (note && note.parentId ? ' · ' + I18n.t('inf.linked') : ''));
+          + (note && note.parentUid ? ' · ' + I18n.t('inf.linked') : ''));
         try { bus.emit('editor:sent'); } catch (_) {}
         finish();
       })
@@ -6578,7 +6652,6 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
 
   /**
    * Обработка виртуальной клавиатуры через VisualViewport API.
-   * При открытии клавиатуры сжимаем #app до видимой области.
    */
   function setupKeyboardHandler() {
     if (!window.visualViewport) return;
@@ -6610,8 +6683,7 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
   }
 
   /**
-   * Инициализация: иконка отправки ПЕРВОЙ (устраняет пустую кнопку при
-   * любом рассинхроне кэша), далее привязка DOM, слушатели, подписки.
+   * Инициализация.
    */
   function init() {
     ta = document.getElementById('ed-ta');
@@ -6622,15 +6694,11 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
 
     if (!ta) return;
 
-    // Иконка — первой операцией
     ensureSendIcon();
 
-    // Фолбэк: если что-то затёрло кнопку после init (частичная загрузка,
-    // гонка кэшей) — иконка вернётся сама.
     if (iconTimer) clearTimeout(iconTimer);
     iconTimer = setTimeout(ensureSendIcon, 300);
 
-    // Блокировка ввода на уровне браузера
     ta.setAttribute('maxlength', Config.get('maxPostLength', 2500));
 
     ta.addEventListener('input', () => {
@@ -6699,25 +6767,17 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
  * Рендеринг ленты заметок.
  *
  * Три режима отображения:
- * 1. Без контекста: хронологический поток (все заметки)
- * 2. Пин ИЛИ дрейф: единый список «релевантные + озарения» по убыванию
- *    скора. Дрейф отличается только вектором контекста (текст ввода
- *    вместо текста пина) — лента выглядит так же, БЕЗ сегментов.
- *    (Изменение против v0.6: раньше дрейф включал сегменты — по
- *    фидбеку владельца продукта дрейф = «та же лента, другой вектор».)
- * 3. Чистый ввод (без пина): заметки из активного сегмента
- *    (Моё / Мир / Озарения) — сегменты видны.
+ * 1. Без контекста: хронологический поток.
+ * 2. Пин ИЛИ дрейф: единый список по убыванию скора, БЕЗ сегментов.
+ * 3. Чистый ввод: заметки из активного сегмента.
  *
- * Карточка заметки содержит:
- * - Текст
- * - Тег (лично/открыто или сокращённый pubkey автора)
- * - Кнопку «↳ по мотивам» (если есть parentId)
- * - Кнопку «◆ резонанс» (если есть потомки)
- * - Индикатор сходства (сигнал или проценты)
- * - Дату
- * - Кнопку «✎ открыть» (только для своих заметок)
- *
- * Обрезка текста в модалках — по Config.truncateTextLength.
+ * v0.8 (связи):
+ * - Кнопка «↳»: рабочая, только если родитель резолвится
+ *   (Provenance.hasResolvableParent); иначе — приглушённая без клика
+ *   (статус «источник недоступен», не «удалён» — приватность автора
+ *   не раскрывается). Orphan-класс оставлен для него же.
+ * - Резонанс: resonance(uid, srcUid) — единое пространство ключей.
+ * - Модалки потомков: children(uid, pk) с pk для чужих источников.
  */
 DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Influence, Provenance, Modal, NetService) {
   let feedEl, emptyEl, emptyT, segBar, ctxBanner, ctxSrc, ctxTxt, ctxX;
@@ -6753,7 +6813,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
 
   /**
    * @param {Object} n - Заметка.
-   * @returns {boolean} Является ли заметка закреплённой.
+   * @returns {boolean}
    */
   function isPinned(n) {
     const ctx = Store.get('context');
@@ -6761,8 +6821,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
   }
 
   /**
-   * Клик по карточке: повторный клик по закреплённой — снять пин,
-   * иначе — закрепить (если есть вектор).
+   * Клик по карточке: повторный клик по закреплённой — снять пин.
    * @param {Object} n - Заметка.
    */
   function onNoteClick(n) {
@@ -6778,20 +6837,20 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
 
   /**
    * Модалка «Потомки»: список заметок, порождённых данной.
-   * @param {Array<Object>} children - Прямые и непрямые потомки.
+   * @param {Array<Object>} childrenList - Потомки.
    */
-  function renderChildrenModal(children) {
+  function renderChildrenModal(childrenList) {
     const truncate = Config.get('truncateTextLength', 140);
     const body = document.createElement('div');
     body.style.cssText = 'display:flex;flex-direction:column;gap:8px;';
 
-    if (!children.length) {
+    if (!childrenList.length) {
       const empty = document.createElement('div');
       empty.style.cssText = 'color:var(--text-3);font-size:13px;text-align:center;padding:12px;';
       empty.textContent = I18n.t('inf.nochildren');
       body.appendChild(empty);
     } else {
-      children.forEach(c => {
+      childrenList.forEach(c => {
         const item = document.createElement('button');
         item.className = 'nv-act';
         item.style.cssText = 'text-align:left;justify-content:flex-start;white-space:normal;height:auto;min-height:40px;width:100%;';
@@ -6807,34 +6866,25 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
     }
 
     Modal.open({
-      title: I18n.t('inf.children') + (children.length ? ' · ' + children.length : ''),
+      title: I18n.t('inf.children') + (childrenList.length ? ' · ' + childrenList.length : ''),
       body: body,
       buttons: [{ text: I18n.t('btn.close'), onClick: () => Modal.close() }],
     });
   }
 
   /**
-   * Открыть модалку потомков заметки (по uid и eventId).
+   * Открыть модалку потомков заметки.
+   * v0.8: своя заметка → children(uid); чужая кэш-запись →
+   * children(srcUid, srcPk) — по паре.
    * @param {Object} note - Заметка.
    */
   function showChildren(note) {
-    const ids = [note.id];
-    if (note.eventId) ids.push(note.eventId);
+    const own = !note.authorPubkey;
+    const uid = own ? note.id : (note.srcUid || note.id);
+    const pk = own ? null : note.srcPk;
 
-    Promise.all(ids.map(id => Provenance.children(id))).then(results => {
-      const seenIds = new Set();
-      const children = [];
-
-      results.forEach(list => {
-        (list || []).forEach(c => {
-          if (c && !seenIds.has(c.id)) {
-            seenIds.add(c.id);
-            children.push(c);
-          }
-        });
-      });
-
-      renderChildrenModal(children);
+    Provenance.children(uid, pk).then(childrenList => {
+      renderChildrenModal(childrenList);
     }).catch(() => {});
   }
 
@@ -6929,32 +6979,37 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
     }
     meta.appendChild(tag);
 
-    const hasNav = !!n.parentId;
-    const res = Influence.resonance(n.id) + Influence.resonance(n.eventId);
+    const hasNav = !!n.parentUid;
+    const res = Influence.resonance(n.id, n.srcUid);
     const hasResonance = res > 0;
 
     if (hasNav || hasResonance) {
       meta.appendChild(createSep());
 
-      // Кнопка «↳ по мотивам»
-      if (n.parentId) {
+      // Кнопка «↳ по мотивам»: рабочая только при резолве родителя.
+      if (hasNav) {
         const link = document.createElement('button');
         link.className = 'note-parent';
         link.textContent = '↳';
         link.title = I18n.t('inf.lineage');
         link.setAttribute('aria-label', I18n.t('inf.openparent'));
 
-        Provenance.ancestors(n.id).then(chain => {
-          if (!chain.length) {
-            link.classList.add('orphan');
-            link.title = I18n.t('inf.orphan.hint');
-          } else {
+        Provenance.hasResolvableParent(n).then(ok => {
+          if (ok) {
             link.addEventListener('click', e => {
               e.stopPropagation();
               showAncestors(n);
             });
+          } else {
+            // Родитель недоступен (приватный/отозван/удалён) —
+            // приглушённая стрелка без клика.
+            link.classList.add('orphan');
+            link.title = I18n.t('inf.orphan.hint');
           }
-        }).catch(() => {});
+        }).catch(() => {
+          link.classList.add('orphan');
+          link.title = I18n.t('inf.orphan.hint');
+        });
 
         meta.appendChild(link);
       }
@@ -6982,7 +7037,6 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
     if (isRanked && typeof n.score === 'number') {
       const threshold = Config.get('threshold', 0.81);
       const serendipity = Config.get('serendipity', 0.07);
-      // Середина диапазона озарений: делит на «сильные» и «слабые»
       const serenMid = threshold - serendipity / 2;
       const displayMode = Config.get('similarityDisplay', 'signal');
       const pct = Math.round(n.score * 100);
@@ -6991,21 +7045,16 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
       sim.className = 'note-sim-info';
 
       if (displayMode === 'percent') {
-        // Режим отладки: сырые проценты
         sim.textContent = pct + '%';
         sim.title = I18n.t('sim.score');
       } else {
-        // Режим сигнала: палочки + текстовая метка
         if (n.score >= threshold) {
-          // ▰▰▰ В тему
           sim.innerHTML = '<span class="sig-bar sig-full"></span><span class="sig-bar sig-full"></span><span class="sig-bar sig-full"></span>';
           sim.title = I18n.t('sim.level.high') + ' (' + pct + '%)';
         } else if (n.score >= serenMid) {
-          // ▰▰▱ Озарение (сильная связь, верхняя половина диапазона)
           sim.innerHTML = '<span class="sig-bar sig-full"></span><span class="sig-bar sig-full"></span><span class="sig-bar sig-empty"></span>';
           sim.title = I18n.t('sim.level.mid') + ' (' + pct + '%)';
         } else {
-          // ▰▱▱ Проблеск (слабая связь, нижняя половина диапазона)
           sim.innerHTML = '<span class="sig-bar sig-full"></span><span class="sig-bar sig-empty"></span><span class="sig-bar sig-empty"></span>';
           sim.title = I18n.t('sim.level.low') + ' (' + pct + '%)';
         }
@@ -7026,7 +7075,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
     date.textContent = Utils.fmtRelativeTime(n.createdAt, I18n.getLang(), I18n.t);
     meta.appendChild(date);
 
-    // Кнопка «✎ открыть» (только для своих заметок)
+    // Кнопка «✎ открыть» (только для своих)
     if (n.own) {
       const openBtn = document.createElement('button');
       openBtn.className = 'na';
@@ -7060,8 +7109,6 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
     const isDrift = ctx.source === 'drift';
     const isRanked = isPinnedMode || isTyping || isDrift;
 
-    // Сегменты — только при чистом вводе (без пина). Дрейф рендерится
-    // как пин: единая лента, вектор контекста — от текста ввода.
     segBar.classList.toggle('on', isTyping);
     ctxBanner.classList.toggle('on', isPinnedMode || isDrift);
 
@@ -7081,15 +7128,12 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
     let notes;
 
     if (isPinnedMode || isDrift) {
-      // Пин/дрейф: все релевантные + озарения, по убыванию скора
       notes = [...state.lists.local, ...state.lists.world, ...state.lists.seren]
         .filter(n => n.id !== ctx.noteId)
         .sort((a, b) => (b.score || 0) - (a.score || 0));
     } else if (isTyping) {
-      // Чистый ввод: заметки из активного сегмента
       notes = state.lists[state.seg] || [];
     } else {
-      // Без контекста: хронологический поток
       notes = state.feed;
     }
 
@@ -7113,7 +7157,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
   }
 
   /**
-   * Инициализация: привязка DOM, подписки, слушатели, первичный рендер.
+   * Инициализация.
    */
   function init() {
     bind();
@@ -7157,7 +7201,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
     render();
   }
 
-  /** Отписка от всех подписок. */
+  /** Отписка. */
   function destroy() {
     unsubs.forEach(u => {
       try { u(); } catch (_) {}
@@ -7320,23 +7364,11 @@ DI.register('BaseView', function (Store, DB, I18n, Utils, Config, bus) {
 /**
  * Полноэкранный просмотр заметки.
  *
- * Для своих заметок:
- * - Удаление (с подтверждением)
- * - Переключение видимости (лично ↔ открыто)
- * - Пин (закрепление для контекстного поиска)
- * - Редактирование (только для личных; публичные immutable в Nostr)
+ * Для своих заметок: удаление, видимость, пин, редактирование (личных).
+ * Для чужих: просмотр + пин.
  *
- * Для чужих заметок:
- * - Только просмотр + пин
- *
- * Текст в режиме чтения не выделяется (user-select: none из глобального стиля).
- * В режиме редактирования (.nv-text-edit) выделение разрешено.
- *
- * Отличия от v0.6:
- * - ФИКС #1: click-листенер на root вешается один раз в init()
- *   (раньше — при каждом render(), с накоплением);
- * - ФИКС #9: ре-рендер при смене языка (если экран открыт и не в режиме
- *   редактирования — текст пользователя в textarea важнее перевода).
+ * v0.8: пин передаёт заметку целиком — Context сохраняет authorPubkey
+ * (волна 2), Composer строит пару (parentUid, parentPk).
  */
 DI.register('NoteView', function (DB, Notes, NoteActions, I18n, Utils, Toast, bus) {
   let root = null;
@@ -7373,8 +7405,7 @@ DI.register('NoteView', function (DB, Notes, NoteActions, I18n, Utils, Toast, bu
   }
 
   /**
-   * Открыть заметку по id. Сначала ищем в локальной БД,
-   * потом в сетевом кэше (для чужих заметок).
+   * Открыть заметку по id: DB → кэш.
    * @param {string} id - uid или eventId заметки.
    */
   function open(id) {
@@ -7391,7 +7422,7 @@ DI.register('NoteView', function (DB, Notes, NoteActions, I18n, Utils, Toast, bu
   }
 
   /**
-   * Переход в режим редактирования: текст заменяется на textarea.
+   * Переход в режим редактирования.
    * @param {Object} note - Заметка.
    * @param {HTMLButtonElement} editBtn - Кнопка «Развить».
    */
@@ -7420,8 +7451,7 @@ DI.register('NoteView', function (DB, Notes, NoteActions, I18n, Utils, Toast, bu
   }
 
   /**
-   * Сохранение изменений при редактировании.
-   * Notes.edit обновляет syncTs → NetService публикует канон (синк).
+   * Сохранение изменений.
    * @param {Object} note - Заметка.
    */
   function saveEdit(note) {
@@ -7438,7 +7468,7 @@ DI.register('NoteView', function (DB, Notes, NoteActions, I18n, Utils, Toast, bu
 
     if (editBtn) {
       editBtn.disabled = true;
-      editBtn.textContent = '…';
+      editBtn.innerHTML = '<span class="btn-spinner"></span>';
     }
 
     Notes.edit(note.id, newText).then(updatedNote => {
@@ -7476,7 +7506,7 @@ DI.register('NoteView', function (DB, Notes, NoteActions, I18n, Utils, Toast, bu
   }
 
   /**
-   * Полный рендер экрана просмотра заметки.
+   * Полный рендер экрана.
    * @param {Object} note - Заметка (своя из DB или чужая из кэша).
    */
   function render(note) {
@@ -7492,7 +7522,6 @@ DI.register('NoteView', function (DB, Notes, NoteActions, I18n, Utils, Toast, bu
 
     const isOwn = !!(note.id && !note.authorPubkey);
 
-    // Верхняя панель действий
     const top = document.createElement('div');
     top.className = 'nv-f';
 
@@ -7525,7 +7554,6 @@ DI.register('NoteView', function (DB, Notes, NoteActions, I18n, Utils, Toast, bu
     top.appendChild(pinBtn);
 
     if (isOwn && !note.shared) {
-      // Редактирование доступно только для личных заметок
       const edit = document.createElement('button');
       edit.className = 'nv-act';
       edit.setAttribute('data-role', 'edit');
@@ -7541,7 +7569,6 @@ DI.register('NoteView', function (DB, Notes, NoteActions, I18n, Utils, Toast, bu
 
       top.appendChild(edit);
     } else if (isOwn && note.shared) {
-      // Публичные заметки нельзя редактировать (immutable в Nostr)
       const hint = document.createElement('span');
       hint.style.cssText = 'font-size:12px;color:var(--text-3);align-self:center;';
       hint.textContent = I18n.t('note.public.noedit');
@@ -7550,7 +7577,6 @@ DI.register('NoteView', function (DB, Notes, NoteActions, I18n, Utils, Toast, bu
 
     r.appendChild(top);
 
-    // Тело: мета + текст
     const body = document.createElement('div');
     body.className = 'nv-b';
 
@@ -7583,7 +7609,6 @@ DI.register('NoteView', function (DB, Notes, NoteActions, I18n, Utils, Toast, bu
 
     r.appendChild(body);
 
-    // Нижняя панель: кнопка закрытия
     const bottom = document.createElement('div');
     bottom.className = 'nv-f-bottom';
 
@@ -7595,7 +7620,6 @@ DI.register('NoteView', function (DB, Notes, NoteActions, I18n, Utils, Toast, bu
 
     r.appendChild(bottom);
 
-    // Закрытие по Escape
     if (escHandler) document.removeEventListener('keydown', escHandler);
     escHandler = e => {
       if (e.key === 'Escape') close();
@@ -7604,15 +7628,12 @@ DI.register('NoteView', function (DB, Notes, NoteActions, I18n, Utils, Toast, bu
   }
 
   /**
-   * Инициализация: root click-листенер (один раз, фикс #1),
-   * подписка на note:open, подписка на i18n:change (фикс #9).
+   * Инициализация: root click-листенер, подписки.
    */
   function init() {
     const r = ensureRoot();
     if (!r) return;
 
-    // ФИКС #1: один листенер на root. Дети пересоздаются через
-    // innerHTML = '', слушатель живёт на корне — накопления нет.
     r.addEventListener('click', e => {
       if (e.target === r) close();
     });
@@ -7621,8 +7642,6 @@ DI.register('NoteView', function (DB, Notes, NoteActions, I18n, Utils, Toast, bu
       if (p && p.id) open(p.id);
     });
 
-    // ФИКС #9: смена языка при открытом экране. В режиме редактирования
-    // не трогаем — текст пользователя в textarea важнее.
     i18nUnsub = bus.on('i18n:change', () => {
       if (currentNote && !editMode && root && root.classList.contains('on')) {
         render(currentNote);
