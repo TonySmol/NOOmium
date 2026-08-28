@@ -38,7 +38,7 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 // ВЕРСИЯ ПРИЛОЖЕНИЯ
 // ═══════════════════════════════════════════════════════════════════════════════
-const APP_VERSION = '0.8.0';
+const APP_VERSION = '0.8.1';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CORE/DI — ПРЕАМБУЛА
@@ -2923,38 +2923,21 @@ DI.register('Nostr', function (Config, bus, Logger) {
 /**
  * Сериализация/десериализация Nostr-событий NOOmium.
  *
+ * МОДЕЛЬ СВЯЗЕЙ v0.8.1 (фикс резолва чужих дочек):
+ * Локальная запись/канон: parentPk = null означает «родитель мой».
+ * Публичная проекция: pk родителя пишется ВСЕГДА явно — для «моего»
+ * родителя подставляется pubkey автора при упаковке (noteEvent).
+ * Читатель резолвит пару (parentUid, parentPk) единым путём:
+ * кэш чужих по (srcUid, srcPk), при pk === собственному — своя база
+ * по uid. Без pk (старые события) — только своя база (v0.7-путь).
+ *
  * Виды событий:
- * - kind 1:     Публичная проекция заметки (текст + вектор + parent + uid)
- * - kind 30078: Приватный канон (NIP-78, replaceable, d-tag = uid,
- *               content = NIP-44-шифрованный JSON). Источник истины для
- *               синхронизации между устройствами.
- * - kind 21000: Запрос (вектор + параметры)
- * - kind 21001: Ответ (заметка + скор)
- * - kind 5:     Удаление публичных проекций (список event ID)
- *
- * МОДЕЛЬ СВЯЗЕЙ v0.8.0 (без обратной совместимости):
- * Родитель определяется парой (parentUid, parentPk):
- * - parentUid — стабильный uid заметки-родителя;
- * - parentPk  — pubkey автора родителя; null = родитель мой
- *   (резолв в своей базе по uid).
- * В публичной проекции: тег ['parent', uid, pk] — pk всегда явно
- * (чужому клиенту нужен для резолва).
- * eventId НЕ участвует в семейных связях — это только адрес события
- * (отзыв/переиздание родителя больше не ломает дерево).
- *
- * Кэш чужих заметок: каждая запись хранит srcUid/srcPk — uid автора
- * из тега uid и его pubkey. Индекс (srcUid, srcPk) → заметка —
- * фундамент резолва в Provenance.
- *
- * КРИТИЧНО: created_at для 30078 строго монотонен (счётчик ниже) —
- * иначе релей не заменит предыдущую версию.
- *
- * Безопасность:
- * - Все входящие тексты ограничены по длине (защита от переполнения)
- * - Все входящие векторы валидируются (конечность, числовой тип)
+ * - kind 1:     Публичная проекция (текст + вектор + parent + uid)
+ * - kind 30078: Приватный канон (NIP-78, replaceable, d-tag = uid)
+ * - kind 21000: Запрос, kind 21001: Ответ, kind 5: Удаление
  */
-DI.register('Protocol', function (Config, Vec, Crypto) {
-  /** Максимальная длина шифртекста 30078 (с запасом на NIP-44 оверхед). */
+DI.register('Protocol', function (Config, Vec, Crypto, Nostr) {
+  /** Максимальная длина шифртекста 30078. */
   const MAX_PRIVATE_CONTENT = 65536;
 
   /** Монотонный счётчик created_at для replaceable-событий. */
@@ -2962,7 +2945,6 @@ DI.register('Protocol', function (Config, Vec, Crypto) {
 
   /**
    * Следующий строго возрастающий timestamp (секунды).
-   * Два апдейта в одну секунду не коллизируют.
    * @returns {number}
    */
   function nextPrivateTs() {
@@ -2990,8 +2972,9 @@ DI.register('Protocol', function (Config, Vec, Crypto) {
 
   /**
    * Событие публичной проекции заметки.
-   * v0.8: тег parent = [parentUid, parentPk|null] — резолв на стороне
-   * читателя по паре (uid, pk). Никакого eventId в связях.
+   * v0.8.1: тег parent = [parentUid, parentPk-ЯВНО]. Если локально
+   * parentPk = null («родитель мой») — подставляется pubkey автора.
+   * Читатель всегда получает однозначную пару для резолва.
    * @param {Object} note - Заметка (id = uid).
    * @param {string} room - Имя комнаты (тег t).
    * @returns {Object} Шаблон события (без подписи).
@@ -3000,7 +2983,8 @@ DI.register('Protocol', function (Config, Vec, Crypto) {
     const tags = [['t', room], ['uid', note.id]];
     if (note.vector) tags.push(['v', Vec.toB64(note.vector)]);
     if (note.parentUid) {
-      tags.push(['parent', note.parentUid, note.parentPk || '']);
+      const parentPk = note.parentPk || Nostr.getPubkey() || '';
+      tags.push(['parent', note.parentUid, parentPk]);
     }
 
     return {
@@ -3013,8 +2997,6 @@ DI.register('Protocol', function (Config, Vec, Crypto) {
 
   /**
    * Декодирование чужой публичной заметки (kind 1).
-   * v0.8: вычитывает uid автора (тег uid) в srcUid — фундамент
-   * семейного резолва у читателя.
    * @param {Object} ev - Nostr-событие.
    * @returns {Object|null} Заметка-кандидат для сетевого кэша.
    */
@@ -3034,7 +3016,6 @@ DI.register('Protocol', function (Config, Vec, Crypto) {
       vector: vTag ? Vec.fromB64(vTag[1]) : null,
       shared: true,
       authorPubkey: ev.pubkey,
-      // uid автора из тега: кто опубликовал, у того всегда есть
       srcUid: uidTag ? uidTag[1] : null,
       srcPk: ev.pubkey,
       parentUid: pTag ? pTag[1] : null,
@@ -3047,7 +3028,7 @@ DI.register('Protocol', function (Config, Vec, Crypto) {
 
   /**
    * Событие приватного канона заметки. Полная версия (upsert).
-   * v0.8: parent → parentUid/parentPk (пара вместо одного поля).
+   * Локальная семантика parentPk (null = «мой») сохраняется в каноне.
    * @param {Object} note - Локальная заметка (id = uid).
    * @returns {Promise<Object>} Шаблон события с зашифрованным content.
    * @throws {Error} При недоступности NIP-44.
@@ -3075,7 +3056,7 @@ DI.register('Protocol', function (Config, Vec, Crypto) {
   }
 
   /**
-   * Tombstone приватного канона: «заметка удалена».
+   * Tombstone приватного канона.
    * @param {string} uid - Идентификатор заметки.
    * @returns {Promise<Object>} Шаблон события.
    * @throws {Error} При недоступности NIP-44.
@@ -3092,16 +3073,9 @@ DI.register('Protocol', function (Config, Vec, Crypto) {
   }
 
   /**
-   * Декодирование приватного канона (kind 30078): расшифровка + парсинг.
-   * Чужие события не расшифруются (NIP-44 keys не совпадут) → null.
-   *
+   * Декодирование приватного канона (kind 30078).
    * @param {Object} ev - Nostr-событие kind 30078.
    * @returns {Promise<Object|null>}
-   *   Полная версия: {id, text, vector, shared, parentUid, parentPk,
-   *   parentPubkey (всегда null — заметка своя), eventId, createdAt,
-   *   updatedAt, syncTs}.
-   *   Tombstone: {id, deleted: true, syncTs}.
-   *   null — событие невалидно или не наше.
    */
   async function decodePrivate(ev) {
     if (!ev || ev.kind !== Config.get('kPrivate', 30078)) return null;
@@ -3129,12 +3103,10 @@ DI.register('Protocol', function (Config, Vec, Crypto) {
 
     const syncTs = (ev.created_at || 0) * 1000;
 
-    // Tombstone — удаление
     if (data.del === true) {
       return { id: dTag[1], deleted: true, syncTs };
     }
 
-    // Полная версия — валидация полей
     if (typeof data.text !== 'string') return null;
     if (data.text.length > Config.get('maxNoteTextLength', 10000)) return null;
 
@@ -3211,8 +3183,7 @@ DI.register('Protocol', function (Config, Vec, Crypto) {
   }
 
   /**
-   * Событие ответа (kind 21001). Ответ всегда про публичную заметку —
-   * связи в ответе не участвуют (reader резолвит сам).
+   * Событие ответа (kind 21001).
    * @param {Object} note - Локальная заметка.
    * @param {number} score - Скор сходства.
    * @param {string} queryId - ID запроса.
@@ -3278,7 +3249,7 @@ DI.register('Protocol', function (Config, Vec, Crypto) {
    * Событие удаления публичных проекций (kind 5).
    * @param {string|Array<string>} eventIds - ID удаляемых событий.
    * @param {string} [room] - Имя комнаты (тег t).
-   * @returns {Object|null} Шаблон события или null при пустом списке.
+   * @returns {Object|null} Шаблон события или null.
    */
   function deleteEvent(eventIds, room) {
     const ids = Array.isArray(eventIds) ? eventIds : [eventIds];
@@ -3325,7 +3296,7 @@ DI.register('Protocol', function (Config, Vec, Crypto) {
     deleteEvent,
     decodeDelete,
   };
-}, ['Config', 'Vec', 'Crypto']);
+}, ['Config', 'Vec', 'Crypto', 'Nostr']);
 // ─── NET/Protocol ─── END ───────────────────────────────────────────────────
 
 // ─── NET/NetService ─── START ───────────────────────────────────────────────
@@ -5154,24 +5125,18 @@ DI.register('Feed', function (DB, Ranker, Store, bus, Logger) {
 /**
  * Построение генеалогических связей между заметками.
  *
- * МОДЕЛЬ v0.8: родитель = пара (parentUid, parentPk).
- * - parentPk = null → родитель мой: резолв по uid в локальной базе.
- * - parentPk ≠ null → родитель чужой: резолв по (srcUid, srcPk)
- *   в сетевом кэше. srcUid/srcPk вычитываются из тега uid публичных
- *   проекций (Protocol.decodeNote, волна 1).
+ * МОДЕЛЬ v0.8.1 (фикс): резолв родителя по паре (parentUid, parentPk).
+ * - parentPk = pk автора родителя (в публичных событиях — всегда явно,
+ *   включая случай «родитель мой»: pk совпадает с моим).
+ * - Резолв: кэш чужих по (srcUid, srcPk); если pk === мой — своя база
+ *   по uid (родитель — моя заметка, но ссылка пришла из чужого события
+ *   или из моего же переиздания).
+ * - parentPk = null (старые/канонические записи своих заметок):
+ *   родитель мой, резолв в своей базе по uid.
  *
- * Связи переживают отзыв/переиздание родителя: uid стабилен,
- * eventId в семейной логике не участвует.
- *
- * Статусы нерезолва для UI:
- * - 'hidden' — родитель не найден (приватный у автора ИЛИ отозван ИЛИ
- *   удалён; для читателя эти случаи неотличимы по приватности).
- *   FeedView показывает приглушённую нерабочую стрелку без «удалён».
- *
- * Самоинвалидация кэша предков: подписка на db:change / db:cache
- * в теле фабрики.
+ * Связи переживают отзыв/переиздание родителя: uid стабилен.
  */
-DI.register('Provenance', function (DB, bus) {
+DI.register('Provenance', function (DB, bus, Nostr) {
   /** @type {Map<string, {chain: Array, timestamp: number}>} */
   const ancestorsCache = new Map();
   const CACHE_TTL = 5000;
@@ -5188,9 +5153,6 @@ DI.register('Provenance', function (DB, bus) {
    * Построить индексы по всем заметкам.
    * @param {Array<Object>} all - Все заметки (свои + кэш).
    * @returns {{byId: Map, bySrc: Map}}
-   *   byId: id|eventId → заметка (eventId — только для совместимости
-   *   отображения, не для семейного резолва);
-   *   bySrc: "srcUid::srcPk" → заметка (чужие источники).
    */
   function buildIndexes(all) {
     const byId = new Map();
@@ -5207,29 +5169,37 @@ DI.register('Provenance', function (DB, bus) {
   }
 
   /**
-   * Резолв родителя по ссылке заметки.
+   * Резолв родителя по ссылке заметки (v0.8.1).
    * @param {Object} note - Заметка со ссылкой (parentUid/parentPk).
    * @param {{byId: Map, bySrc: Map}} idx - Индексы.
-   * @returns {Object|null} Заметка-родитель или null (недоступен).
+   * @returns {Object|null} Заметка-родитель или null.
    */
   function resolveParent(note, idx) {
     if (!note.parentUid) return null;
 
+    const myPk = Nostr.getPubkey();
+
     if (note.parentPk) {
-      // Чужой родитель: пара (srcUid, srcPk).
-      return idx.bySrc.get(note.parentUid + '::' + note.parentPk) || null;
+      // Пара явная: сначала кэш чужих по (srcUid, srcPk).
+      const cached = idx.bySrc.get(note.parentUid + '::' + note.parentPk);
+      if (cached) return cached;
+
+      // pk мой → родитель — моя заметка (ссылка из чужого/своего события).
+      if (myPk && note.parentPk === myPk) {
+        return idx.byId.get(note.parentUid) || null;
+      }
+
+      return null;
     }
 
-    // Мой родитель: uid в локальной базе (byId содержит свои по uid).
-    // Если по uid не найден — родитель удалён у меня.
+    // parentPk нет: родитель мой (локальные/канонические записи,
+    // а также старые события) — своя база по uid.
     return idx.byId.get(note.parentUid) || null;
   }
 
   /**
    * Прямые дети заметки.
-   * Свои дети ссылаются на (uid, null); чужие — на (srcUid, srcPk).
-   * @param {string} id - uid своей заметки ИЛИ srcUid чужой
-   *   (для чужой обязателен второй параметр).
+   * @param {string} id - uid своей заметки ИЛИ srcUid чужой.
    * @param {string} [pk] - Pubkey автора для чужой заметки.
    * @returns {Promise<Array<Object>>}
    */
@@ -5237,12 +5207,9 @@ DI.register('Provenance', function (DB, bus) {
     if (!id) return Promise.resolve([]);
 
     return loadAll().then(all => {
-      const myKey = pk ? id + '::' + pk : null;
       return all.filter(n => {
         if (!n || !n.parentUid) return false;
-        // Ребёнок на моего родителя: parentUid совпал и pk мой (null)
         if (!pk && !n.parentPk && n.parentUid === id) return true;
-        // Ребёнок на чужого родителя: пара совпала
         if (pk && n.parentPk === pk && n.parentUid === id) return true;
         return false;
       });
@@ -5250,7 +5217,7 @@ DI.register('Provenance', function (DB, bus) {
   }
 
   /**
-   * Все потомки (BFS). Защита от циклов через seenIds.
+   * Все потомки (BFS). Защита от циклов.
    * @param {string} id - uid/srcUid заметки.
    * @param {string} [pk] - Pubkey для чужой.
    * @returns {Promise<Array<Object>>}
@@ -5271,8 +5238,8 @@ DI.register('Provenance', function (DB, bus) {
         for (const n of all) {
           if (!n || !n.parentUid) continue;
 
-          const parentMatch = frontier.some((fid, i) => {
-            const fpk = frontierPk !== null ? frontierPk : null;
+          const parentMatch = frontier.some(fid => {
+            const fpk = frontierPk;
             if (!n.parentPk && !fpk) return n.parentUid === fid;
             if (n.parentPk && fpk) return n.parentUid === fid && n.parentPk === fpk;
             return false;
@@ -5281,15 +5248,12 @@ DI.register('Provenance', function (DB, bus) {
           if (parentMatch && !seenIds.has(n.id)) {
             seenIds.add(n.id);
             out.push(n);
-            // Потомки этого ребёнка: его id — uid (если мой) или srcUid.
             next.push(n.id);
             nextPks.push(n.authorPubkey || null);
           }
         }
 
         frontier = next;
-        // Для следующего уровня: если frontier смешанный (свои + чужие),
-        // матчим без pk-ограничения по uid (свободный матчинг).
         frontierPk = null;
         if (next.length === 1 && nextPks[0]) frontierPk = nextPks[0];
       }
@@ -5301,7 +5265,7 @@ DI.register('Provenance', function (DB, bus) {
   /**
    * Цепочка предков от текущей заметки до корня.
    * @param {string} id - uid своей или id кэш-записи чужой.
-   * @returns {Promise<Array<Object>>} Цепочка от родителя к корню.
+   * @returns {Promise<Array<Object>>}
    */
   function ancestors(id) {
     if (!id) return Promise.resolve([]);
@@ -5314,7 +5278,6 @@ DI.register('Provenance', function (DB, bus) {
     return loadAll().then(all => {
       const idx = buildIndexes(all);
 
-      // Стартовая заметка: по id (свой uid или кэш-id).
       let current = idx.byId.get(id) || null;
       const chain = [];
       const seen = new Set([id]);
@@ -5340,7 +5303,7 @@ DI.register('Provenance', function (DB, bus) {
   }
 
   /**
-   * Резолвится ли родитель заметки (для UI: показывать ↳ рабочей).
+   * Резолвится ли родитель заметки (для UI).
    * @param {Object} note - Заметка со ссылкой.
    * @returns {Promise<boolean>}
    */
@@ -5360,12 +5323,12 @@ DI.register('Provenance', function (DB, bus) {
     ancestorsCache.clear();
   }
 
-  // Самоинвалидация кэша при любом изменении данных.
+  // Самоинвалидация кэша.
   bus.on('db:change', clearCache);
   bus.on('db:cache', clearCache);
 
   return { children, descendants, ancestors, hasResolvableParent, loadAll, clearCache };
-}, ['DB', 'EventBus']);
+}, ['DB', 'EventBus', 'Nostr']);
 // ─── DOMAIN/Provenance ─── END ──────────────────────────────────────────────
 
 // ─── DOMAIN/Influence ─── START ─────────────────────────────────────────────
