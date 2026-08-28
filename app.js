@@ -38,7 +38,7 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 // ВЕРСИЯ ПРИЛОЖЕНИЯ
 // ═══════════════════════════════════════════════════════════════════════════════
-const APP_VERSION = '0.7.3';
+const APP_VERSION = '0.7.4';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CORE/DI — ПРЕАМБУЛА
@@ -655,11 +655,6 @@ DI.register('Utils', function () {
 /**
  * Интернационализация (ru/en).
  * Словари хранятся в одном месте. Все тексты интерфейса берутся только отсюда.
- *
- * Отличие от v0.6: новые ключи — net.offline (офлайн-бар), account.* и
- * sync.* (экран аккаунта, ключ, экспорт/импорт), preview.* (параметризованный
- * предпросмотр настроек ранжирования), onb.key.* (слайд онбординга про ключ
- * и устройства).
  */
 DI.register('I18n', function (Config, bus) {
   /** @type {Object<string, Object<string, string>>} */
@@ -794,6 +789,7 @@ DI.register('I18n', function (Config, bus) {
     'btn.download': 'Скачать',
     'btn.import': 'Импорт',
     'btn.confirm': 'Подтвердить',
+    'btn.paste': 'Вставить из буфера',
 
     'tab.stream': 'Поток',
     'tab.base': 'База',
@@ -859,6 +855,8 @@ DI.register('I18n', function (Config, bus) {
 
     'menu.settings': 'Настройки',
     'menu.theme': 'Тема',
+    'theme.dark': 'тёмная',
+    'theme.light': 'светлая',
     'menu.lang': 'Язык',
     'menu.help': 'Как это работает',
     'menu.fullreset': 'Полный сброс',
@@ -879,8 +877,10 @@ DI.register('I18n', function (Config, bus) {
     'ranking.display.signal': 'Индикатор сигнала',
     'ranking.display.percent': 'Проценты (отладка)',
 
-    // Параметризованный предпросмотр границ ранжирования (замена хардкода)
-    'preview.ranking': 'Релевантно: ≥ {relevant}% | Озарения: {serenLo}%–{serenHi}% | Скрыто: < {hidden}%',
+    // Три строки предпросмотра (без переносов)
+    'preview.relevant': 'Релевантно: ≥ {lo}%',
+    'preview.seren': 'Озарения: {lo}%–{hi}%',
+    'preview.hidden': 'Скрыто: < {lo}%',
 
     'del.confirm': 'Удалить эту заметку навсегда?',
 
@@ -890,7 +890,7 @@ DI.register('I18n', function (Config, bus) {
     'note.public.noedit': 'Публичные заметки нельзя редактировать',
     'note.edit.placeholder': 'Текст заметки',
 
-    // Аккаунт, ключ, синхронизация
+    // Аккаунт, ключ, синхронизация, экспорт/импорт
     'account.title': 'Аккаунт и ключ',
     'account.identity': 'Ваш ключ',
     'account.identity.desc': 'Ключ — это вы. Заметки синхронизируются между устройствами через зашифрованные события на вашем релее. Контент видите только вы.',
@@ -898,8 +898,8 @@ DI.register('I18n', function (Config, bus) {
     'account.nsec.masked': 'Ключ скрыт',
     'account.nsec.hint': 'Никому не показывайте ключ. Если кто-то его получит — он станет вами.',
     'account.exported.mark': 'Ключ показан и скопирован',
-    'account.password.set': 'Защитить ключ паролем',
-    'account.password.hint': 'Пароль шифрует ключ при показе. Без пароля — быстрый доступ.',
+    'account.password.set': 'Пароль',
+    'account.password.hint': 'Пароль шифрует ключ (NIP-49). Оставьте пустым — без шифрования.',
     'account.enter.title': 'Вход по ключу',
     'account.enter.desc': 'Вставьте ключ (nsec… или ncryptsec…) с другого устройства. Текущие заметки и ключ будут заменены.',
     'account.enter.placeholder': 'nsec… или ncryptsec…',
@@ -908,23 +908,36 @@ DI.register('I18n', function (Config, bus) {
     'account.enter.bad': 'Ключ не распознан',
     'account.enter.done': 'Аккаунт заменён, синхронизирую…',
     'account.import.done': 'Импортировано заметок: {count}',
-    'account.export.file': 'Архив заметок',
-    'account.export.desc': 'Файл с заметками и настройками. Страховка на случай, если релеи очистят данные.',
-    'account.import.file': 'Восстановить из файла',
-    'account.import.confirm': 'Заменить локальную базу данными из архива?',
-    'account.import.confirm.d': 'Заметки из архива будут добавлены (совпадающие по id — обновлены).',
+    'account.data.section': 'Данные',
+    'account.data.desc': 'Архив — страховка на случай, если релеи очистят данные.',
+    'account.export.title': 'Экспорт',
+    'account.export.desc': 'Файл или буфер обмена с заметками и настройками.',
+    'account.export.withkey': 'Включить ключ',
+    'account.export.withkey.hint': 'С ключом архив восстановит аккаунт целиком. Без ключа — только заметки на текущем аккаунте.',
+    'account.import.title': 'Импорт',
+    'account.import.desc': 'Заметки из архива будут добавлены (совпадающие по id — обновлены).',
+    'account.import.file': 'Загрузить файл',
+    'account.import.clip': 'Вставить из буфера',
+    'account.import.clip.ph': 'Вставьте сюда JSON архива…',
+    'account.import.confirm': 'Применить архив?',
     'account.import.bad': 'Файл не похож на архив NOOmium',
+    'account.import.clip.empty': 'Буфер пуст или не похож на архив',
     'account.sync.status': 'Синхронизация',
     'account.sync.on': 'включена',
     'account.sync.off': 'выключена',
     'account.sync.running': 'идёт обмен…',
     'account.sync.hint': 'Зашифрованные копии заметок публикуются на релеи. Отключите, если не хотите ничего отправлять в сеть.',
+    'account.sync.now': 'Синхронизировать',
+    'account.sync.now.hint': 'Переподключиться к сети и вытянуть заметки с релеев.',
 
     'toast.key.copied': 'ключ скопирован',
     'toast.key.saved': 'ключ сохранён',
     'toast.account.migrated': 'заметки переносятся в облако…',
     'toast.sync.disabled': 'синхронизация выключена',
     'toast.sync.enabled': 'синхронизация включена',
+    'toast.sync.now': 'переподключаюсь…',
+    'toast.json.copied': 'JSON скопирован в буфер',
+    'toast.clip.bad': 'не удалось прочитать буфер',
 
     'onb.title': 'Как это работает',
     'onb.dontshow': 'Больше не показывать',
@@ -991,6 +1004,7 @@ DI.register('I18n', function (Config, bus) {
     'btn.download': 'Download',
     'btn.import': 'Import',
     'btn.confirm': 'Confirm',
+    'btn.paste': 'Paste from clipboard',
 
     'tab.stream': 'Stream',
     'tab.base': 'Base',
@@ -1056,6 +1070,8 @@ DI.register('I18n', function (Config, bus) {
 
     'menu.settings': 'Settings',
     'menu.theme': 'Theme',
+    'theme.dark': 'dark',
+    'theme.light': 'light',
     'menu.lang': 'Language',
     'menu.help': 'How it works',
     'menu.fullreset': 'Full reset',
@@ -1076,7 +1092,9 @@ DI.register('I18n', function (Config, bus) {
     'ranking.display.signal': 'Signal indicator',
     'ranking.display.percent': 'Percentages (debug)',
 
-    'preview.ranking': 'Relevant: ≥ {relevant}% | Insights: {serenLo}%–{serenHi}% | Hidden: < {hidden}%',
+    'preview.relevant': 'Relevant: ≥ {lo}%',
+    'preview.seren': 'Insights: {lo}%–{hi}%',
+    'preview.hidden': 'Hidden: < {lo}%',
 
     'del.confirm': 'Delete this note forever?',
 
@@ -1093,8 +1111,8 @@ DI.register('I18n', function (Config, bus) {
     'account.nsec.masked': 'Key hidden',
     'account.nsec.hint': 'Never show your key to anyone. Whoever gets it becomes you.',
     'account.exported.mark': 'Key shown and copied',
-    'account.password.set': 'Protect key with password',
-    'account.password.hint': 'Password encrypts the key when displayed. Without it — quick access.',
+    'account.password.set': 'Password',
+    'account.password.hint': 'Password encrypts the key (NIP-49). Leave empty — no encryption.',
     'account.enter.title': 'Sign in with key',
     'account.enter.desc': 'Paste a key (nsec… or ncryptsec…) from another device. Current notes and key will be replaced.',
     'account.enter.placeholder': 'nsec… or ncryptsec…',
@@ -1103,23 +1121,36 @@ DI.register('I18n', function (Config, bus) {
     'account.enter.bad': 'Key not recognized',
     'account.enter.done': 'Account replaced, syncing…',
     'account.import.done': 'Notes imported: {count}',
-    'account.export.file': 'Notes archive',
-    'account.export.desc': 'A file with your notes and settings. A safety net in case relays wipe their data.',
-    'account.import.file': 'Restore from file',
-    'account.import.confirm': 'Replace local base with archive data?',
-    'account.import.confirm.d': 'Notes from the archive will be added (matching ids updated).',
+    'account.data.section': 'Data',
+    'account.data.desc': 'Archive is a safety net in case relays wipe their data.',
+    'account.export.title': 'Export',
+    'account.export.desc': 'File or clipboard with your notes and settings.',
+    'account.export.withkey': 'Include key',
+    'account.export.withkey.hint': 'With the key the archive restores the whole account. Without it — only notes on the current account.',
+    'account.import.title': 'Import',
+    'account.import.desc': 'Notes from the archive will be added (matching ids updated).',
+    'account.import.file': 'Load file',
+    'account.import.clip': 'Paste from clipboard',
+    'account.import.clip.ph': 'Paste archive JSON here…',
+    'account.import.confirm': 'Apply archive?',
     'account.import.bad': 'File does not look like a NOOmium archive',
+    'account.import.clip.empty': 'Clipboard is empty or not an archive',
     'account.sync.status': 'Sync',
     'account.sync.on': 'on',
     'account.sync.off': 'off',
     'account.sync.running': 'exchanging…',
     'account.sync.hint': 'Encrypted copies of notes are published to relays. Turn off if you do not want anything sent to the network.',
+    'account.sync.now': 'Sync now',
+    'account.sync.now.hint': 'Reconnect to the network and pull notes from relays.',
 
     'toast.key.copied': 'key copied',
     'toast.key.saved': 'key saved',
     'toast.account.migrated': 'moving notes to the cloud…',
     'toast.sync.disabled': 'sync disabled',
     'toast.sync.enabled': 'sync enabled',
+    'toast.sync.now': 'reconnecting…',
+    'toast.json.copied': 'JSON copied to clipboard',
+    'toast.clip.bad': 'could not read clipboard',
 
     'onb.title': 'How it works',
     'onb.dontshow': "Don't show again",
@@ -3283,30 +3314,18 @@ DI.register('Protocol', function (Config, Vec, Crypto) {
  * Оркестрация Nostr-сети: подписки, публикация, обработка входящих событий.
  *
  * Три канала:
- * 1. Комнатная подписка (kind 1/21000/21001/5 по тегу t) — как в v0.6.
- * 2. Подписка на себя (kind 30078, authors = свой pk) — живой синк между
- *    устройствами. NIP-01: для replaceable-событий релей отдаёт только
- *    последнюю версию каждого d-тега → restore = один дешёвый REQ.
- * 3. Исходящая публикация: приватный канон (30078) на каждое изменение
- *    заметки + публичная проекция (kind 1) для shared.
+ * 1. Комнатная подписка (kind 1/21000/21001/5 по тегу t).
+ * 2. Подписка на себя (kind 30078, authors = свой pk) — живой синк.
+ * 3. Исходящая публикация: приватный канон (30078) + публичная проекция
+ *    (kind 1) для shared.
  *
- * LWW-модель канона:
- * - note.syncTs ставится при локальной правке (Notes) и при применении
- *   входящего события;
- * - входящий 30078 применяется только при syncTs > локального
- *   (равенство = эхо собственной публикации → пропуск);
- * - удаление канона — tombstone (30078 с del:true), НЕ kind 5.
+ * LWW-модель канона: syncTs, tombstone-удаления, canonTs (самолечение).
  *
- * note.canonTs — время последней успешной публикации/приёма канона.
- * Самолечение: заметки без canonTs (созданные в паузе сети: смена ключа,
- * офлайн-старт, retry-гэп) ставятся в очередь при каждом старте.
+ * Фикс unshare: eventId сбрасывается СРАЗУ при переходе в личное —
+ * повторный «в мир» публикует новую проекцию. Старая удаляется kind 5.
  *
- * ФИКСЫ финальной редакции:
- * - unshare сбрасывает eventId СРАЗУ (иначе повторный «в мир» никогда
- *   не публиковал новую проекцию — баг, унаследованный из v0.6);
- * - account:changed чистит outbox и лимитеры (смена ключа);
- * - flushOutbox фазы priv/privdel уважают syncEnabled;
- * - parentId модели v0.7 — всегда uid своих / eventId чужих (см. Composer).
+ * Метод resync(): полное переподключение (комната + свой канон + сброс
+ * outbox-таймера) — кнопка «Синхронизировать» и клик по статусу сети.
  */
 DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Config, Logger, bus) {
   let started = false;
@@ -3329,15 +3348,15 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
 
   /** @type {Set<string>} seen для комнатной подписки. */
   const seen = new Set();
-  /** @type {Set<string>} seen для подписки на себя (оптимизация расшифровки). */
+  /** @type {Set<string>} seen для подписки на себя. */
   const selfSeen = new Set();
-  /** @type {Map<string, boolean>} дедупликация контента pubkey::text. */
+  /** @type {Map<string, boolean>} дедупликация контента. */
   const contentSeen = new Map();
-  /** @type {Map<string, number>} активные пиры (последний контакт). */
+  /** @type {Map<string, number>} активные пиры. */
   const peers = new Map();
   /** @type {Map<string, number>} время последнего запроса от пира. */
   const peerQueryTimes = new Map();
-  /** @type {Map<string, {tokens:number, ts:number}>} token bucket'ы пиров. */
+  /** @type {Map<string, {tokens:number, ts:number}>} token bucket'ы. */
   const peerNoteBudgets = new Map();
 
   let currentWindow = Config.get('subWindow', 300);
@@ -3347,8 +3366,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   const OUTBOX_KEY = 'noomium:outbox';
 
   /**
-   * Загрузка outbox из localStorage (четыре очереди, устойчиво к старому
-   * формату v0.6 без priv/privdel).
+   * Загрузка outbox (четыре очереди, устойчиво к формату v0.6).
    * @returns {{announce: string[], del: string[], priv: string[], privdel: string[]}}
    */
   function loadOutbox() {
@@ -3368,7 +3386,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     return { announce: [], del: [], priv: [], privdel: [] };
   }
 
-  /** Сохранить outbox в localStorage. */
+  /** Сохранить outbox. */
   function saveOutbox() {
     try {
       localStorage.setItem(OUTBOX_KEY, JSON.stringify(outbox));
@@ -3389,7 +3407,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   }
 
   /**
-   * Фаза синка для AccountView: 'off' | 'active' | 'idle'.
+   * Фаза синка: 'off' | 'active' | 'idle'.
    * @param {string} phase
    */
   function emitSync(phase) {
@@ -3408,12 +3426,12 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     try { bus.emit('net:history', { loading: loading, window: windowSec }); } catch (_) {}
   }
 
-  /** @returns {boolean} Браузер считает себя офлайн. */
+  /** @returns {boolean} */
   function isOffline() {
     return typeof navigator !== 'undefined' && navigator.onLine === false;
   }
 
-  /** @returns {boolean} Можно ли публиковать. */
+  /** @returns {boolean} */
   function canPublish() {
     return Nostr.isReady() && !isOffline();
   }
@@ -3514,9 +3532,8 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   }
 
   /**
-   * Сброс накопившихся офлайн-операций: priv → announce → del → privdel.
-   * Фазы priv/privdel выполняются только при syncEnabled (иначе
-   * отключённый синк всё равно публиковал бы очередь).
+   * Сброс очередей: priv → announce → del → privdel.
+   * Фазы priv/privdel — только при syncEnabled.
    * @returns {Promise<void>}
    */
   async function flushOutbox() {
@@ -3527,7 +3544,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     flushing = true;
 
     try {
-      // Фаза 1: приватный канон — последовательно, мягко к релеям.
+      // Фаза 1: приватный канон — последовательно.
       if (Config.get('syncEnabled', true)) {
         for (const uid of outbox.priv.slice()) {
           const note = await DB.get(uid).catch(() => null);
@@ -3544,12 +3561,12 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
             if (!note.syncTs) note.syncTs = now;
             DB.put(note).catch(() => {});
           } catch (_) {
-            // Остаётся в очереди для повторной попытки.
+            // В очереди для повторной попытки.
           }
         }
       }
 
-      // Фаза 2: публичные проекции — параллельно, allSettled.
+      // Фаза 2: публичные проекции — параллельно.
       const announceIds = outbox.announce.slice();
       const tasks = announceIds.map(async noteId => {
         const note = await DB.get(noteId).catch(() => null);
@@ -3567,17 +3584,16 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
             if (cur && cur.eventId !== ev.id) {
               cur.eventId = ev.id;
               await DB.put(cur).catch(() => {});
-              // eventId должен доехать в канон на другие устройства
               publishPrivate(cur);
             }
           }
         } catch (_) {
-          // Остаётся в очереди.
+          // В очереди.
         }
       });
       await Promise.allSettled(tasks);
 
-      // Фаза 3: kind 5 — пачкой одним событием.
+      // Фаза 3: kind 5 — пачкой.
       if (outbox.del.length) {
         const ev = Protocol.deleteEvent(outbox.del.slice(), room());
         if (ev) {
@@ -3586,12 +3602,12 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
             outbox.del = [];
             saveOutbox();
           } catch (_) {
-            // Остаётся в очереди.
+            // В очереди.
           }
         }
       }
 
-      // Фаза 4: tombstone канона — последовательно.
+      // Фаза 4: tombstone'ы — последовательно.
       if (Config.get('syncEnabled', true)) {
         for (const uid of outbox.privdel.slice()) {
           try {
@@ -3599,7 +3615,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
             await Nostr.publish(tpl);
             unqueuePrivDel(uid);
           } catch (_) {
-            // Остаётся в очереди.
+            // В очереди.
           }
         }
       }
@@ -3613,10 +3629,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   }
 
   /**
-   * Сканирование при старте:
-   * - shared без eventId → очередь анонса (ремонт офлайн-заметок);
-   * - без canonTs → очередь канона (самолечение: заметки, созданные в
-   *   паузе сети — смена ключа, офлайн, retry-гэп — публикуются здесь).
+   * Сканирование при старте: анонсы без eventId + канон без canonTs.
    * @returns {Promise<void>}
    */
   async function scanLocalUnpublished() {
@@ -3637,8 +3650,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   // ─── Приватный канон: публикация ──────────────────────────────────────────
 
   /**
-   * Опубликовать канон заметки (kind 30078). Очередь при офлайне/сбое.
-   * При успехе ставит canonTs (метка «канон на релее есть»).
+   * Опубликовать канон заметки. При успехе ставит canonTs.
    * @param {Object} note - Локальная заметка.
    * @returns {Promise<void>}
    */
@@ -3666,7 +3678,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   }
 
   /**
-   * Опубликовать tombstone канона (удаление заметки из синка).
+   * Опубликовать tombstone канона.
    * @param {string} uid - Идентификатор заметки.
    * @returns {Promise<void>}
    */
@@ -3691,9 +3703,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
 
   /**
    * Резолв ссылки на родителя для публичной проекции: если родитель —
-   * своя опубликованная заметка, тег parent получает её eventId
-   * (резолвимо сетью). Иначе Protocol использует note.parentId как есть
-   * (uid своего неопубликованного родителя или eventId чужого).
+   * своя опубликованная заметка, тег parent получает её eventId.
    * @param {Object} note - Заметка.
    * @returns {Promise<Object>} Шаблон события kind 1.
    */
@@ -3714,8 +3724,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
 
   /**
    * Одноразовый backsweep: публикация канона для всех локальных заметок
-   * (миграция v0.6 → v0.7). Флаг ставится после enqueue — недоставшее
-   * доедет через outbox и самолечение scanLocalUnpublished.
+   * (миграция v0.6 → v0.7).
    * @returns {Promise<void>}
    */
   async function runBacksweep() {
@@ -3758,10 +3767,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   // ─── Приватный канон: приём ───────────────────────────────────────────────
 
   /**
-   * Применить входящий канон (от своего ключа с другого устройства).
-   * LWW: применяется только при отсутствии локальной версии или при
-   * строго большем syncTs (равенство = эхо своей публикации).
-   * Принятые заметки получают canonTs (канон на релее есть).
+   * Применить входящий канон (LWW по syncTs, tombstone = удаление).
    * @param {Object} d - Результат Protocol.decodePrivate.
    * @returns {Promise<void>}
    */
@@ -3845,7 +3851,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
         onevent: ev => {
           if (!ev || !ev.id) return;
 
-          // Оптимизация: не расшифровывать повторно одно и то же событие.
           if (selfSeen.has(ev.id)) return;
           selfSeen.add(ev.id);
           if (selfSeen.size > 500) {
@@ -3861,7 +3866,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
             .catch(() => {});
         },
         onclose: () => {
-          // Синк критичен: переподписка с фиксированной задержкой, без статусов.
           setTimeout(() => {
             if (started && Config.get('syncEnabled', true)) {
               subscribeSelf();
@@ -3897,7 +3901,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
 
       setStatus('failed');
 
-      // Инвалидируем подписки, чтобы onclose не запускал переподключение.
       subEpoch++;
 
       if (subscription && typeof subscription.close === 'function') {
@@ -3907,7 +3910,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     });
   }
 
-  /** Обрезка seen-множества (комнатного). */
+  /** Обрезка seen. */
   function trimSeen() {
     const max = Config.get('seenMaxSize', 1000);
     if (seen.size <= max) return;
@@ -3924,7 +3927,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
    * Дедупликация контента от одного автора.
    * @param {string} pubkey
    * @param {string} text
-   * @returns {boolean} true, если уже видели такой же текст.
+   * @returns {boolean}
    */
   function isContentDuplicate(pubkey, text) {
     const key = pubkey + '::' + String(text || '').trim();
@@ -3942,8 +3945,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
 
   /**
    * Token bucket для входящих заметок от одного автора.
-   * Стартовый бюджет позволяет загрузить историю при первичной
-   * синхронизации, но защищает от флуда.
    * @param {string} pubkey
    * @returns {boolean}
    */
@@ -3973,7 +3974,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     return false;
   }
 
-  /** Перестройка центроидов префильтра (k-means по публичным заметкам). */
+  /** Перестройка центроидов префильтра. */
   function rebuildCentroids() {
     DB.all().then(notes => {
       const vecs = notes.filter(n => n.shared && n.vector).map(n => n.vector);
@@ -4008,8 +4009,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   // ─── Входящие события (комната) ───────────────────────────────────────────
 
   /**
-   * @param {boolean} hard - true при реальном получении события
-   *   (сбрасывает счётчик реконнектов); false — по 5с-таймауту.
+   * @param {boolean} hard - true при реальном событии (сброс реконнектов).
    */
   function markConnected(hard) {
     if (!started) return;
@@ -4027,15 +4027,12 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   function onEvent(ev) {
     if (!ev) return;
 
-    // Любое полученное событие подтверждает, что сеть жива.
     if (!hasReceivedEvent) {
       markConnected(true);
     }
 
     if (seen.has(ev.id)) return;
 
-    // Свои события комнаты игнорируем, но помечаем как виденные.
-    // (30078 сюда не попадает — отдельная подписка на себя.)
     if (ev.pubkey === Nostr.getPubkey()) {
       seen.add(ev.id);
       trimSeen();
@@ -4062,14 +4059,13 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
 
   /**
    * @param {Object} ev
-   * @returns {boolean} true — пометить seen; false — оставить для повторной обработки.
+   * @returns {boolean}
    */
   function handleIncomingNote(ev) {
     const note = Protocol.decodeNote(ev);
 
     if (!note) return true;
 
-    // Rate-limit: НЕ помечаем seen, чтобы событие могло пройти позже.
     if (!allowIncomingNote(note.authorPubkey)) {
       return false;
     }
@@ -4080,7 +4076,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
 
     peers.set(note.authorPubkey, Date.now());
 
-    // O(1): своя заметка, вернувшаяся от релея (по id или eventId).
     if (DB.hasLocal(note.id)) return true;
 
     DB.cacheGet(note.id).then(existing => {
@@ -4200,9 +4195,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   // ─── Исходящие операции ───────────────────────────────────────────────────
 
   /**
-   * Анонс публичной проекции заметки (kind 1). При успехе eventId
-   * сохраняется и уезжает в канон (чтобы другие устройства могли
-   * удалить проекцию при необходимости).
+   * Анонс публичной проекции (kind 1). eventId сохраняется и уезжает в канон.
    * @param {Object} note
    * @returns {Promise<void>}
    */
@@ -4240,7 +4233,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   }
 
   /**
-   * Запрос удаления публичной проекции с рэлеев (kind 5).
+   * Запрос удаления публичной проекции (kind 5).
    * @param {Object} note - Заметка (нужны id и eventId).
    * @returns {Promise<void>}
    */
@@ -4258,16 +4251,15 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     try {
       await Nostr.publish(ev);
       unqueueDelete(note.eventId);
-      Logger.info('NetService: запрос удаления с рэлеев ' + note.id);
+      Logger.info('NetService: запрос удаления с релеев ' + note.id);
     } catch (e) {
-      Logger.warn('NetService: не удалить с рэлеев, поставлено в очередь', String(e && e.message || e));
+      Logger.warn('NetService: не удалить с релеев, поставлено в очередь', String(e && e.message || e));
       queueDelete(note.eventId);
     }
   }
 
   /**
    * Отправка запроса в сеть при изменении контекста.
-   * В офлайне запросы не отправляем.
    */
   function maybeSendQuery() {
     const ctx = Store.get('context');
@@ -4332,8 +4324,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
 
         setStatus('reconnecting');
 
-        // Экспоненциальный реконнект: base * 2^(n-1), максимум maxDelay,
-        // джиттер ±25% против синхронных штормов.
         const maxAttempts = Config.get('reconnectMaxAttempts', 10);
         const baseDelay = Config.get('reconnectBaseDelay', 1000);
         const maxDelay = Config.get('reconnectMaxDelay', 60000);
@@ -4360,8 +4350,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     if (subscription) {
       setStatus('connecting');
 
-      // Пустая комната: через 5 секунд считаем подключение установленным
-      // (без сброса счётчика реконнектов — только реальное событие его сбрасывает).
       setTimeout(() => {
         if (myEpoch === subEpoch && started && !isOffline()) {
           markConnected(false);
@@ -4452,7 +4440,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
         }));
 
         busUnsubs.push(bus.on('note:updated', note => {
-          // Правки только личных заметок; канон должен узнать новую версию.
           if (note) publishPrivate(note);
         }));
 
@@ -4469,8 +4456,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
 
           if (!note.shared && note.eventId) {
             // ФИКС: сбрасываем eventId СРАЗУ — иначе повторный «в мир»
-            // никогда не опубликует новую проекцию (announceNote exit'ит
-            // по наличию eventId). Старую проекцию удаляем kind 5.
+            // никогда не опубликует новую проекцию. Старую удаляем kind 5.
             const oldEventId = note.eventId;
 
             DB.get(note.id).then(cur => {
@@ -4480,9 +4466,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
               }
               cur.eventId = null;
               return DB.put(cur).then(() => {
-                // Канон должен узнать, что eventId больше нет
                 publishPrivate(cur);
-                // Удаление старой проекции (kind 5, очередь при офлайне)
                 forgetNote({ id: cur.id, eventId: oldEventId });
               });
             }).catch(() => publishPrivate(note));
@@ -4502,9 +4486,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
 
         busUnsubs.push(bus.on('db:change', () => rebuildCentroids()));
 
-        // Смена ключа (вход с другого устройства): очереди и лимитеры
-        // принадлежат старому аккаунту — чистим, чтобы не публиковать
-        // мусор новым ключом и не блокировать restore дедупликацией.
+        // Смена ключа: очереди и лимитеры принадлежат старому аккаунту.
         busUnsubs.push(bus.on('account:changed', () => {
           outbox = { announce: [], del: [], priv: [], privdel: [] };
           saveOutbox();
@@ -4560,6 +4542,28 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
       });
 
     return startPromise;
+  }
+
+  /**
+   * Полное переподключение без потери состояния: пересоздаёт обе подписки,
+   * сбрасывает счётчик реконнектов и немедленно флашит outbox.
+   * Кнопка «Синхронизировать» и клик по статусу сети.
+   */
+  function resync() {
+    if (!Nostr.isReady()) {
+      // Библиотека ещё не загрузилась — полный старт.
+      start();
+      return;
+    }
+
+    reconnectAttempts = 0;
+
+    if (!isOffline()) {
+      subscribeToRoom();
+      if (Config.get('syncEnabled', true)) subscribeSelf();
+    }
+
+    flushOutbox();
   }
 
   /**
@@ -4622,15 +4626,8 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   }
 
   /**
-   * Публичный wipe для Boot/MenuView: удаление всего канона и проекций.
-   *
-   * Надёжность:
-   * - tombstone'ы и kind 5 СНАЧАЛА ставятся в персистентную очередь
-   *   (outbox в localStorage) — wipe корректен и в офлайне;
-   * - доставка сейчас — с бюджетом 15 секунд; недоставленное в бюджет
-   *   при wipe доедет из outbox позже, при fullReset — теряется
-   *   осознанно (best-effort природа удаления в Nostr).
-   *
+   * Публичный wipe: tombstone'ы и kind 5 в персистентный outbox,
+   * доставка с бюджетом 15 секунд.
    * @returns {Promise<void>}
    */
   async function publishWipeAll() {
@@ -4641,7 +4638,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
       return;
     }
 
-    // Публичные проекции: kind 5 пачкой (или в очередь при офлайне).
     if (canPublish()) {
       const pubIds = notes.filter(n => n && n.eventId).map(n => n.eventId);
       if (pubIds.length) {
@@ -4656,14 +4652,12 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
       });
     }
 
-    // Tombstone'ы канона — в персистентную очередь (независимо от сети).
     if (Config.get('syncEnabled', true)) {
       notes.forEach(n => {
         if (n && n.id) queuePrivDel(n.id);
       });
     }
 
-    // Попытка доставить сейчас — с бюджетом.
     if (canPublish()) {
       const WIPE_BUDGET = 15000;
       await Promise.race([
@@ -4673,7 +4667,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     }
   }
 
-  return { start, stop, loadHistory, publishWipeAll };
+  return { start, stop, resync, loadHistory, publishWipeAll };
 }, ['Nostr', 'Protocol', 'DB', 'Ranker', 'Vec', 'Store', 'Config', 'Logger', 'EventBus']);
 // ─── NET/NetService ─── END ─────────────────────────────────────────────────
 
@@ -7631,25 +7625,18 @@ DI.register('NoteView', function (DB, Notes, NoteActions, I18n, Utils, Toast, bu
 
 // ─── UI/AccountView ─── START ───────────────────────────────────────────────
 /**
- * Экран аккаунта: ключ, вход по ключу, экспорт/импорт архива, синк.
+ * Экран аккаунта: ключ, вход, данные (экспорт/импорт), синк.
  *
- * Оркестрирует DOMAIN/Account: все подтверждения, тосты, пароли и
- * скачивание файлов — здесь; вся логика — там.
- *
- * Разделы экрана:
+ * Разделы:
  * 1. Публичный адрес (npub) — всегда виден, безопасен.
- * 2. Ключ: маска по умолчанию; «Показать» → ncryptsec (при доступном
- *    NIP-49, поле пароля опционально) или nsec-fallback (пароль-поле
- *    скрыто — обёртка невозможна). Показ = автокопирование + keyExported.
- * 3. Вход по ключу: nsec/hex/ncryptsec (+пароль) → подтверждение
- *    замены аккаунта → Account.enterKey.
- * 4. Экспорт: файл JSON (с ключом или без); импорт: файл → предпросмотр →
- *    применение (при ключе в архиве — сначала замена ключа, потом заметки;
- *    если ключ архива совпадает с текущим — аккаунт не трогаем).
- * 5. Синк: переключатель, статус (живая подписка sync:status — одна
- *    на всё время работы, в init, без накопления при переоткрытиях).
- *
- * Стили — секции 16–17 style.css (.acc-*, .key-box, .field-*).
+ * 2. Ключ: «Показать» → ncryptsec (при доступном NIP-49, пароль опционален)
+ *    или nsec-fallback (поле пароля скрыто).
+ * 3. Вход по ключу: nsec/hex/ncryptsec (+пароль) → подтверждение.
+ * 4. Данные: «Экспорт» (файл/буфер, ключ вкл/выкл, пароль при NIP-49)
+ *    и «Импорт» (файл/буфер → пароль при ключе в архиве → применение).
+ *    Сам JSON нигде не показывается.
+ * 5. Синк: переключатель, статус, кнопка «Синхронизировать»
+ *    (переподключение и вытягивание канона).
  */
 DI.register('AccountView', function (Account, Modal, Toast, I18n, Config, bus) {
   let unsubs = [];
@@ -7669,13 +7656,44 @@ DI.register('AccountView', function (Account, Modal, Toast, I18n, Config, bus) {
     return b;
   }
 
+  /**
+   * Копирование текста в буфер (тихое; тосты у вызывающих).
+   * @param {string} text
+   * @returns {Promise<boolean>} Успех.
+   */
+  async function copyText(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      try {
+        await navigator.clipboard.writeText(text || '');
+        return true;
+      } catch (_) {
+        return false;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Чтение текста из буфера.
+   * @returns {Promise<string|null>} Текст или null.
+   */
+  async function readClipboard() {
+    if (navigator.clipboard && navigator.clipboard.readText) {
+      try {
+        return await navigator.clipboard.readText();
+      } catch (_) {
+        return null;
+      }
+    }
+    return null;
+  }
+
   // ─── Раздел: ключ ─────────────────────────────────────────────────────────
 
   /**
    * Модалка показа ключа.
-   * Адаптивна к доступности NIP-49: если обёртка паролем невозможна
-   * (нет nip49 в сборке nostr-tools), поле пароля не показывается,
-   * а «Показать» выдаст nsec — незашифрованный ключ.
+   * Адаптивна к NIP-49: без него поле пароля не показывается,
+   * «Показать» выдаст nsec.
    */
   async function openShowKey() {
     const wrapAvailable = await Account.canWrapKey().catch(() => false);
@@ -7683,7 +7701,6 @@ DI.register('AccountView', function (Account, Modal, Toast, I18n, Config, bus) {
     const body = document.createElement('div');
     body.className = 'acc-body';
 
-    // Пароль (опционально) — только когда NIP-49 доступен
     let pwInput = null;
 
     if (wrapAvailable) {
@@ -7734,27 +7751,10 @@ DI.register('AccountView', function (Account, Modal, Toast, I18n, Config, bus) {
       title: I18n.t('account.identity'),
       body,
       buttons: [
-        {
-          text: I18n.t('btn.show'),
-          primary: true,
-          onClick: reveal,
-        },
-        {
-          text: I18n.t('btn.close'),
-          onClick: () => Modal.close(),
-        },
+        { text: I18n.t('btn.show'), primary: true, onClick: reveal },
+        { text: I18n.t('btn.close'), onClick: () => Modal.close() },
       ],
     });
-  }
-
-  /**
-   * Копирование текста в буфер (тихое, без тостов — тосты у вызывающих).
-   * @param {string} text
-   */
-  function copyText(text) {
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(text || '').catch(() => {});
-    }
   }
 
   // ─── Раздел: вход по ключу ────────────────────────────────────────────────
@@ -7788,7 +7788,7 @@ DI.register('AccountView', function (Account, Modal, Toast, I18n, Config, bus) {
     keyField.appendChild(keyInput);
     body.appendChild(keyField);
 
-    // Поле пароля (показывается только для ncryptsec)
+    // Поле пароля (только для ncryptsec)
     const pwField = document.createElement('div');
     pwField.className = 'field';
     pwField.style.display = 'none';
@@ -7804,7 +7804,6 @@ DI.register('AccountView', function (Account, Modal, Toast, I18n, Config, bus) {
     pwField.appendChild(pwInput);
     body.appendChild(pwField);
 
-    // Показ пароля при ncryptsec
     keyInput.addEventListener('input', () => {
       const v = keyInput.value.trim();
       pwField.style.display = v.startsWith('ncryptsec1') ? '' : 'none';
@@ -7846,13 +7845,16 @@ DI.register('AccountView', function (Account, Modal, Toast, I18n, Config, bus) {
     });
   }
 
-  // ─── Раздел: экспорт / импорт ──────────────────────────────────────────────
+  // ─── Раздел: данные — экспорт ─────────────────────────────────────────────
 
   /**
-   * Модалка экспорта: без ключа или с ключом (пароль опционален),
-   * скачивание файла.
+   * Модалка экспорта: включение ключа (переключатель), пароль при
+   * доступном NIP-49, «Скачать файл» и «Скопировать JSON».
+   * Сам JSON не показывается.
    */
-  function openExport() {
+  async function openExport() {
+    const wrapAvailable = await Account.canWrapKey().catch(() => false);
+
     const body = document.createElement('div');
     body.className = 'acc-body';
 
@@ -7861,39 +7863,105 @@ DI.register('AccountView', function (Account, Modal, Toast, I18n, Config, bus) {
     desc.textContent = I18n.t('account.export.desc');
     body.appendChild(desc);
 
-    const pwField = document.createElement('div');
-    pwField.className = 'field';
+    // Переключатель «Включить ключ» (режим signal/percent из MenuView)
+    let withKey = false;
 
-    const pwLabel = document.createElement('span');
-    pwLabel.className = 'field-label';
-    pwLabel.textContent = I18n.t('account.password.set');
-    pwField.appendChild(pwLabel);
+    const displayGroup = document.createElement('div');
+    displayGroup.className = 'range-display';
 
-    const pwInput = document.createElement('input');
-    pwInput.type = 'password';
-    pwInput.className = 'field-input';
-    pwField.appendChild(pwInput);
-    body.appendChild(pwField);
+    const lbl = document.createElement('span');
+    lbl.className = 'range-display-lbl';
+    lbl.textContent = I18n.t('account.export.withkey');
+    displayGroup.appendChild(lbl);
 
-    const run = (includeKey) => {
-      Account.exportArchive(includeKey, includeKey ? pwInput.value : '').then(res => {
-        if (!res) {
-          Toast.show('err', I18n.t('toast.copy.fail'));
-          return;
-        }
-        downloadText(res.json, res.filename);
-        Modal.close();
-        Toast.show('ok', I18n.t('account.export.file'));
+    const btnsWrap = document.createElement('div');
+    btnsWrap.className = 'range-display-btns';
+
+    /** @type {Array<HTMLButtonElement>} */
+    const btns = [];
+
+    function paint() {
+      btns.forEach(b => {
+        const mode = b.getAttribute('data-key-mode') === 'on';
+        b.classList.toggle('selected', mode === withKey);
       });
+    }
+
+    [['off', false], ['on', true]].forEach(([mode, val]) => {
+      const btn = document.createElement('button');
+      btn.className = 'nv-act';
+      btn.setAttribute('data-key-mode', mode);
+      btn.style.cssText = 'flex:1;font-size:12px;';
+      btn.textContent = mode === 'on' ? I18n.t('account.export.withkey') : I18n.t('btn.cancel');
+
+      btn.addEventListener('click', () => {
+        withKey = val;
+        paint();
+        if (pwField) pwField.style.display = (withKey && wrapAvailable) ? '' : 'none';
+      });
+
+      btns.push(btn);
+      btnsWrap.appendChild(btn);
+    });
+
+    paint();
+    displayGroup.appendChild(btnsWrap);
+    body.appendChild(displayGroup);
+
+    const withKeyHint = document.createElement('div');
+    withKeyHint.className = 'field-hint';
+    withKeyHint.textContent = I18n.t('account.export.withkey.hint');
+    body.appendChild(withKeyHint);
+
+    // Пароль — только при доступном NIP-49 и включённом ключе
+    let pwInput = null;
+    let pwField = null;
+
+    if (wrapAvailable) {
+      pwField = document.createElement('div');
+      pwField.className = 'field';
+      pwField.style.display = 'none';
+
+      const pwLabel = document.createElement('span');
+      pwLabel.className = 'field-label';
+      pwLabel.textContent = I18n.t('account.password.set');
+      pwField.appendChild(pwLabel);
+
+      pwInput = document.createElement('input');
+      pwInput.type = 'password';
+      pwInput.className = 'field-input';
+      pwField.appendChild(pwInput);
+      body.appendChild(pwField);
+    }
+
+    const run = async () => {
+      const res = await Account.exportArchive(withKey, withKey && wrapAvailable && pwInput ? pwInput.value : '');
+      if (!res) {
+        Toast.show('err', I18n.t('toast.copy.fail'));
+        return;
+      }
+      Modal.close();
+      downloadText(res.json, res.filename);
+      Toast.show('ok', I18n.t('account.export.title'));
+    };
+
+    const runCopy = async () => {
+      const res = await Account.exportArchive(withKey, withKey && wrapAvailable && pwInput ? pwInput.value : '');
+      if (!res) {
+        Toast.show('err', I18n.t('toast.copy.fail'));
+        return;
+      }
+      const ok = await copyText(res.json);
+      Toast.show(ok ? 'ok' : 'err', I18n.t(ok ? 'toast.json.copied' : 'toast.clip.bad'));
     };
 
     Modal.open({
-      title: I18n.t('account.export.file'),
+      title: I18n.t('account.export.title'),
       body,
       buttons: [
         { text: I18n.t('btn.cancel'), onClick: () => Modal.close() },
-        { text: I18n.t('account.export.file'), onClick: () => run(false) },
-        { text: I18n.t('btn.download'), primary: true, onClick: () => run(true) },
+        { text: I18n.t('btn.copy'), onClick: runCopy },
+        { text: I18n.t('btn.download'), primary: true, onClick: run },
       ],
     });
   }
@@ -7919,10 +7987,37 @@ DI.register('AccountView', function (Account, Modal, Toast, I18n, Config, bus) {
     }
   }
 
+  // ─── Раздел: данные — импорт ──────────────────────────────────────────────
+
   /**
-   * Импорт архива: выбор файла → предпросмотр → подтверждение → применение.
+   * Модалка импорта: «Загрузить файл» или «Вставить из буфера».
    */
   function openImport() {
+    const body = document.createElement('div');
+    body.className = 'acc-body';
+
+    const desc = document.createElement('div');
+    desc.className = 'acc-desc';
+    desc.textContent = I18n.t('account.import.desc');
+    body.appendChild(desc);
+
+    const actions = document.createElement('div');
+    actions.className = 'acc-actions';
+    actions.appendChild(actionBtn(I18n.t('account.import.file'), importFromFile));
+    actions.appendChild(actionBtn(I18n.t('account.import.clip'), importFromClipboard));
+    body.appendChild(actions);
+
+    Modal.open({
+      title: I18n.t('account.import.title'),
+      body,
+      buttons: [{ text: I18n.t('btn.close'), onClick: () => Modal.close() }],
+    });
+  }
+
+  /**
+   * Импорт из файла.
+   */
+  function importFromFile() {
     const input = document.createElement('input');
     input.type = 'file';
     input.accept = 'application/json,.json';
@@ -7938,12 +8033,11 @@ DI.register('AccountView', function (Account, Modal, Toast, I18n, Config, bus) {
       const reader = new FileReader();
       reader.onload = () => {
         const parsed = Account.parseArchive(String(reader.result || ''));
-
         if (!parsed.ok) {
           Toast.show('err', I18n.t('account.import.bad'));
           return;
         }
-
+        Modal.close();
         confirmImport(parsed.archive);
       };
       reader.onerror = () => {
@@ -7956,15 +8050,72 @@ DI.register('AccountView', function (Account, Modal, Toast, I18n, Config, bus) {
   }
 
   /**
+   * Импорт из буфера обмена.
+   * При недоступном Clipboard API — fallback: поле для вставки.
+   */
+  async function importFromClipboard() {
+    const clip = await readClipboard();
+
+    if (clip && clip.trim()) {
+      const parsed = Account.parseArchive(clip);
+      if (parsed.ok) {
+        Modal.close();
+        confirmImport(parsed.archive);
+        return;
+      }
+      Toast.show('err', I18n.t('account.import.bad'));
+      return;
+    }
+
+    // Clipboard API недоступен/пуст — поле для ручной вставки.
+    const body = document.createElement('div');
+    body.className = 'acc-body';
+
+    const field = document.createElement('div');
+    field.className = 'field';
+
+    const label = document.createElement('span');
+    label.className = 'field-label';
+    label.textContent = I18n.t('account.import.clip');
+    field.appendChild(label);
+
+    const ta = document.createElement('textarea');
+    ta.className = 'field-input mono';
+    ta.style.cssText = 'min-height:80px;resize:vertical;';
+    ta.placeholder = I18n.t('account.import.clip.ph');
+    field.appendChild(ta);
+    body.appendChild(field);
+
+    Modal.open({
+      title: I18n.t('account.import.title'),
+      body,
+      buttons: [
+        { text: I18n.t('btn.cancel'), onClick: () => Modal.close() },
+        {
+          text: I18n.t('btn.import'),
+          primary: true,
+          onClick: () => {
+            const parsed = Account.parseArchive(ta.value);
+            if (!parsed.ok) {
+              Toast.show('err', I18n.t('account.import.clip.empty'));
+              return;
+            }
+            Modal.close();
+            confirmImport(parsed.archive);
+          },
+        },
+      ],
+    });
+  }
+
+  /**
    * Подтверждение импорта с предпросмотром количества заметок.
    *
    * Порядок применения:
    * - без ключа в архиве — сразу заметки (upsert по LWW);
    * - с ключом, если он ОТЛИЧАЕТСЯ от текущего — сначала замена аккаунта
    *   (сброс базы через enterKey), затем заметки;
-   * - с ключом, если он СОВПАДАЕТ с текущим — аккаунт и базу НЕ трогаем
-   *   (иначе повторный импорт своего бэкапа на том же устройстве стёр бы
-   *   заметки, созданные после бэкапа); upsert дорезолит новое/старое.
+   * - с ключом, если он СОВПАДАЕТ с текущим — аккаунт и базу НЕ трогаем.
    *
    * @param {Object} archive - Архив из Account.parseArchive.
    */
@@ -7997,8 +8148,8 @@ DI.register('AccountView', function (Account, Modal, Toast, I18n, Config, bus) {
     // Без ключа — обычное подтверждение.
     if (!archive.ncryptsec) {
       Modal.confirm(
-        I18n.t('account.import.file'),
-        I18n.t('account.import.confirm.d') + ' (' + archive.noteCount + ')',
+        I18n.t('account.import.confirm'),
+        I18n.t('account.import.desc') + ' (' + archive.noteCount + ')',
         () => { apply(''); },
         I18n.t('btn.import')
       );
@@ -8006,56 +8157,62 @@ DI.register('AccountView', function (Account, Modal, Toast, I18n, Config, bus) {
     }
 
     // С ключом — сначала пароль, затем применение.
-    const body = document.createElement('div');
-    body.className = 'acc-body';
+    // Поле пароля показывается только если ключ обёрнут (ncryptsec),
+    // для nsec-архива — сразу подтверждение.
+    if (archive.ncryptsec.startsWith('ncryptsec1')) {
+      const body = document.createElement('div');
+      body.className = 'acc-body';
 
-    const desc = document.createElement('div');
-    desc.className = 'acc-desc';
-    desc.textContent = I18n.t('account.import.confirm.d') + ' (' + archive.noteCount + ')';
-    body.appendChild(desc);
+      const desc = document.createElement('div');
+      desc.className = 'acc-desc';
+      desc.textContent = I18n.t('account.import.desc') + ' (' + archive.noteCount + ')';
+      body.appendChild(desc);
 
-    const pwField = document.createElement('div');
-    pwField.className = 'field';
+      const pwField = document.createElement('div');
+      pwField.className = 'field';
 
-    const pwLabel = document.createElement('span');
-    pwLabel.className = 'field-label';
-    pwLabel.textContent = I18n.t('account.password.set');
-    pwField.appendChild(pwLabel);
+      const pwLabel = document.createElement('span');
+      pwLabel.className = 'field-label';
+      pwLabel.textContent = I18n.t('account.password.set');
+      pwField.appendChild(pwLabel);
 
-    const pwInput = document.createElement('input');
-    pwInput.type = 'password';
-    pwInput.className = 'field-input';
-    pwField.appendChild(pwInput);
-    body.appendChild(pwField);
+      const pwInput = document.createElement('input');
+      pwInput.type = 'password';
+      pwInput.className = 'field-input';
+      pwField.appendChild(pwInput);
+      body.appendChild(pwField);
 
-    const hint = document.createElement('div');
-    hint.className = 'field-hint';
-    hint.textContent = I18n.t('account.nsec.hint');
-    body.appendChild(hint);
-
-    Modal.open({
-      title: I18n.t('account.import.file'),
-      body,
-      buttons: [
-        { text: I18n.t('btn.cancel'), onClick: () => Modal.close() },
-        {
-          text: I18n.t('btn.import'),
-          primary: true,
-          onClick: () => {
-            Modal.close();
-            apply(pwInput.value);
+      Modal.open({
+        title: I18n.t('account.import.confirm'),
+        body,
+        buttons: [
+          { text: I18n.t('btn.cancel'), onClick: () => Modal.close() },
+          {
+            text: I18n.t('btn.import'),
+            primary: true,
+            onClick: () => {
+              Modal.close();
+              apply(pwInput.value);
+            },
           },
-        },
-      ],
-    });
+        ],
+      });
+      return;
+    }
+
+    // nsec-архив: ключ без пароля.
+    Modal.confirm(
+      I18n.t('account.import.confirm'),
+      I18n.t('account.import.desc') + ' (' + archive.noteCount + ')',
+      () => { apply(''); },
+      I18n.t('btn.import')
+    );
   }
 
   // ─── Раздел: синк ─────────────────────────────────────────────────────────
 
   /**
    * Обновление индикатора статуса синка в ОТКРЫТОМ экране аккаунта.
-   * Подписка на sync:status живёт в init() — одна на всё время работы,
-   * листенеры не накапливаются при повторных открытиях экрана.
    * @param {string} phase - 'off' | 'active' | 'idle'.
    */
   function paintSyncStatus(phase) {
@@ -8076,7 +8233,7 @@ DI.register('AccountView', function (Account, Modal, Toast, I18n, Config, bus) {
   }
 
   /**
-   * Ряд синка: переключатель + статус.
+   * Ряд синка: переключатель + статус + кнопка «Синхронизировать».
    * @returns {HTMLDivElement}
    */
   function buildSyncRow() {
@@ -8125,10 +8282,26 @@ DI.register('AccountView', function (Account, Modal, Toast, I18n, Config, bus) {
     syncLine.appendChild(toggleBtn);
     row.appendChild(syncLine);
 
+    // Кнопка «Синхронизировать»: переподключение + вытягивание канона.
+    const nowHint = document.createElement('div');
+    nowHint.className = 'acc-desc';
+    nowHint.textContent = I18n.t('account.sync.now.hint');
+    row.appendChild(nowHint);
+
+    const nowActions = document.createElement('div');
+    nowActions.className = 'acc-actions';
+    nowActions.appendChild(actionBtn(I18n.t('account.sync.now'), () => {
+      Toast.show('info', I18n.t('toast.sync.now'));
+      try {
+        const NetService = DI.resolve('NetService');
+        NetService.resync();
+      } catch (_) {}
+    }));
+    row.appendChild(nowActions);
+
     paint();
 
-    // Начальный статус — красим локально (экран ещё не в DOM,
-    // paintSyncStatus его не найдёт; дальше живёт подписка из init).
+    // Начальный статус — локально (экран ещё не в DOM).
     const phase = Config.get('syncEnabled', true) ? 'idle' : 'off';
     dot.className = 'dot ' + (phase === 'off' ? 'err' : phase === 'active' ? 'load' : 'ok');
     statusTxt.textContent = phase === 'off' ? I18n.t('account.sync.off') : I18n.t('account.sync.on');
@@ -8170,7 +8343,6 @@ DI.register('AccountView', function (Account, Modal, Toast, I18n, Config, bus) {
       }));
       sec.appendChild(actions);
 
-      // Вставляем первой секцией (npub — верх экрана)
       body.insertBefore(sec, body.firstChild);
     }).catch(() => {});
 
@@ -8202,27 +8374,27 @@ DI.register('AccountView', function (Account, Modal, Toast, I18n, Config, bus) {
 
     body.appendChild(keySec);
 
-    // Секция 4: экспорт / импорт
-    const ioSec = document.createElement('div');
-    ioSec.className = 'acc-section';
+    // Секция 4: данные (экспорт/импорт)
+    const dataSec = document.createElement('div');
+    dataSec.className = 'acc-section';
 
-    const ioTitle = document.createElement('span');
-    ioTitle.className = 'acc-title';
-    ioTitle.textContent = I18n.t('account.export.file');
-    ioSec.appendChild(ioTitle);
+    const dataTitle = document.createElement('span');
+    dataTitle.className = 'acc-title';
+    dataTitle.textContent = I18n.t('account.data.section');
+    dataSec.appendChild(dataTitle);
 
-    const ioDesc = document.createElement('div');
-    ioDesc.className = 'acc-desc';
-    ioDesc.textContent = I18n.t('account.export.desc');
-    ioSec.appendChild(ioDesc);
+    const dataDesc = document.createElement('div');
+    dataDesc.className = 'acc-desc';
+    dataDesc.textContent = I18n.t('account.data.desc');
+    dataSec.appendChild(dataDesc);
 
-    const ioActions = document.createElement('div');
-    ioActions.className = 'acc-actions';
-    ioActions.appendChild(actionBtn(I18n.t('btn.download'), openExport));
-    ioActions.appendChild(actionBtn(I18n.t('btn.import'), openImport));
-    ioSec.appendChild(ioActions);
+    const dataActions = document.createElement('div');
+    dataActions.className = 'acc-actions';
+    dataActions.appendChild(actionBtn(I18n.t('account.export.title'), openExport));
+    dataActions.appendChild(actionBtn(I18n.t('account.import.title'), openImport));
+    dataSec.appendChild(dataActions);
 
-    body.appendChild(ioSec);
+    body.appendChild(dataSec);
 
     // Секция 5: синк
     body.appendChild(buildSyncRow());
@@ -8235,9 +8407,7 @@ DI.register('AccountView', function (Account, Modal, Toast, I18n, Config, bus) {
   }
 
   /**
-   * Инициализация: подписка на sync:status (одна, навсегда — статус
-   * красится только если экран аккаунта сейчас открыт) и на
-   * account:changed (пересборка открытого экрана после замены ключа).
+   * Инициализация: подписки на sync:status и account:changed.
    */
   function init() {
     unsubs.push(bus.on('sync:status', e => {
@@ -8269,22 +8439,11 @@ DI.register('AccountView', function (Account, Modal, Toast, I18n, Config, bus) {
 /**
  * Меню настроек и переключение экранов (Поток / База).
  *
- * Содержит:
- * - Переключение темы (с установкой userThemeOverride для Telegram)
- * - Переключение языка
- * - Настройки ранжирования (ползунки + режим отображения)
- * - Переход на экран аккаунта (новое)
- * - Переход между экранами Поток/База
- * - Стирание базы и полный сброс
+ * Дизайн v0.7.4: список строк со значением справа (.menu-list / .menu-row,
+ * style.css секция 19). Убраны: кнопки База/Поток (переключение — иконкой
+ * ▤ в шапке), иконки-префиксы.
  *
- * Отличия от v0.6:
- * - ФИКС #2: предпросмотр ранжирования через i18n-ключ с параметрами
- *   (был русский хардкод);
- * - ФИКС #3: единый setView — подпись на 'view:set' из шины (wipe-обработчик
- *   Boot сбрасывает экран корректно);
- * - ФИКС #6: мёртвые .tab-b удалены;
- * - Слайдеры на CSS-классах (style.css, секция 15) вместо инлайна;
- * - Очистка Provenance-кэша удалена — модуль самоинвалидируется (волна 8).
+ * fullReset: tombstone'ы через NetService.publishWipeAll перед очисткой.
  */
 DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboarding, DB, Nostr) {
   let unsubs = [];
@@ -8329,8 +8488,35 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboar
   }
 
   /**
+   * Строка меню: подпись слева, значение справа.
+   * @param {string} label - Подпись.
+   * @param {string} [val] - Значение справа (не обязательное).
+   * @param {Function} onClick - Обработчик клика.
+   * @param {boolean} [danger] - Красная строка.
+   * @returns {HTMLButtonElement}
+   */
+  function menuRow(label, val, onClick, danger) {
+    const row = document.createElement('button');
+    row.className = 'menu-row' + (danger ? ' danger' : '');
+    row.addEventListener('click', onClick);
+
+    const lbl = document.createElement('span');
+    lbl.textContent = label;
+    row.appendChild(lbl);
+
+    if (val) {
+      const v = document.createElement('span');
+      v.className = 'menu-row-val';
+      v.textContent = val;
+      row.appendChild(v);
+    }
+
+    return row;
+  }
+
+  /**
    * Модальное окно настроек ранжирования.
-   * Три ползунка + режим отображения + живой предпросмотр.
+   * Три ползунка + режим отображения + живой предпросмотр (3 строки).
    */
   function openRankingSettings() {
     const body = document.createElement('div');
@@ -8415,21 +8601,25 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboar
       body.appendChild(group);
     });
 
-    // Живой предпросмотр: что значит текущая настройка (ФИКС #2)
+    // Живой предпросмотр: три строки без переносов
     const previewEl = document.createElement('div');
     previewEl.className = 'range-preview';
+
+    const pvRelevant = document.createElement('div');
+    const pvSeren = document.createElement('div');
+    const pvHidden = document.createElement('div');
+    previewEl.appendChild(pvRelevant);
+    previewEl.appendChild(pvSeren);
+    previewEl.appendChild(pvHidden);
 
     function updatePreview() {
       const threshold = parseFloat(valueEls['threshold'].slider.value);
       const serendipity = parseFloat(valueEls['serendipity'].slider.value);
       const lowerBound = threshold - serendipity;
 
-      previewEl.textContent = I18n.t('preview.ranking', {
-        relevant: Math.round(threshold * 100),
-        serenLo: Math.round(lowerBound * 100),
-        serenHi: Math.round(threshold * 100),
-        hidden: Math.round(lowerBound * 100),
-      });
+      pvRelevant.textContent = I18n.t('preview.relevant', { lo: Math.round(threshold * 100) });
+      pvSeren.textContent = I18n.t('preview.seren', { lo: Math.round(lowerBound * 100), hi: Math.round(threshold * 100) });
+      pvHidden.textContent = I18n.t('preview.hidden', { lo: Math.round(lowerBound * 100) });
     }
 
     updatePreview();
@@ -8544,8 +8734,6 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboar
   /**
    * Полный сброс: удаление всех данных (БД, кэш, localStorage, Service Worker).
    * Safari-safe: проверка `typeof indexedDB.databases === 'function'`.
-   * Канон: tombstone'ы отправит publishWipeAll (вызывается Boot'ом до этого
-   * метода? — нет: здесь свой вызов; см. код ниже).
    */
   function fullReset() {
     Modal.confirm(
@@ -8606,108 +8794,59 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboar
    */
   function openMenu() {
     const body = document.createElement('div');
-    body.style.cssText = 'display:flex;flex-direction:column;gap:12px;';
+    body.className = 'menu-list';
 
     // Как это работает
-    const helpBtn = document.createElement('button');
-    helpBtn.className = 'nv-act';
-    helpBtn.textContent = '? ' + I18n.t('menu.help');
-    helpBtn.addEventListener('click', () => {
+    body.appendChild(menuRow(I18n.t('menu.help'), '', () => {
       Modal.close();
       Onboarding.showHelp(false);
-    });
-    body.appendChild(helpBtn);
+    }));
 
-    // Переключение темы
-    const themeBtn = document.createElement('button');
-    themeBtn.className = 'nv-act';
-    themeBtn.textContent = I18n.t('menu.theme') + ': ' + (Config.get('theme', 'dark') === 'dark' ? '🌙' : '☀️');
-    themeBtn.addEventListener('click', () => {
+    // Тема
+    body.appendChild(menuRow(I18n.t('menu.theme'), I18n.t(Config.get('theme', 'dark') === 'dark' ? 'theme.dark' : 'theme.light'), () => {
       const next = Config.get('theme', 'dark') === 'dark' ? 'light' : 'dark';
       applyTheme(next);
-      // Помечаем что тема выбрана вручную — Telegram не должен её перезаписывать
+      // Ручная тема имеет приоритет над Telegram
       Config.set('userThemeOverride', true);
       Modal.close();
-      Toast.show('ok', I18n.t('menu.theme') + ' → ' + next);
-    });
-    body.appendChild(themeBtn);
+      Toast.show('ok', I18n.t('menu.theme') + ' → ' + I18n.t(next === 'dark' ? 'theme.dark' : 'theme.light'));
+    }));
 
-    // Переключение языка
-    const langBtn = document.createElement('button');
-    langBtn.className = 'nv-act';
-    langBtn.textContent = I18n.t('menu.lang') + ': ' + I18n.getLang().toUpperCase();
-    langBtn.addEventListener('click', () => {
-      const next = I18n.getLang() === 'ru' ? 'en' : 'ru';
-      I18n.setLang(next);
+    // Язык
+    body.appendChild(menuRow(I18n.t('menu.lang'), I18n.getLang().toUpperCase(), () => {
+      I18n.setLang(I18n.getLang() === 'ru' ? 'en' : 'ru');
       Modal.close();
-    });
-    body.appendChild(langBtn);
+    }));
 
     // Настройки ранжирования
-    const rankingBtn = document.createElement('button');
-    rankingBtn.className = 'nv-act';
-    rankingBtn.textContent = '⚙ ' + I18n.t('menu.ranking');
-    rankingBtn.addEventListener('click', () => {
+    body.appendChild(menuRow(I18n.t('menu.ranking'), '', () => {
       Modal.close();
       openRankingSettings();
-    });
-    body.appendChild(rankingBtn);
+    }));
 
-    // Аккаунт и ключ (новое)
-    const accountBtn = document.createElement('button');
-    accountBtn.className = 'nv-act';
-    accountBtn.textContent = '⚿ ' + I18n.t('menu.account');
-    accountBtn.addEventListener('click', () => {
+    // Аккаунт и ключ
+    body.appendChild(menuRow(I18n.t('menu.account'), '', () => {
       Modal.close();
       DI.resolve('AccountView').open();
-    });
-    body.appendChild(accountBtn);
-
-    // Переход: База
-    const goBase = document.createElement('button');
-    goBase.className = 'nv-act';
-    goBase.textContent = I18n.t('tab.base');
-    goBase.addEventListener('click', () => {
-      Modal.close();
-      setView('base');
-    });
-    body.appendChild(goBase);
-
-    // Переход: Поток
-    const goStream = document.createElement('button');
-    goStream.className = 'nv-act';
-    goStream.textContent = I18n.t('tab.stream');
-    goStream.addEventListener('click', () => {
-      Modal.close();
-      setView('stream');
-    });
-    body.appendChild(goStream);
+    }));
 
     // Стирание базы
-    const wipe = document.createElement('button');
-    wipe.className = 'nv-act danger';
-    wipe.textContent = I18n.t('base.wipe');
-    wipe.addEventListener('click', () => {
+    body.appendChild(menuRow(I18n.t('base.wipe'), '', () => {
       Modal.close();
       Modal.confirm(I18n.t('base.wipe'), I18n.t('base.wipe.confirm'), () => {
         try { bus.emit('wipe:request'); } catch (_) {}
       });
-    });
-    body.appendChild(wipe);
+    }, true));
 
     // Полный сброс
-    const resetBtn = document.createElement('button');
-    resetBtn.className = 'nv-act danger';
-    resetBtn.textContent = I18n.t('menu.fullreset');
-    resetBtn.addEventListener('click', () => {
+    body.appendChild(menuRow(I18n.t('menu.fullreset'), '', () => {
       Modal.close();
       fullReset();
-    });
-    body.appendChild(resetBtn);
+    }, true));
 
     // Версия приложения
     const version = document.createElement('div');
-    version.style.cssText = 'text-align:center;font-size:11px;color:var(--text-3);margin-top:8px;';
+    version.className = 'menu-version';
     version.textContent = 'v' + APP_VERSION;
     body.appendChild(version);
 
@@ -8715,7 +8854,7 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboar
   }
 
   /**
-   * Инициализация: тема, кнопки шапки, подписка на view:set (фикс #3).
+   * Инициализация: тема, кнопки шапки, подписка на view:set.
    */
   function init() {
     applyTheme(Config.get('theme', 'dark'));
@@ -8730,7 +8869,7 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboar
       );
     }
 
-    // ФИКС #3: внешний сброс экрана (wipe в Boot) — через шину, единый setView.
+    // Внешний сброс экрана (wipe в Boot) — через шину, единый setView.
     unsubs.push(bus.on('view:set', p => {
       if (p && p.view) setView(p.view);
     }));
