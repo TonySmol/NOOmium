@@ -296,15 +296,16 @@ select:focus-visible {
 }
 
 /* Спиннер для кнопок в состоянии «отправляется».
-   Заменяет текстовое «…» — всегда оптически по центру. */
+   Тёмная обводка на янтарном, видимая в обеих темах. */
 .btn-spinner {
   display: block;
   width: 14px;
   height: 14px;
-  border: 2px solid rgba(26, 18, 6, 0.25);
+  border: 2px solid rgba(26, 18, 6, 0.3);
   border-top-color: #1a1206;
   border-radius: 50%;
   animation: spin 0.7s linear infinite;
+  flex-shrink: 0;
 }
 
 @keyframes spin {
@@ -990,6 +991,16 @@ body.ready #app { display: flex; }
 #btn-send:active:not(:disabled) { transform: scale(0.95); }
 #btn-send.sending { opacity: 0.75; cursor: wait; }
 
+/* Заглушка иконки до инициализации Composer (мгновение до JS):
+   невидима, держит размеры, чтобы кнопка не «прыгала». */
+#btn-send .send-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 17px;
+  height: 17px;
+}
+
 /* ═══════════════════════════════════════════════════════════════════════════════
    10. БАЗА (BASE VIEW)
    ═══════════════════════════════════════════════════════════════════════════════ */
@@ -1207,15 +1218,32 @@ body.ready #app { display: flex; }
   min-height: 0;
 }
 
-/* Футер модалки: перенос на узких экранах вместо вылезания */
+/* Футер модалки: сетка кнопок.
+   Десктоп: все в один ряд, растянуты от края до края с равными зазорами
+   (никаких «Отмена отдельно слева» / «кучка справа»).
+   Мобилке (<480px): каждая кнопка на всю ширину, стеком — крупные цели. */
 #modal-f {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
   gap: 8px;
   padding: 14px 16px;
   border-top: 1px solid var(--line);
   flex-shrink: 0;
+}
+
+#modal-f .mbtn {
+  width: 100%;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding: 9px 10px;
+}
+
+@media (max-width: 480px) {
+  #modal-f {
+    grid-template-columns: 1fr;
+  }
 }
 
 /* Кнопки в футере модалок — высота 40 (шкала) */
@@ -1625,21 +1653,7 @@ body.ready #app { display: flex; }
 }
 
 /* Парные переключатели (signal/percent, вкл/выкл ключа):
-   grid гарантирует ровные равные кнопки на любом экране */
-.range-display {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding-top: 10px;
-  border-top: 1px solid var(--line);
-}
-
-.range-display-lbl {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text);
-}
-
+   grid — равные ровные половинки на любом разрешении */
 .range-display-btns {
   display: grid;
   grid-template-columns: 1fr 1fr;
