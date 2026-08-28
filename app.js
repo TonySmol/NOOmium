@@ -38,7 +38,7 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 // ВЕРСИЯ ПРИЛОЖЕНИЯ
 // ═══════════════════════════════════════════════════════════════════════════════
-const APP_VERSION = '0.7.2';
+const APP_VERSION = '0.7.3';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CORE/DI — ПРЕАМБУЛА
@@ -6686,8 +6686,13 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
  *
  * Три режима отображения:
  * 1. Без контекста: хронологический поток (все заметки)
- * 2. Пин: все релевантные + озарения, отсортированные по убыванию скора
- * 3. Ввод/дрейф: заметки из активного сегмента (Моё / Мир / Озарения)
+ * 2. Пин ИЛИ дрейф: единый список «релевантные + озарения» по убыванию
+ *    скора. Дрейф отличается только вектором контекста (текст ввода
+ *    вместо текста пина) — лента выглядит так же, БЕЗ сегментов.
+ *    (Изменение против v0.6: раньше дрейф включал сегменты — по
+ *    фидбеку владельца продукта дрейф = «та же лента, другой вектор».)
+ * 3. Чистый ввод (без пина): заметки из активного сегмента
+ *    (Моё / Мир / Озарения) — сегменты видны.
  *
  * Карточка заметки содержит:
  * - Текст
@@ -6698,8 +6703,7 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
  * - Дату
  * - Кнопку «✎ открыть» (только для своих заметок)
  *
- * Отличие от v0.6: обрезка текста в модалках предков/потомков —
- * по Config.truncateTextLength (было захардкожено 140).
+ * Обрезка текста в модалках — по Config.truncateTextLength.
  */
 DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Influence, Provenance, Modal, NetService) {
   let feedEl, emptyEl, emptyT, segBar, ctxBanner, ctxSrc, ctxTxt, ctxX;
@@ -7042,7 +7046,9 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
     const isDrift = ctx.source === 'drift';
     const isRanked = isPinnedMode || isTyping || isDrift;
 
-    segBar.classList.toggle('on', isTyping || isDrift);
+    // Сегменты — только при чистом вводе (без пина). Дрейф рендерится
+    // как пин: единая лента, вектор контекста — от текста ввода.
+    segBar.classList.toggle('on', isTyping);
     ctxBanner.classList.toggle('on', isPinnedMode || isDrift);
 
     if (isPinnedMode || isDrift) {
@@ -7060,13 +7066,13 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
 
     let notes;
 
-    if (isPinnedMode) {
-      // Пин: все релевантные + озарения, по убыванию скора
+    if (isPinnedMode || isDrift) {
+      // Пин/дрейф: все релевантные + озарения, по убыванию скора
       notes = [...state.lists.local, ...state.lists.world, ...state.lists.seren]
         .filter(n => n.id !== ctx.noteId)
         .sort((a, b) => (b.score || 0) - (a.score || 0));
-    } else if (isTyping || isDrift) {
-      // Ввод/дрейф: заметки из активного сегмента
+    } else if (isTyping) {
+      // Чистый ввод: заметки из активного сегмента
       notes = state.lists[state.seg] || [];
     } else {
       // Без контекста: хронологический поток
@@ -7078,9 +7084,9 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
     if (!notes.length) {
       emptyEl.classList.add('on');
 
-      emptyT.textContent = isPinnedMode
+      emptyT.textContent = (isPinnedMode || isDrift)
         ? I18n.t('empty.world.t')
-        : ((isTyping || isDrift) ? I18n.t('empty.' + state.seg + '.t') : I18n.t('empty.local.t'));
+        : (isTyping ? I18n.t('empty.' + state.seg + '.t') : I18n.t('empty.local.t'));
     } else {
       emptyEl.classList.remove('on');
 
