@@ -1,17 +1,16 @@
 /* ═══════════════════════════════════════════════════════════════════════════════
-   NOOmium — style.css (v0.7.6)
+   NOOmium — style.css (v0.7.6, финальная полировка)
    Дизайн-система: нейтральная высококонтрастная палитра (Linear / Vercel / Stripe).
    Тёмная тема по умолчанию, светлая через [data-theme="light"].
 
-   Принципы v0.7.6:
-   - Шкала высот: 34 (компакт: btn-send, mode-toggle) / 40 (кнопки, поля) /
-     46 (строки меню). Промежуточных высот нет.
+   Принципы:
+   - Шкала высот: 34 (компакт) / 40 (кнопки, поля) / 46 (строки меню).
    - Микроподписи uppercase: единый letter-spacing 0.05em.
    - Две роли янтарного: --amber (текст/иконки) и --amber-btn (фон кнопок).
-     В тёмной теме совпадают; в светлой кнопка остаётся яркой (#f59e0b),
-     текст/иконки — глубокими (#b45309).
-   - Шрифты: Inter / JetBrains Mono первыми в стеках (подключение — index.html;
-     без него корректный фолбэк на системные).
+   - Единый паттерн строк-переключателей (.row-toggle) для всех окон
+     настроек: ранжирование, аккаунт, экспорт.
+   - Футер модалок: сетка равных кнопок; при переполнении — перенос.
+   - Шрифты: Inter / JetBrains Mono первыми в стеках.
    ═══════════════════════════════════════════════════════════════════════════════ */
 
 /* ═══════════════════════════════════════════════════════════════════════════════
@@ -34,9 +33,9 @@
   --text-3: #83838e;
 
   /* Акценты */
-  --amber: #f59e0b;                          /* текст/иконки/бордеры */
-  --amber-btn: #f59e0b;                      /* фон primary-кнопок */
-  --amber-hover: #d97706;                    /* hover primary-кнопок */
+  --amber: #f59e0b;
+  --amber-btn: #f59e0b;
+  --amber-hover: #d97706;
   --amber-glow: rgba(245, 158, 11, 0.12);
 
   --teal: #14b8a6;
@@ -90,8 +89,6 @@
   --text-2: #3f3f46;
   --text-3: #71717a;
 
-  /* Кнопки — тот же яркий янтарный, что и в тёмной;
-     текст/иконки — глубокий читаемый */
   --amber: #b45309;
   --amber-btn: #f59e0b;
   --amber-hover: #d97706;
@@ -187,8 +184,7 @@ input, textarea, select {
 ::-webkit-scrollbar-thumb:hover { background: var(--text-3); }
 ::-webkit-scrollbar-track { background: transparent; }
 
-/* Фокус: только клавиатурная навигация.
-   Поля ввода показывают фокус сменой рамки, не кольцом. */
+/* Фокус: только клавиатурная навигация. */
 :focus { outline: none; }
 
 :focus-visible {
@@ -215,7 +211,6 @@ select:focus-visible {
 /* ═══════════════════════════════════════════════════════════════════════════════
    3. УНИВЕРСАЛЬНАЯ СИСТЕМА КНОПОК
    Шкала высот: 34 (компакт) / 40 (стандарт) / 46 (строки меню).
-   Модификаторы: .primary, .danger, .ghost, .icon
    ═══════════════════════════════════════════════════════════════════════════════ */
 
 .btn {
@@ -295,8 +290,7 @@ select:focus-visible {
   flex-shrink: 0;
 }
 
-/* Спиннер для кнопок в состоянии «отправляется».
-   Тёмная обводка на янтарном, видимая в обеих темах. */
+/* Спиннер для кнопок в состоянии «отправляется». */
 .btn-spinner {
   display: block;
   width: 14px;
@@ -640,7 +634,7 @@ body.ready #app { display: flex; }
   line-height: 1.55;
 }
 
-/* Мета-блок: прижат к низу, адаптивный */
+/* Мета-блок */
 .note-meta {
   display: flex;
   align-items: center;
@@ -652,7 +646,7 @@ body.ready #app { display: flex; }
   padding-top: 10px;
 }
 
-/* Теги — микроподписи: единый letter-spacing 0.05em */
+/* Теги */
 .note-tag {
   padding: 3px 7px;
   border-radius: 4px;
@@ -675,7 +669,7 @@ body.ready #app { display: flex; }
   color: var(--teal);
 }
 
-/* Вертикальный разделитель между группами */
+/* Разделитель */
 .note-meta-sep {
   width: 1px;
   height: 14px;
@@ -730,7 +724,6 @@ body.ready #app { display: flex; }
   color: var(--amber);
 }
 
-/* Палочки индикатора сигнала */
 .sig-bar {
   display: inline-block;
   width: 4px;
@@ -742,7 +735,6 @@ body.ready #app { display: flex; }
 .sig-bar.sig-full { background: var(--amber); }
 .sig-bar.sig-empty { background: var(--surface-3); }
 
-/* Текстовая метка — микроподпись: 0.05em */
 .sig-label {
   font-size: 10px;
   font-weight: 600;
@@ -751,7 +743,6 @@ body.ready #app { display: flex; }
   color: var(--text-2);
 }
 
-/* Время — серый, прижато вправо */
 .note-date {
   color: var(--text-3);
   font-size: 11px;
@@ -886,8 +877,7 @@ body.ready #app { display: flex; }
   flex-shrink: 0;
 }
 
-/* Подсказка лимитов: живёт ПОД футером (вставляется в #composer,
- * после #ed-foot — см. Composer), а не внутри flex-строки. */
+/* Подсказка лимитов: строка ПОД футером (вставляется в #composer). */
 #ed-hint {
   font-size: 11px;
   color: var(--text-3);
@@ -964,8 +954,7 @@ body.ready #app { display: flex; }
   background: var(--amber-glow);
 }
 
-/* Кнопка отправки. Иконка — стрелка вверх (не самолётик);
-   в состоянии отправки — спиннер .btn-spinner (идеальный центризм). */
+/* Кнопка отправки. */
 #btn-send {
   width: 40px;
   height: 34px;
@@ -987,12 +976,6 @@ body.ready #app { display: flex; }
   display: block;
 }
 
-#btn-send:hover:not(:disabled) { background: var(--amber-hover); }
-#btn-send:active:not(:disabled) { transform: scale(0.95); }
-#btn-send.sending { opacity: 0.75; cursor: wait; }
-
-/* Заглушка иконки до инициализации Composer (мгновение до JS):
-   невидима, держит размеры, чтобы кнопка не «прыгала». */
 #btn-send .send-icon {
   display: flex;
   align-items: center;
@@ -1000,6 +983,10 @@ body.ready #app { display: flex; }
   width: 17px;
   height: 17px;
 }
+
+#btn-send:hover:not(:disabled) { background: var(--amber-hover); }
+#btn-send:active:not(:disabled) { transform: scale(0.95); }
+#btn-send.sending { opacity: 0.75; cursor: wait; }
 
 /* ═══════════════════════════════════════════════════════════════════════════════
    10. БАЗА (BASE VIEW)
@@ -1218,10 +1205,9 @@ body.ready #app { display: flex; }
   min-height: 0;
 }
 
-/* Футер модалки: сетка кнопок.
-   Десктоп: все в один ряд, растянуты от края до края с равными зазорами
-   (никаких «Отмена отдельно слева» / «кучка справа»).
-   Мобилке (<480px): каждая кнопка на всю ширину, стеком — крупные цели. */
+/* Футер модалки: сетка равных кнопок, при переполнении — перенос.
+   Десктоп: один ряд, равные ширины, равные зазоры.
+   Мобилка (<480px): кнопки во всю ширину, стек. */
 #modal-f {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
@@ -1457,7 +1443,7 @@ body.ready #app { display: flex; }
   min-height: 56px;
 }
 
-/* Кнопки действий в NoteView и MenuView */
+/* Кнопки действий */
 .nv-act {
   display: inline-flex;
   align-items: center;
@@ -1503,7 +1489,6 @@ body.ready #app { display: flex; }
   color: #fff;
 }
 
-/* Выбранная опция среди группы кнопок (режим отображения, вкл/выкл ключа) */
 .nv-act.selected {
   border-color: var(--amber);
   color: var(--amber);
@@ -1536,8 +1521,6 @@ body.ready #app { display: flex; }
 
 /* ═══════════════════════════════════════════════════════════════════════════════
    15. НАСТРОЙКИ РАНЖИРОВАНИЯ (СЛАЙДЕРЫ)
-   Кастомные ползунки: трек 6px, ручка 18px, зона касания 24px.
-   Переключатели-пары — grid 1fr 1fr: равная ширина на любом разрешении.
    ═══════════════════════════════════════════════════════════════════════════════ */
 
 .range-body {
@@ -1579,8 +1562,7 @@ body.ready #app { display: flex; }
   line-height: 1.4;
 }
 
-/* Кастомный ползунок: прозрачный инпут 24px (зона касания),
-   трек рисуется отдельными псевдоэлементами */
+/* Кастомный ползунок: зона касания 24px */
 .no-range {
   -webkit-appearance: none;
   appearance: none;
@@ -1637,7 +1619,7 @@ body.ready #app { display: flex; }
 .no-range.teal::-moz-range-thumb { background: var(--teal); }
 .no-range.rose::-moz-range-thumb { background: var(--rose); }
 
-/* Живой предпросмотр: три строки, без переносов */
+/* Живой предпросмотр: три строки */
 .range-preview {
   display: flex;
   flex-direction: column;
@@ -1652,8 +1634,21 @@ body.ready #app { display: flex; }
   white-space: nowrap;
 }
 
-/* Парные переключатели (signal/percent, вкл/выкл ключа):
-   grid — равные ровные половинки на любом разрешении */
+/* Парные переключатели: grid — равные половинки */
+.range-display {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.range-display-lbl {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
 .range-display-btns {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -1668,6 +1663,12 @@ body.ready #app { display: flex; }
   overflow: hidden;
   text-overflow: ellipsis;
   padding: 8px 6px;
+}
+
+@media (max-width: 480px) {
+  .range-display-btns {
+    grid-template-columns: 1fr;
+  }
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════════
@@ -1698,7 +1699,7 @@ body.ready #app { display: flex; }
   line-height: 1.5;
 }
 
-/* Поле с ключом: mono, перенос, выделяемое */
+/* Поле с ключом */
 .key-box {
   background: var(--surface-2);
   border: 1px solid var(--line);
@@ -1724,15 +1725,18 @@ body.ready #app { display: flex; }
 
 /* Ряд действий */
 .acc-actions {
-  display: flex;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
   gap: 6px;
-  flex-wrap: wrap;
 }
 
 .acc-actions .nv-act {
-  flex: 1;
-  min-width: 100px;
+  width: 100%;
+  min-width: 0;
   font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* Строка статуса синка */
@@ -1758,7 +1762,7 @@ body.ready #app { display: flex; }
 .acc-sync .dot.err  { background: var(--rose); box-shadow: 0 0 6px var(--rose-glow); }
 
 /* ═══════════════════════════════════════════════════════════════════════════════
-   17. УНИВЕРСАЛЬНЫЕ ПОЛЯ ВВОДА (модалки: пароль, nsec, JSON)
+   17. УНИВЕРСАЛЬНЫЕ ПОЛЯ ВВОДА
    ═══════════════════════════════════════════════════════════════════════════════ */
 
 .field {
@@ -1868,10 +1872,7 @@ body.ready #app { display: flex; }
 
   .note-meta { gap: 6px; }
 
-  /* На узких экранах пары-переключатели стекаются вертикально */
-  .range-display-btns {
-    grid-template-columns: 1fr;
-  }
+  /* Учтено: #modal-f и .range-display-btns уже переключаются в 1fr выше */
 }
 
 @media (min-width: 768px) {
@@ -1883,7 +1884,7 @@ body.ready #app { display: flex; }
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════════
-   19. СПИСОК МЕНЮ (настройки: строки со значением справа)
+   19. СПИСОК МЕНЮ
    ═══════════════════════════════════════════════════════════════════════════════ */
 
 .menu-list {
