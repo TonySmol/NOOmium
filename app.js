@@ -38,7 +38,7 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 // ВЕРСИЯ ПРИЛОЖЕНИЯ
 // ═══════════════════════════════════════════════════════════════════════════════
-const APP_VERSION = '0.7.5';
+const APP_VERSION = '0.7.6';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CORE/DI — ПРЕАМБУЛА
@@ -8446,9 +8446,12 @@ DI.register('AccountView', function (Account, Modal, Toast, I18n, Config, bus) {
 /**
  * Меню настроек и переключение экранов (Поток / База).
  *
- * Дизайн v0.7.4: список строк со значением справа (.menu-list / .menu-row,
- * style.css секция 19). Убраны: кнопки База/Поток (переключение — иконкой
- * ▤ в шапке), иконки-префиксы.
+ * Дизайн: список строк со значением справа (.menu-list / .menu-row,
+ * style.css секция 19). Переключение экранов — иконкой ▤ в шапке.
+ *
+ * v0.7.6 (визуальный пакет): индикация темы — монохромные глифы
+ * ◐ (тёмная) / ○ (светлая) вместо цветных эмодзи 🌙/☀️ — единообразие
+ * с остальной системой глифов.
  *
  * fullReset: tombstone'ы через NetService.publishWipeAll перед очисткой.
  */
@@ -8462,6 +8465,16 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboar
   function applyTheme(theme) {
     document.body.setAttribute('data-theme', theme);
     Config.set('theme', theme);
+  }
+
+  /**
+   * Глиф текущей/указанной темы: ◐ — тёмная, ○ — светлая.
+   * @param {string} [theme] - Тема (по умолчанию текущая из Config).
+   * @returns {string}
+   */
+  function themeGlyph(theme) {
+    const t = theme || Config.get('theme', 'dark');
+    return t === 'dark' ? '◐' : '○';
   }
 
   /**
@@ -8809,14 +8822,15 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboar
       Onboarding.showHelp(false);
     }));
 
-    // Тема
-    body.appendChild(menuRow(I18n.t('menu.theme'), I18n.t(Config.get('theme', 'dark') === 'dark' ? 'theme.dark' : 'theme.light'), () => {
+    // Тема: глиф + перевод значения
+    const themeVal = themeGlyph() + ' ' + I18n.t(Config.get('theme', 'dark') === 'dark' ? 'theme.dark' : 'theme.light');
+    body.appendChild(menuRow(I18n.t('menu.theme'), themeVal, () => {
       const next = Config.get('theme', 'dark') === 'dark' ? 'light' : 'dark';
       applyTheme(next);
       // Ручная тема имеет приоритет над Telegram
       Config.set('userThemeOverride', true);
       Modal.close();
-      Toast.show('ok', I18n.t('menu.theme') + ' → ' + I18n.t(next === 'dark' ? 'theme.dark' : 'theme.light'));
+      Toast.show('ok', I18n.t('menu.theme') + ': ' + themeGlyph(next) + ' ' + I18n.t(next === 'dark' ? 'theme.dark' : 'theme.light'));
     }));
 
     // Язык
