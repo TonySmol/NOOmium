@@ -38,7 +38,7 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 // ВЕРСИЯ ПРИЛОЖЕНИЯ
 // ═══════════════════════════════════════════════════════════════════════════════
-const APP_VERSION = '0.7.4';
+const APP_VERSION = '0.7.5';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CORE/DI — ПРЕАМБУЛА
@@ -789,6 +789,8 @@ DI.register('I18n', function (Config, bus) {
     'btn.download': 'Скачать',
     'btn.import': 'Импорт',
     'btn.confirm': 'Подтвердить',
+    'btn.on': 'Вкл',
+    'btn.off': 'Выкл',
     'btn.paste': 'Вставить из буфера',
 
     'tab.stream': 'Поток',
@@ -1004,6 +1006,8 @@ DI.register('I18n', function (Config, bus) {
     'btn.download': 'Download',
     'btn.import': 'Import',
     'btn.confirm': 'Confirm',
+    'btn.on': 'On',
+    'btn.off': 'Off',
     'btn.paste': 'Paste from clipboard',
 
     'tab.stream': 'Stream',
@@ -7637,6 +7641,9 @@ DI.register('NoteView', function (DB, Notes, NoteActions, I18n, Utils, Toast, bu
  *    Сам JSON нигде не показывается.
  * 5. Синк: переключатель, статус, кнопка «Синхронизировать»
  *    (переподключение и вытягивание канона).
+ *
+ * Финальная правка: подписи переключателя «Включить ключ» —
+ * btn.on/btn.off (раньше off-кнопка называлась «Отмена»).
  */
 DI.register('AccountView', function (Account, Modal, Toast, I18n, Config, bus) {
   let unsubs = [];
@@ -7848,7 +7855,7 @@ DI.register('AccountView', function (Account, Modal, Toast, I18n, Config, bus) {
   // ─── Раздел: данные — экспорт ─────────────────────────────────────────────
 
   /**
-   * Модалка экспорта: включение ключа (переключатель), пароль при
+   * Модалка экспорта: включение ключа (переключатель вкл/выкл), пароль при
    * доступном NIP-49, «Скачать файл» и «Скопировать JSON».
    * Сам JSON не показывается.
    */
@@ -7863,7 +7870,7 @@ DI.register('AccountView', function (Account, Modal, Toast, I18n, Config, bus) {
     desc.textContent = I18n.t('account.export.desc');
     body.appendChild(desc);
 
-    // Переключатель «Включить ключ» (режим signal/percent из MenuView)
+    // Переключатель «Включить ключ»
     let withKey = false;
 
     const displayGroup = document.createElement('div');
@@ -7892,7 +7899,7 @@ DI.register('AccountView', function (Account, Modal, Toast, I18n, Config, bus) {
       btn.className = 'nv-act';
       btn.setAttribute('data-key-mode', mode);
       btn.style.cssText = 'flex:1;font-size:12px;';
-      btn.textContent = mode === 'on' ? I18n.t('account.export.withkey') : I18n.t('btn.cancel');
+      btn.textContent = I18n.t(mode === 'on' ? 'btn.on' : 'btn.off');
 
       btn.addEventListener('click', () => {
         withKey = val;
@@ -9124,10 +9131,10 @@ DI.register('Boot', function () {
 // ═══════════════════════════════════════════════════════════════════════════════
 window.DI = DI;
 
-// Активируется после реализации BOOT (волна 16). До тех пор — тихое
-// предупреждение в консоль: каркас не является рабочим приложением.
 try {
   DI.resolve('Boot').mount();
 } catch (e) {
-  console.warn('[NOOmium] каркас: ждём реализации модулей —', e && e.message);
+  // Фатальная ошибка запуска: полный стек + сообщение вместо пустого экрана.
+  console.error('[NOOmium] запуск упал:', e);
+  document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100dvh;padding:20px;font:500 14px -apple-system,sans-serif;color:#fafafa;background:#0a0a0b;text-align:center">NOOmium не запустился. Обновите страницу.<br>Если повторится — пришлите скриншот консоли (F12).</div>';
 }
