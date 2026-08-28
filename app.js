@@ -6318,7 +6318,7 @@ DI.register('Onboarding', function (Config, Modal, I18n, Embedder) {
       ['⌘ ' + I18n.t('onb.modes.t'), I18n.t('onb.modes.d')],
       ['⚿ ' + I18n.t('onb.key.t'), I18n.t('onb.key.d')],
       ['◆ ' + I18n.t('onb.resonance.t'), I18n.t('onb.resonance.d')],
-      ['🗑 ' + I18n.t('onb.delete.t'), I18n.t('onb.delete.d')],
+      ['⌫ ' + I18n.t('onb.delete.t'), I18n.t('onb.delete.d')],
     ];
 
     sections.forEach(([title, desc]) => {
