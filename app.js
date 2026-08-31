@@ -38,7 +38,7 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 // ВЕРСИЯ ПРИЛОЖЕНИЯ
 // ═══════════════════════════════════════════════════════════════════════════════
-const APP_VERSION = '0.8.3';
+const APP_VERSION = '0.8.4';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CORE/DI — ПРЕАМБУЛА
@@ -1534,19 +1534,19 @@ DI.register('Vec', function () {
 // ─── DATA/DB ─── START ──────────────────────────────────────────────────────
 /**
  * Слой хранения: IndexedDB с fallback в память.
- * Два хранилища:
- * - notes: локальные заметки пользователя
- * - cache: сетевые заметки/ответы
+ * Два хранилища: notes (свои), cache (чужие).
  *
- * Отличие от v0.6: ин-мемори индексы идентификаторов.
- * Строятся один раз при открытии БД, поддерживаются инкрементально
- * на каждой операции. Методы hasLocal()/hasCache() дают O(1)-проверку
- * «есть ли заметка локально» — вместо полного скана DB.all() на каждое
- * входящее сетевое событие (фикс #10).
+ * v0.8.4: единая функция идентичности noteKey(n) — ключ заметки
+ * независимо от канала доставки и версии события:
+ * - своя → 'uid:' + id;
+ * - чужая → 'src:' + srcUid + ':' + srcPk;
+ * один ответ на вопрос «та же ли заметка» для всех потребителей
+ * (Feed-дедуп, фильтр пина, upsert).
  *
- * КОНТРАКТ: сетевые обработчики (NetService) должны дождаться
- * DB.ready() перед началом приёма событий — иначе индексы могут
- * быть ещё не построены.
+ * Persist-кладбище удалённых чужих eventId/srcUid с timestamp
+ * (localStorage, кольцевой лимит): приём любой записи проверяет
+ * кладбище — воскрешение удалённых/скрытых источников невозможно
+ * by design (старое событие < удаления → отброс).
  */
 DI.register('DB', function (Config, bus, Logger) {
   let db = null;
@@ -1557,14 +1557,12 @@ DI.register('DB', function (Config, bus, Logger) {
   const NOTES = () => Config.get('storeName', 'notes');
   const CACHE = () => Config.get('cacheStoreName', 'cache');
 
-  // ─── Ин-мемори индексы ─────────────────────────────────────────────────────
-
-  /** @type {Set<string>} id всех локальных заметок. */
   const localIds = new Set();
-  /** @type {Set<string>} eventId всех опубликованных локальных заметок. */
   const localEventIds = new Set();
-  /** @type {Set<string>} id всех заметок в сетевом кэше. */
   const cacheIds = new Set();
+
+  const GRAVEYARD_KEY = 'noomium:graveyard';
+  const GRAVEYARD_MAX = 2000;
 
   function emitChange() {
     try { bus.emit('db:change'); } catch (_) {}
@@ -1575,8 +1573,7 @@ DI.register('DB', function (Config, bus, Logger) {
   }
 
   /**
-   * Обёртка IDBRequest → Promise.
-   * @param {IDBRequest} req - Запрос.
+   * @param {IDBRequest} req
    * @returns {Promise<*>}
    */
   function reqPromise(req) {
@@ -1587,10 +1584,99 @@ DI.register('DB', function (Config, bus, Logger) {
   }
 
   /**
-   * Открытие БД. При успешном открытии ДО резолва строит индексы
-   * (один полный проход по notes + чтение ключей cache).
-   * При недоступности IndexedDB — fallback в память (индексы
-   * поддерживаются инкрементально с пустого состояния).
+   * Ключ идентичности заметки. Единственный механизм ответа
+   * на «та же ли заметка» для всех потребителей.
+   * @param {Object} n - Запись (своя из notes или чужая из cache).
+   * @returns {string|null}
+   */
+  function noteKey(n) {
+    if (!n) return null;
+    if (n.authorPubkey === null || n.authorPubkey === undefined) {
+      return n.id ? 'uid:' + n.id : null;
+    }
+    if (n.srcUid && n.srcPk) {
+      return 'src:' + n.srcUid + ':' + n.srcPk;
+    }
+    return n.id ? 'raw:' + n.id : null;
+  }
+
+  /**
+   * Загрузка кладбища из localStorage.
+   * @returns {Object} {eventId: ts, key: ts}
+   */
+  function loadGraveyard() {
+    try {
+      const raw = localStorage.getItem(GRAVEYARD_KEY);
+      if (raw) {
+        const g = JSON.parse(raw);
+        if (g && typeof g === 'object') return g;
+      }
+    } catch (_) {}
+    return {};
+  }
+
+  /**
+   * Сохранение кладбища (с кольцевым лимитом).
+   */
+  function saveGraveyard() {
+    try {
+      const keys = Object.keys(graveyard);
+      if (keys.length > GRAVEYARD_MAX) {
+        const sorted = keys.sort((a, b) => graveyard[a] - graveyard[b]);
+        for (let i = 0; i < keys.length - GRAVEYARD_MAX; i++) {
+          delete graveyard[sorted[i]];
+        }
+      }
+      localStorage.setItem(GRAVEYARD_KEY, JSON.stringify(graveyard));
+    } catch (_) {}
+  }
+
+  let graveyard = loadGraveyard();
+
+  /**
+   * Похоронить: чужой eventId и/или ключ источника с timestamp.
+   * @param {string} [eventId] - ID удалённого события.
+   * @param {string} [key] - Ключ источника (noteKey).
+   */
+  function bury(eventId, key) {
+    const ts = Date.now();
+    if (eventId) graveyard['ev:' + eventId] = ts;
+    if (key) graveyard[key] = ts;
+    saveGraveyard();
+  }
+
+  /**
+   * Проверка: мертва ли запись (воскрешение старого события).
+   * Запись жива, если её ключ/eventId не в кладбище, ИЛИ её событие
+   * новее момента удаления (честный возврат переизданием).
+   * @param {Object} record - Кэш-запись или {id, key}.
+   * @param {number} eventTs - Timestamp события (ms).
+   * @returns {boolean} true — мертва, отбросить.
+   */
+  function isBuried(record, eventTs) {
+    if (!record) return false;
+
+    const key = record.buriedKey || noteKey(record);
+
+    if (record.id) {
+      const evTs = graveyard['ev:' + record.id];
+      if (evTs !== undefined) {
+        if (!eventTs || eventTs <= evTs) return true;
+      }
+    }
+
+    if (key) {
+      const keyTs = graveyard[key];
+      if (keyTs !== undefined) {
+        if (!eventTs || eventTs <= keyTs) return true;
+      }
+    }
+
+    return false;
+  }
+
+  /**
+   * Открытие БД + построение индексов.
    * @returns {Promise<IDBDatabase|null>}
    */
   function open() {
@@ -1649,7 +1735,7 @@ DI.register('DB', function (Config, bus, Logger) {
   }
 
   /**
-   * Полная перестройка индексов из БД (однократно при открытии).
+   * Полная перестройка индексов из БД.
    * @returns {Promise<void>}
    */
   function buildIndexes() {
@@ -1677,11 +1763,10 @@ DI.register('DB', function (Config, bus, Logger) {
   }
 
   /**
-   * Универсальная обёртка транзакции с memory-fallback.
-   * @param {string} store - Имя object store.
-   * @param {string} mode - 'readonly' | 'readwrite'.
-   * @param {Function} fn - (objectStore) => IDBRequest.
-   * @param {Function} memFn - Синхронный fallback в памяти.
+   * @param {string} store
+   * @param {string} mode
+   * @param {Function} fn
+   * @param {Function} memFn
    * @returns {Promise<*>}
    */
   function withStore(store, mode, fn, memFn) {
@@ -1700,12 +1785,9 @@ DI.register('DB', function (Config, bus, Logger) {
     });
   }
 
-  // ─── Локальные заметки ─────────────────────────────────────────────────────
-
   /**
-   * Сохранить/обновить заметку.
-   * @param {Object} note - Заметка с полем id.
-   * @returns {Promise<string>} id заметки.
+   * @param {Object} note
+   * @returns {Promise<string>}
    */
   function put(note) {
     return withStore(
@@ -1724,7 +1806,6 @@ DI.register('DB', function (Config, bus, Logger) {
   }
 
   /**
-   * Получить заметку по id.
    * @param {string} id
    * @returns {Promise<Object|undefined>}
    */
@@ -1738,8 +1819,6 @@ DI.register('DB', function (Config, bus, Logger) {
   }
 
   /**
-   * Удалить заметку. Перед удалением читает заметку, чтобы вычистить
-   * из индекса и её eventId.
    * @param {string} id
    * @returns {Promise<*>}
    */
@@ -1760,7 +1839,6 @@ DI.register('DB', function (Config, bus, Logger) {
   }
 
   /**
-   * Все локальные заметки.
    * @returns {Promise<Array<Object>>}
    */
   function all() {
@@ -1773,7 +1851,6 @@ DI.register('DB', function (Config, bus, Logger) {
   }
 
   /**
-   * Полная очистка обоих хранилищ + индексов.
    * @returns {Promise<void>}
    */
   function reset() {
@@ -1796,16 +1873,15 @@ DI.register('DB', function (Config, bus, Logger) {
       localIds.clear();
       localEventIds.clear();
       cacheIds.clear();
+      graveyard = {};
+      saveGraveyard();
       emitChange();
       emitCache();
     });
   }
 
-  // ─── Сетевой кэш ───────────────────────────────────────────────────────────
-
   /**
-   * Сохранить/обновить заметку в кэше.
-   * @param {Object} note - Заметка с полем id.
+   * @param {Object} note
    * @returns {Promise<string>}
    */
   function cachePut(note) {
@@ -1822,7 +1898,6 @@ DI.register('DB', function (Config, bus, Logger) {
   }
 
   /**
-   * Получить заметку из кэша.
    * @param {string} id
    * @returns {Promise<Object|undefined>}
    */
@@ -1836,7 +1911,6 @@ DI.register('DB', function (Config, bus, Logger) {
   }
 
   /**
-   * Все заметки кэша.
    * @returns {Promise<Array<Object>>}
    */
   function cacheAll() {
@@ -1849,7 +1923,6 @@ DI.register('DB', function (Config, bus, Logger) {
   }
 
   /**
-   * Удалить заметку из кэша.
    * @param {string} id
    * @returns {Promise<*>}
    */
@@ -1877,18 +1950,10 @@ DI.register('DB', function (Config, bus, Logger) {
     cacheAll,
     cacheDel,
 
-    /**
-     * Готовность БД (индексы построены). NetService обязан дождаться
-     * этого перед открытием подписки на входящие события.
-     * @returns {Promise<IDBDatabase|null>}
-     */
     ready: open,
 
     /**
-     * Есть ли заметка с таким id ИЛИ eventId среди ЛОКАЛЬНЫХ (O(1)).
-     * Используется для отсечения дублей своих заметок, приходящих
-     * из сети.
-     * @param {string} idOrEventId - Локальный id или eventId.
+     * @param {string} idOrEventId
      * @returns {boolean}
      */
     hasLocal(idOrEventId) {
@@ -1897,13 +1962,34 @@ DI.register('DB', function (Config, bus, Logger) {
     },
 
     /**
-     * Есть ли заметка с таким id в сетевом кэше (O(1)).
      * @param {string} id
      * @returns {boolean}
      */
     hasCache(id) {
       return !!id && cacheIds.has(id);
     },
+
+    /**
+     * Ключ идентичности заметки.
+     * @param {Object} n
+     * @returns {string|null}
+     */
+    noteKey,
+
+    /**
+     * Похоронить удалённое.
+     * @param {string} [eventId]
+     * @param {string} [key]
+     */
+    bury,
+
+    /**
+     * Проверка на воскрешение.
+     * @param {Object} record
+     * @param {number} [eventTs]
+     * @returns {boolean}
+     */
+    isBuried,
   };
 }, ['Config', 'EventBus', 'Logger']);
 // ─── DATA/DB ─── END ────────────────────────────────────────────────────────
@@ -3317,20 +3403,14 @@ DI.register('Protocol', function (Config, Vec, Crypto, Nostr) {
 
 // ─── NET/NetService ─── START ───────────────────────────────────────────────
 /**
- * Оркестрация Nostr-сети: подписки, публикация, обработка входящих.
+ * Оркестрация Nostr-сети.
  *
- * v0.8.3: единая точка приёма чужого контента — upsertCacheEntry.
- * Каналы kind 1 и kind 21001 нормализуются в записи одинаковой
- * полноты и проходят один путь: идемпотентный upsert по
- * (srcUid, srcPk) + чистка старых eventId-версий источника.
- * Дубли физически невозможны: вторая запись того же источника
- * обновляет первую. Неполные записи (answer без uid-тега,
- * старый формат) — в кэш с incomplete: true, Feed не рендерит.
- *
- * Три канала:
- * 1. Комнатная подписка (kind 1/21000/21001/5 по тегу t).
- * 2. Подписка на себя (kind 30078) — живой синк между устройствами.
- * 3. Исходящая публикация: канон (30078) + проекции (kind 1).
+ * v0.8.4:
+ * - Приём чужих заметок (kind 1 и 21001) проверяет кладбище ДО
+ *   upsert: старые события удалённых источников отбрасываются,
+ *   честный возврат (событие новее удаления) принимается.
+ * - handleIncomingDelete хоронит eventId + ключ источника.
+ * - upsertCacheEntry идемпотентен по noteKey (srcUid+srcPk).
  */
 DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Config, Logger, bus) {
   let started = false;
@@ -3351,17 +3431,11 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   let reconnectAttempts = 0;
   let busUnsubs = [];
 
-  /** @type {Set<string>} */
   const seen = new Set();
-  /** @type {Set<string>} */
   const selfSeen = new Set();
-  /** @type {Map<string, boolean>} */
   const contentSeen = new Map();
-  /** @type {Map<string, number>} */
   const peers = new Map();
-  /** @type {Map<string, number>} */
   const peerQueryTimes = new Map();
-  /** @type {Map<string, {tokens:number, ts:number}>} */
   const peerNoteBudgets = new Map();
 
   let currentWindow = Config.get('subWindow', 300);
@@ -3371,7 +3445,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   const OUTBOX_KEY = 'noomium:outbox';
 
   /**
-   * Загрузка outbox из localStorage.
    * @returns {{announce: string[], del: string[], priv: string[], privdel: string[]}}
    */
   function loadOutbox() {
@@ -3391,9 +3464,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     return { announce: [], del: [], priv: [], privdel: [] };
   }
 
-  /**
-   * Сохранить outbox.
-   */
   function saveOutbox() {
     try {
       localStorage.setItem(OUTBOX_KEY, JSON.stringify(outbox));
@@ -3409,16 +3479,10 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   const kDelete = () => Config.get('kDelete', 5);
   const room = () => Config.get('room', 'noomium-main');
 
-  /**
-   * @param {string} s
-   */
   function setStatus(s) {
     try { bus.emit('net:status', { status: s }); } catch (_) {}
   }
 
-  /**
-   * @param {string} phase
-   */
   function emitSync(phase) {
     try { bus.emit('sync:status', { phase }); } catch (_) {}
   }
@@ -3427,41 +3491,21 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     try { bus.emit('net:peers', { count: peers.size }); } catch (_) {}
   }
 
-  /**
-   * @param {boolean} loading
-   * @param {number} [windowSec]
-   */
   function emitHistory(loading, windowSec) {
     try { bus.emit('net:history', { loading: loading, window: windowSec }); } catch (_) {}
   }
 
-  /**
-   * @returns {boolean}
-   */
   function isOffline() {
     return typeof navigator !== 'undefined' && navigator.onLine === false;
   }
 
-  /**
-   * @returns {boolean}
-   */
   function canPublish() {
     return Nostr.isReady() && !isOffline();
   }
 
-  // ─── Единый приём чужого контента ─────────────────────────────────────────
-
   /**
-   * Идемпотентный upsert записи в сетевой кэш.
-   * Ключ идентичности — (srcUid, srcPk): запись того же источника
-   * обновляется (свежий createdAt выигрывает), не дублируется.
-   * Одновременно удаляются старые eventId-версии того же источника.
-   * Неполные записи (без srcUid) кладутся с incomplete: true —
-   * Feed их не рендерит (Требование 1: неполные невидимы), но кэш
-   * знает об их существовании для вытеснения при полной версии.
-   * @param {Object} record - Нормализованная запись
-   *   {id, srcUid, srcPk, authorPubkey, parentUid, parentPk,
-   *   text, vector, createdAt, score?, eventId?}.
+   * Идемпотентный upsert записи в кэш по noteKey (srcUid+srcPk).
+   * @param {Object} record
    * @returns {Promise<void>}
    */
   async function upsertCacheEntry(record) {
@@ -3469,34 +3513,20 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
       const cached = await DB.cacheAll();
 
       if (record.srcUid && record.srcPk) {
-        const same = cached.find(c =>
+        const existing = cached.find(c =>
           c && c.srcUid === record.srcUid && c.srcPk === record.srcPk
         );
 
-        if (same) {
-          if (same.createdAt && record.createdAt && same.createdAt >= record.createdAt) {
-            return;
-          }
-
-          const staleIds = cached
-            .filter(c => c && c.srcUid === record.srcUid && c.srcPk === record.srcPk && c.id !== record.id)
-            .map(c => c.id);
-
-          for (const sid of staleIds) {
-            await DB.cacheDel(sid).catch(() => {});
-          }
-
-          await DB.cachePut(record);
-          notifyPeers();
+        if (existing && existing.createdAt && record.createdAt && existing.createdAt >= record.createdAt) {
           return;
         }
 
-        const staleIds2 = cached
-          .filter(c => c && c.srcUid === record.srcUid && c.srcPk === record.srcPk && c.id !== record.id)
-          .map(c => c.id);
+        const stale = cached.filter(c =>
+          c && c.srcUid === record.srcUid && c.srcPk === record.srcPk && c.id !== record.id
+        );
 
-        for (const sid of staleIds2) {
-          await DB.cacheDel(sid).catch(() => {});
+        for (const s of stale) {
+          await DB.cacheDel(s.id).catch(() => {});
         }
 
         await DB.cachePut(record);
@@ -3504,8 +3534,8 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
         return;
       }
 
-      const existing = await DB.cacheGet(record.id);
-      if (existing && existing.createdAt && record.createdAt && existing.createdAt > record.createdAt) {
+      const ex = await DB.cacheGet(record.id);
+      if (ex && ex.createdAt && record.createdAt && ex.createdAt > record.createdAt) {
         return;
       }
 
@@ -3515,8 +3545,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
       Logger.warn('NetService: upsertCacheEntry', String(e && e.message || e));
     }
   }
-
-  // ─── Outbox: очереди ──────────────────────────────────────────────────────
 
   /**
    * @param {string} id
@@ -3627,7 +3655,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   }
 
   /**
-   * Сброс очередей: priv → announce → del → privdel.
    * @returns {Promise<void>}
    */
   async function flushOutbox() {
@@ -3711,7 +3738,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   }
 
   /**
-   * Сканирование при старте: анонсы без eventId + канон без canonTs.
    * @returns {Promise<void>}
    */
   async function scanLocalUnpublished() {
@@ -3728,8 +3754,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
       flushOutbox();
     } catch (_) {}
   }
-
-  // ─── Приватный канон: публикация ──────────────────────────────────────────
 
   /**
    * @param {Object} note
@@ -3821,8 +3845,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     flushOutbox();
   }
 
-  // ─── Приватный канон: приём ───────────────────────────────────────────────
-
   /**
    * @param {Object} d
    * @returns {Promise<void>}
@@ -3883,8 +3905,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     }
   }
 
-  // ─── Подписка на себя ─────────────────────────────────────────────────────
-
   function subscribeSelf() {
     const pk = Nostr.getPubkey();
     if (!pk) return;
@@ -3928,8 +3948,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
       }
     );
   }
-
-  // ─── Вспомогательные сети ─────────────────────────────────────────────────
 
   function ensureOnlineListener() {
     if (onlineListenerAdded) return;
@@ -3976,8 +3994,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   }
 
   /**
-   * Дедупликация контента — подсказка «возможно возврат», не приговор.
-   * Окончательное решение принимает вызывающий (по наличию в кэше).
    * @param {string} pubkey
    * @param {string} text
    * @returns {boolean}
@@ -3997,7 +4013,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   }
 
   /**
-   * Token bucket для входящих заметок от одного автора.
    * @param {string} pubkey
    * @returns {boolean}
    */
@@ -4058,8 +4073,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     return false;
   }
 
-  // ─── Входящие события (комната) ───────────────────────────────────────────
-
   /**
    * @param {boolean} hard
    */
@@ -4109,9 +4122,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   }
 
   /**
-   * Приём kind 1. Нормализация и единый upsert.
-   * Дубль-контент при отсутствии в кэше = возврат источника —
-   * принимаем (гонки порядка доставки нейтрализованы).
    * @param {Object} ev
    * @returns {boolean}
    */
@@ -4126,6 +4136,10 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
 
     if (DB.hasLocal(note.id)) return true;
     if (note.srcUid && DB.hasLocal(note.srcUid)) return true;
+
+    if (DB.isBuried({ id: note.id, srcUid: note.srcUid, srcPk: note.srcPk, authorPubkey: note.authorPubkey }, note.createdAt)) {
+      return true;
+    }
 
     peers.set(note.authorPubkey, Date.now());
 
@@ -4154,9 +4168,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   }
 
   /**
-   * Приём kind 21001. v0.8.3: нормализация в запись полноты kind 1
-   * и единый upsert. Ответ с uid-тегом = полноправная запись со
-   * связью; без тега — incomplete (кэш знает, лента не рендерит).
    * @param {Object} ev
    * @returns {boolean}
    */
@@ -4171,6 +4182,10 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
 
     if (DB.hasLocal(a.id)) return true;
     if (a.srcUid && DB.hasLocal(a.srcUid)) return true;
+
+    if (DB.isBuried({ id: a.id, srcUid: a.srcUid, srcPk: a.srcPk, authorPubkey: a.authorPubkey }, a.createdAt)) {
+      return true;
+    }
 
     peers.set(a.authorPubkey, Date.now());
 
@@ -4251,11 +4266,24 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
 
     if (!del) return true;
 
+    const eventTs = (ev.created_at || 0) * 1000;
+
     del.eventIds.forEach(eventId => {
-      if (eventId) DB.cacheDel(eventId);
+      if (eventId) {
+        DB.cacheDel(eventId).catch(() => {});
+        DB.bury(eventId, null);
+      }
     });
 
     if (del.authorPubkey) {
+      DB.cacheAll().then(cached => {
+        const victims = cached.filter(c => c && c.eventId && del.eventIds.indexOf(c.eventId) > -1);
+        victims.forEach(v => {
+          const key = DB.noteKey(v);
+          if (key) DB.bury(null, key);
+        });
+      }).catch(() => {});
+
       const prefix = del.authorPubkey + '::';
       for (const key of Array.from(contentSeen.keys())) {
         if (key.startsWith(prefix)) contentSeen.delete(key);
@@ -4266,8 +4294,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
 
     return true;
   }
-
-  // ─── Исходящие операции ───────────────────────────────────────────────────
 
   /**
    * @param {Object} note
@@ -4331,9 +4357,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     }
   }
 
-  /**
-   * Отправка запроса в сеть при изменении контекста.
-   */
   function maybeSendQuery() {
     const ctx = Store.get('context');
 
@@ -4372,8 +4395,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
         Logger.warn('NetService: не отправить запрос', String(e && e.message || e));
       });
   }
-
-  // ─── Подписка на комнату ──────────────────────────────────────────────────
 
   function subscribeToRoom() {
     const since = Math.floor(Date.now() / 1000) - currentWindow;
@@ -4430,9 +4451,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     }
   }
 
-  /**
-   * Расширение окна истории.
-   */
   function loadHistory() {
     if (!started || historyLoading) return;
 
@@ -4473,7 +4491,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
         }
       });
 
-      peerQueryTimes.forEach((ts, pk) => {
+      peerQueryTimes.forEach((ts, pk) {
         if (now - ts > 60000) peerQueryTimes.delete(pk);
       });
 
@@ -4485,8 +4503,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
       trimSeen();
     }, Config.get('heartbeat', 30000));
   }
-
-  // ─── Старт/стоп ───────────────────────────────────────────────────────────
 
   function start() {
     if (started) return Promise.resolve();
@@ -4614,9 +4630,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     return startPromise;
   }
 
-  /**
-   * Полное переподключение без потери состояния.
-   */
   function resync() {
     if (!Nostr.isReady()) {
       start();
@@ -4633,9 +4646,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     flushOutbox();
   }
 
-  /**
-   * @param {boolean} full
-   */
   function stop(full) {
     started = false;
     hasReceivedEvent = false;
@@ -5053,28 +5063,19 @@ DI.register('Context', function (Store, Embedder, Config, Utils, bus) {
 /**
  * Формирование ленты.
  *
- * v0.8.3:
- * - Дедупликация кэша против своих по ТРЁМ ключам: uid, eventId,
- *   srcUid. Кэш-запись, чей srcUid совпадает с uid моей заметки —
- *   это моё собственное переиздание, вернувшееся эхом: исключается
- *   (любой канал происхождения).
- * - Неполные записи (answer без uid-тега, incomplete: true) не
- *   рендерятся: пользователь не видит «призраков» без связей.
- *
- * Два режима:
- * 1. Без контекста: локальные + кэш в хронологическом порядке.
- * 2. С контекстом: ранжирование по сходству с вектором контекста.
- *
- * Триггеры: context (Store), db:change, db:cache. seq-guard от гонок.
+ * v0.8.4:
+ * - Дедупликация по единому noteKey (DB.noteKey): одна запись на
+ *   источник независимо от канала и версии события.
+ * - Исключение пина по ключу: закреплённая заметка не показывается
+ *   в выдаче ни в каком виде (эхо с другим id — тоже).
+ * - Неполные записи (incomplete) не рендерятся.
  */
-DI.register('Feed', function (DB, Ranker, Store, bus, Logger) {
-  /** @type {number} */
+DI.register('Feed', function (DB, Ranker, Config, Store, bus, Logger) {
   let seq = 0;
-  /** @type {Array<Function>} */
   let unsubs = [];
 
   /**
-   * Пересборка ленты. Результат устаревшего вызова отбрасывается.
+   * Пересборка ленты (seq-guard).
    * @returns {Promise<void>}
    */
   function refresh() {
@@ -5084,19 +5085,22 @@ DI.register('Feed', function (DB, Ranker, Store, bus, Logger) {
     return Promise.all([DB.all(), DB.cacheAll()]).then(([local, cached]) => {
       if (my !== seq) return;
 
+      const pinKey = ctx.noteId ? 'uid:' + ctx.noteId : null;
+
       if (!ctx.source) {
-        const localIds = new Set();
+        const localKeys = new Set();
         local.forEach(n => {
           if (!n) return;
-          if (n.id) localIds.add(n.id);
-          if (n.eventId) localIds.add(n.eventId);
+          const k = DB.noteKey(n);
+          if (k) localKeys.add(k);
         });
 
         const filteredCached = cached.filter(n => {
-          if (!n || !n.id) return false;
-          if (n.incomplete) return false;
-          if (localIds.has(n.id)) return false;
-          if (n.srcUid && localIds.has(n.srcUid)) return false;
+          if (!n || !n.id || n.incomplete) return false;
+          const k = DB.noteKey(n);
+          if (!k) return false;
+          if (localKeys.has(k)) return false;
+          if (pinKey && k === pinKey) return false;
           return true;
         });
 
@@ -5117,23 +5121,35 @@ DI.register('Feed', function (DB, Ranker, Store, bus, Logger) {
 
       const items = [];
       const dataMap = new Map();
+      const seenKeys = new Set();
 
       for (const n of local) {
-        if (n && n.vector) {
-          items.push({ id: n.id, vector: n.vector });
-          dataMap.set(n.id, Object.assign({}, n, { own: true }));
-        }
+        if (!n || !n.vector) continue;
+        const k = DB.noteKey(n);
+        if (k && seenKeys.has(k)) continue;
+
+        items.push({ id: n.id, vector: n.vector });
+        dataMap.set(n.id, Object.assign({}, n, { own: true }));
+        if (k) seenKeys.add(k);
       }
 
       for (const n of cached) {
         if (!n || !n.vector || n.incomplete) continue;
-        if (n.srcUid && dataMap.has(n.srcUid)) continue;
+        const k = DB.noteKey(n);
+        if (k && seenKeys.has(k)) continue;
+
         items.push({ id: n.id, vector: n.vector });
         dataMap.set(n.id, Object.assign({}, n, { own: false }));
+        if (k) seenKeys.add(k);
       }
 
       return Ranker.cosineBatch(ctx.vector, items).then(scored => {
         if (my !== seq) return;
+
+        const pinFilter = n => {
+          if (!pinKey) return true;
+          return DB.noteKey(n) !== pinKey;
+        };
 
         const { relevant, seren } = Ranker.split(scored);
 
@@ -5142,13 +5158,14 @@ DI.register('Feed', function (DB, Ranker, Store, bus, Logger) {
           return n ? Object.assign({}, n, { score: s.score }) : null;
         };
 
-        const rel = relevant.map(toRes).filter(Boolean);
+        const rel = relevant.map(toRes).filter(Boolean).filter(pinFilter);
+        const srn = seren.map(toRes).filter(Boolean).filter(pinFilter);
 
         Store.setState({
           lists: {
             local: rel.filter(n => n.own),
             world: rel.filter(n => !n.own),
-            seren: seren.map(toRes).filter(Boolean),
+            seren: srn,
           },
           feed: [],
         });
@@ -5159,7 +5176,7 @@ DI.register('Feed', function (DB, Ranker, Store, bus, Logger) {
   }
 
   /**
-   * Инициализация: подписки на триггеры + первичная сборка.
+   * Инициализация.
    */
   function init() {
     unsubs.push(Store.subscribe(s => s.context, () => refresh(), Store.shallowEqual));
@@ -5170,7 +5187,7 @@ DI.register('Feed', function (DB, Ranker, Store, bus, Logger) {
   }
 
   /**
-   * Отписка от всех триггеров.
+   * Отписка.
    */
   function destroy() {
     unsubs.forEach(u => {
@@ -5180,7 +5197,7 @@ DI.register('Feed', function (DB, Ranker, Store, bus, Logger) {
   }
 
   return { init, destroy, refresh };
-}, ['DB', 'Ranker', 'Store', 'EventBus', 'Logger']);
+}, ['DB', 'Ranker', 'Config', 'Store', 'EventBus', 'Logger']);
 // ─── DOMAIN/Feed ─── END ────────────────────────────────────────────────────
 
 // ─── DOMAIN/Provenance ─── START ────────────────────────────────────────────
@@ -6804,28 +6821,26 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
 
 // ─── UI/FeedView ─── START ──────────────────────────────────────────────────
 /**
- * Рендеринг ленты заметок.
+ * Рендеринг ленты.
  *
- * Три режима отображения:
+ * Три режима:
  * 1. Без контекста: хронологический поток.
- * 2. Пин ИЛИ дрейф: единый список по убыванию скора, БЕЗ сегментов.
- * 3. Чистый ввод: заметки из активного сегмента.
+ * 2. Пин ИЛИ дрейф: единый список по убыванию скора, без сегментов.
+ * 3. Чистый ввод: активный сегмент.
  *
- * v0.8 (связи):
- * - Кнопка «↳»: рабочая, только если родитель резолвится
- *   (Provenance.hasResolvableParent); иначе — приглушённая без клика
- *   (статус «источник недоступен», не «удалён» — приватность автора
- *   не раскрывается). Orphan-класс оставлен для него же.
- * - Резонанс: resonance(uid, srcUid) — единое пространство ключей.
- * - Модалки потомков: children(uid, pk) с pk для чужих источников.
+ * v0.8.4: исключение закреплённой заметки из выдачи — по noteKey
+ * (Feed уже фильтрует; здесь — защита отображения от residual-записей).
+ * Стрелка ↳ и ромб ◆ — через Provenance/Influence как в 0.8.1.
  */
-DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Influence, Provenance, Modal, NetService) {
+DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Influence, Provenance, DB, Modal, NetService) {
   let feedEl, emptyEl, emptyT, segBar, ctxBanner, ctxSrc, ctxTxt, ctxX;
   let cLocal, cWorld, cSeren, histBtn;
   let unsubs = [];
   let rafPending = false;
 
-  /** Привязка к DOM. */
+  /**
+   * Привязка к DOM.
+   */
   function bind() {
     feedEl = document.getElementById('feed');
     emptyEl = document.getElementById('feed-empty');
@@ -6841,7 +6856,9 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
     histBtn = document.getElementById('btn-history');
   }
 
-  /** Коалесценция рендеров через requestAnimationFrame. */
+  /**
+   * Коалесценция рендеров.
+   */
   function scheduleRender() {
     if (rafPending) return;
     rafPending = true;
@@ -6852,7 +6869,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
   }
 
   /**
-   * @param {Object} n - Заметка.
+   * @param {Object} n
    * @returns {boolean}
    */
   function isPinned(n) {
@@ -6861,8 +6878,18 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
   }
 
   /**
-   * Клик по карточке: повторный клик по закреплённой — снять пин.
-   * @param {Object} n - Заметка.
+   * @param {Object} n
+   * @returns {boolean} Заметка исключена как «та же, что в пине».
+   */
+  function isPinExcluded(n) {
+    const ctx = Store.get('context');
+    if (!ctx.noteId) return false;
+    const pinKey = 'uid:' + ctx.noteId;
+    return DB.noteKey(n) === pinKey;
+  }
+
+  /**
+   * @param {Object} n
    */
   function onNoteClick(n) {
     const ctx = Store.get('context');
@@ -6876,8 +6903,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
   }
 
   /**
-   * Модалка «Потомки»: список заметок, порождённых данной.
-   * @param {Array<Object>} childrenList - Потомки.
+   * @param {Array<Object>} childrenList
    */
   function renderChildrenModal(childrenList) {
     const truncate = Config.get('truncateTextLength', 140);
@@ -6913,10 +6939,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
   }
 
   /**
-   * Открыть модалку потомков заметки.
-   * v0.8: своя заметка → children(uid); чужая кэш-запись →
-   * children(srcUid, srcPk) — по паре.
-   * @param {Object} note - Заметка.
+   * @param {Object} note
    */
   function showChildren(note) {
     const own = !note.authorPubkey;
@@ -6929,9 +6952,8 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
   }
 
   /**
-   * Модалка «Линейка по мотивам»: цепочка предков с отступами.
-   * @param {Object} note - Заметка.
-   * @param {Array<Object>} chain - Цепочка предков.
+   * @param {Object} note
+   * @param {Array<Object>} chain
    */
   function renderAncestorsModal(note, chain) {
     const truncate = Config.get('truncateTextLength', 140);
@@ -6968,8 +6990,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
   }
 
   /**
-   * Открыть модалку предков заметки.
-   * @param {Object} note - Заметка.
+   * @param {Object} note
    */
   function showAncestors(note) {
     Provenance.ancestors(note.id).then(chain => {
@@ -6978,7 +6999,6 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
   }
 
   /**
-   * Создать разделитель мета-блока.
    * @returns {HTMLSpanElement}
    */
   function createSep() {
@@ -6988,10 +7008,9 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
   }
 
   /**
-   * Рендеринг одной карточки заметки.
-   * @param {Object} n - Заметка.
-   * @param {boolean} isRanked - Показывать ли индикатор сходства.
-   * @param {number} i - Индекс для анимации появления.
+   * @param {Object} n
+   * @param {boolean} isRanked
+   * @param {number} i
    * @returns {HTMLDivElement}
    */
   function card(n, isRanked, i) {
@@ -7008,7 +7027,6 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
     const meta = document.createElement('div');
     meta.className = 'note-meta';
 
-    // Тег: лично/открыто для своих, «· pubkey» для чужих
     const tag = document.createElement('span');
     if (n.own) {
       tag.className = 'note-tag ' + (n.shared ? 'world' : 'priv');
@@ -7026,7 +7044,6 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
     if (hasNav || hasResonance) {
       meta.appendChild(createSep());
 
-      // Кнопка «↳ по мотивам»: рабочая только при резолве родителя.
       if (hasNav) {
         const link = document.createElement('button');
         link.className = 'note-parent';
@@ -7041,8 +7058,6 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
               showAncestors(n);
             });
           } else {
-            // Родитель недоступен (приватный/отозван/удалён) —
-            // приглушённая стрелка без клика.
             link.classList.add('orphan');
             link.title = I18n.t('inf.orphan.hint');
           }
@@ -7054,7 +7069,6 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
         meta.appendChild(link);
       }
 
-      // Кнопка «◆ резонанс»
       if (hasResonance) {
         const r = document.createElement('button');
         r.className = 'note-sim';
@@ -7073,7 +7087,6 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
 
     meta.appendChild(createSep());
 
-    // Индикатор сходства (сигнал или проценты)
     if (isRanked && typeof n.score === 'number') {
       const threshold = Config.get('threshold', 0.81);
       const serendipity = Config.get('serendipity', 0.07);
@@ -7109,13 +7122,11 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
       meta.appendChild(sim);
     }
 
-    // Дата
     const date = document.createElement('span');
     date.className = 'note-date';
     date.textContent = Utils.fmtRelativeTime(n.createdAt, I18n.getLang(), I18n.t);
     meta.appendChild(date);
 
-    // Кнопка «✎ открыть» (только для своих)
     if (n.own) {
       const openBtn = document.createElement('button');
       openBtn.className = 'na';
@@ -7137,7 +7148,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
   }
 
   /**
-   * Полный рендер ленты по текущему состоянию Store.
+   * Полный рендер ленты.
    */
   function render() {
     if (!feedEl) return;
@@ -7169,7 +7180,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
 
     if (isPinnedMode || isDrift) {
       notes = [...state.lists.local, ...state.lists.world, ...state.lists.seren]
-        .filter(n => n.id !== ctx.noteId)
+        .filter(n => !isPinExcluded(n))
         .sort((a, b) => (b.score || 0) - (a.score || 0));
     } else if (isTyping) {
       notes = state.lists[state.seg] || [];
@@ -7241,7 +7252,9 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
     render();
   }
 
-  /** Отписка. */
+  /**
+   * Отписка.
+   */
   function destroy() {
     unsubs.forEach(u => {
       try { u(); } catch (_) {}
@@ -7250,7 +7263,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
   }
 
   return { init, destroy, render };
-}, ['Store', 'Context', 'I18n', 'Utils', 'Config', 'EventBus', 'Influence', 'Provenance', 'Modal', 'NetService']);
+}, ['Store', 'Context', 'I18n', 'Utils', 'Config', 'EventBus', 'Influence', 'Provenance', 'DB', 'Modal', 'NetService']);
 // ─── UI/FeedView ─── END ────────────────────────────────────────────────────
 
 // ─── UI/BaseView ─── START ──────────────────────────────────────────────────
