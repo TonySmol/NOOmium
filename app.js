@@ -25,7 +25,7 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 // ВЕРСИЯ ПРИЛОЖЕНИЯ
 // ═══════════════════════════════════════════════════════════════════════════════
-const APP_VERSION = '0.9.2';
+const APP_VERSION = '0.9.3';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CORE/DI — ПРЕАМБУЛА
@@ -3658,6 +3658,8 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
       if (Config.get('syncEnabled', true)) subscribeSelf();
     }
 
+    try { bus.emit('net:resync'); } catch (_) {}
+
     flushQueue();
   }
 
@@ -3755,11 +3757,12 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
 // ─── DOMAIN/Notes ─── START ─────────────────────────────────────────────────
 /**
  * Переходы состояний своих заметок. Единственная точка записи в
- * notes. Каждая мутация = новая version + notes:changed событие;
+ * notes. Каждая мутация = новая version + note:* событие;
  * публикацию канона дергает NetService через шину.
+ * init слушает notes:imported (versionCounter после импорта).
  */
 DI.register('Notes', function (DB, Embedder, bus, Logger, Utils) {
-  /** @type {number} Монотонный счётчик версий. */
+  /** @type {number} */
   let versionCounter = 0;
 
   /**
@@ -3771,8 +3774,8 @@ DI.register('Notes', function (DB, Embedder, bus, Logger, Utils) {
   }
 
   /**
-   * Восстановление монотонности версий после рестарта:
-   * счётчик = max(сохранённые version, Date.now() в секундах).
+   * Восстановление монотонности: max(версии в notes, сейчас);
+   * подписка на notes:imported.
    * @returns {Promise<void>}
    */
   async function init() {
@@ -3787,10 +3790,15 @@ DI.register('Notes', function (DB, Embedder, bus, Logger, Utils) {
 
     const now = Math.floor(Date.now() / 1000);
     if (versionCounter < now) versionCounter = now;
+
+    bus.on('notes:imported', p => {
+      if (p && typeof p.maxVersion === 'number' && p.maxVersion > versionCounter) {
+        versionCounter = p.maxVersion;
+      }
+    });
   }
 
   /**
-   * Следующая версия (секунды, строго возрастающие).
    * @returns {number}
    */
   function nextVersion() {
@@ -3801,10 +3809,9 @@ DI.register('Notes', function (DB, Embedder, bus, Logger, Utils) {
   }
 
   /**
-   * Создание заметки.
-   * @param {string} text - Текст.
-   * @param {string} visibility - 'private' | 'public'.
-   * @param {Object|null} [parent] - {uid, owner} родителя.
+   * @param {string} text
+   * @param {string} visibility
+   * @param {Object|null} [parent]
    * @returns {Promise<Object|null>}
    */
   async function create(text, visibility, parent) {
@@ -3835,8 +3842,6 @@ DI.register('Notes', function (DB, Embedder, bus, Logger, Utils) {
   }
 
   /**
-   * Редактирование текста. Публичные редактируются (новая версия
-   * канона) — заменой события, replaceable это позволяет.
    * @param {string} uid
    * @param {string} newText
    * @returns {Promise<Object|null>}
@@ -3875,7 +3880,6 @@ DI.register('Notes', function (DB, Embedder, bus, Logger, Utils) {
   }
 
   /**
-   * Переключение видимости.
    * @param {string} uid
    * @returns {Promise<Object|null>}
    */
@@ -3901,10 +3905,8 @@ DI.register('Notes', function (DB, Embedder, bus, Logger, Utils) {
   }
 
   /**
-   * Применение канона владельца с другого устройства (Mirror).
-   * LWW: version, затем updatedAt как tiebreak.
-   * @param {Object} canonical - Расшифрованная запись канона.
-   * @returns {Promise<boolean>} true — применено.
+   * @param {Object} canonical
+   * @returns {Promise<boolean>}
    */
   async function applyOwnCanonical(canonical) {
     if (!canonical || !canonical.uid) return false;
@@ -3913,13 +3915,14 @@ DI.register('Notes', function (DB, Embedder, bus, Logger, Utils) {
     if (!cur) return false;
 
     if (canonical.version < cur.version) return false;
-    if (canonical.version === cur.version &&
-        (canonical.updatedAt || 0) <= (cur.updatedAt || 0)) return false;
+    if (canonical.version === cur.version) return false;
 
-    cur.text = typeof canonical.text === 'string' ? canonical.text : cur.text;
-    cur.vector = canonical.vec || cur.vector;
-    cur.visibility = canonical.visibility || cur.visibility;
-    cur.parent = canonical.parent || cur.parent;
+    if (typeof canonical.text === 'string') cur.text = canonical.text;
+    if (canonical.vec) cur.vector = canonical.vec;
+    if (canonical.visibility === 'public' || canonical.visibility === 'private') {
+      cur.visibility = canonical.visibility;
+    }
+    if (canonical.parent) cur.parent = canonical.parent;
     cur.version = canonical.version;
     cur.updatedAt = Date.now();
 
@@ -3929,8 +3932,7 @@ DI.register('Notes', function (DB, Embedder, bus, Logger, Utils) {
   }
 
   /**
-   * Создание заметки из канона (restore на новом устройстве).
-   * @param {Object} canonical - Расшифрованная запись канона.
+   * @param {Object} canonical
    * @returns {Promise<boolean>}
    */
   async function restoreFromCanonical(canonical) {
@@ -3968,16 +3970,43 @@ DI.register('Notes', function (DB, Embedder, bus, Logger, Utils) {
 
 // ─── DOMAIN/Mirror ─── START ────────────────────────────────────────────────
 /**
- * Интерпретация входящих канонов: свои — к notes (синк устройств),
- * чужие — к mirror. Подтяжка по ответам-ссылкам.
- * Единственная точка записи в mirror.
+ * Интерпретация входящих канонов: свои — к notes (синк/restore),
+ * чужие — к mirror. Единственная точка записи в mirror.
+ * Свои записи в mirror невозможны (И2): защита от окон удаления
+ * и ретро-доставки. При старте вычищает исторические дубли
+ * (owner = свой pk) из mirror.
+ * fetched-множество сбрасывается при resync: ответ, потерянный
+ * до старта сети, подтянется повторно.
  */
-DI.register('Mirror', function (DB, Protocol, Notes, bus, Logger) {
+DI.register('Mirror', function (DB, Protocol, Notes, bus, Nostr, Logger) {
   /** @type {Set<string>} */
   const fetched = new Set();
 
   /**
-   * Инициализация: подписка на входящие события.
+   * Вычистка из mirror записей своего владельца (исторические
+   * дубли, созданные до маршрутизации по владельцу).
+   * @returns {Promise<void>}
+   */
+  async function purgeSelf() {
+    try {
+      const pk = Nostr.getPubkey();
+      if (!pk) return;
+
+      const all = await DB.allMirror();
+      const mine = all.filter(m => m && m.owner === pk);
+
+      for (const m of mine) {
+        await DB.delMirror(m.uid).catch(() => {});
+      }
+
+      if (mine.length) {
+        Logger.info('Mirror: вычищено своих дублей — ' + mine.length);
+      }
+    } catch (_) {}
+  }
+
+  /**
+   * Инициализация: подписки, стартовая чистка.
    */
   function init() {
     bus.on('net:canon', ev => {
@@ -3987,10 +4016,18 @@ DI.register('Mirror', function (DB, Protocol, Notes, bus, Logger) {
     bus.on('net:answer', a => {
       if (a && a.uid && a.owner) fetchTarget(a.uid, a.owner);
     });
+
+    bus.on('net:resync', () => {
+      fetched.clear();
+    });
+
+    Nostr.init().then(purgeSelf).catch(() => {});
   }
 
   /**
-   * Применить входящее событие канона.
+   * Применить входящее событие канона. Маршрутизация по
+   * владельцу (И2): свой — notes (update/restore/delete-эхо),
+   * чужой — mirror.
    * @param {Object} ev - Nostr-событие kind 30078.
    * @returns {Promise<void>}
    */
@@ -3999,10 +4036,31 @@ DI.register('Mirror', function (DB, Protocol, Notes, bus, Logger) {
       const canonical = await Protocol.decodeCanon(ev);
       if (!canonical || !canonical.uid || !canonical.owner) return;
 
-      if (DB.hasOwn(canonical.uid)) {
-        const applied = await Notes.applyOwnCanonical(canonical);
-        if (applied) {
-          Logger.info('Mirror: синк ' + canonical.uid.slice(0, 6) + ' v' + canonical.version);
+      const myPk = Nostr.getPubkey();
+
+      if (myPk && canonical.owner === myPk) {
+        if (canonical.deleted) {
+          const cur = await DB.getNote(canonical.uid);
+          if (cur) {
+            await DB.delNote(canonical.uid);
+            Logger.info('Mirror: удаление по эху ' + canonical.uid.slice(0, 6));
+          }
+          return;
+        }
+
+        const cur = await DB.getNote(canonical.uid);
+
+        if (cur) {
+          const applied = await Notes.applyOwnCanonical(canonical);
+          if (applied) {
+            Logger.info('Mirror: синк ' + canonical.uid.slice(0, 6) + ' v' + canonical.version);
+          }
+          return;
+        }
+
+        const restored = await Notes.restoreFromCanonical(canonical);
+        if (restored) {
+          Logger.info('Mirror: restore ' + canonical.uid.slice(0, 6) + ' v' + canonical.version);
         }
         return;
       }
@@ -4014,8 +4072,7 @@ DI.register('Mirror', function (DB, Protocol, Notes, bus, Logger) {
   }
 
   /**
-   * Подтяжка заметки по ответу-ссылке: подписка на автора + d-tag.
-   * Релей replaceable-семантики отдаёт последнюю версию.
+   * Подтяжка заметки по ответу-ссылке.
    * @param {string} uid
    * @param {string} owner
    */
@@ -4037,7 +4094,7 @@ DI.register('Mirror', function (DB, Protocol, Notes, bus, Logger) {
   }
 
   return { init, applyCanon, fetchTarget };
-}, ['DB', 'Protocol', 'Notes', 'EventBus', 'Logger']);
+}, ['DB', 'Protocol', 'Notes', 'EventBus', 'Nostr', 'Logger']);
 // ─── DOMAIN/Mirror ─── END ──────────────────────────────────────────────────
 
 // ─── DOMAIN/Context ─── START ───────────────────────────────────────────────
@@ -4338,9 +4395,9 @@ DI.register('Feed', function (DB, Ranker, Store, bus, Logger) {
 // ─── DOMAIN/Provenance ─── START ────────────────────────────────────────────
 /**
  * Генеалогия по parent {uid, owner} через notes + mirror.
- * Резолв родителя: owner свой/null → notes; иначе → mirror.
- * Резолв считается успешным при любом найденном состоянии —
- * видимость решает UI (доступен/недоступен).
+ * mirror-записи своих uid исключаются (дубли-защита, И2):
+ * истина своей заметки — в notes. Резолв любого состояния
+ * считается успешным; видимость решает UI.
  */
 DI.register('Provenance', function (DB, bus, Nostr) {
   /** @type {Map<string, {chain: Array, timestamp: number}>} */
@@ -4348,6 +4405,8 @@ DI.register('Provenance', function (DB, bus, Nostr) {
   const CACHE_TTL = 5000;
 
   /**
+   * Все заметки: свои (notes, полные) + чужие mirror (не deleted,
+   * не свои uid).
    * @returns {Promise<Array<Object>>}
    */
   function loadAll() {
@@ -4356,21 +4415,23 @@ DI.register('Provenance', function (DB, bus, Nostr) {
         uid: n.uid, owner: null, text: n.text, visibility: n.visibility,
         parent: n.parent, isOwn: true,
       }));
+
       mirror.forEach(m => {
-        if (m && m.visibility !== 'deleted') {
-          out.push({
-            uid: m.uid, owner: m.owner, text: m.text, visibility: m.visibility,
-            parent: m.parent, isOwn: false,
-          });
-        }
+        if (!m || m.visibility === 'deleted') return;
+        if (DB.hasOwn(m.uid)) return;
+        out.push({
+          uid: m.uid, owner: m.owner, text: m.text, visibility: m.visibility,
+          parent: m.parent, isOwn: false,
+        });
       });
+
       return out;
     });
   }
 
   /**
    * @param {Array<Object>} all
-   * @returns {{byUid: Map}} Индекс по uid.
+   * @returns {{byUid: Map}}
    */
   function buildIndex(all) {
     const byUid = new Map();
@@ -4404,6 +4465,7 @@ DI.register('Provenance', function (DB, bus, Nostr) {
   }
 
   /**
+   * Все потомки (BFS, защита от циклов).
    * @param {string} uid
    * @returns {Promise<Array<Object>>}
    */
@@ -4435,6 +4497,7 @@ DI.register('Provenance', function (DB, bus, Nostr) {
   }
 
   /**
+   * Цепочка предков до корня.
    * @param {string} uid
    * @returns {Promise<Array<Object>>}
    */
@@ -4472,7 +4535,6 @@ DI.register('Provenance', function (DB, bus, Nostr) {
   }
 
   /**
-   * Резолвится ли родитель (живая стрелка).
    * @param {Object} note
    * @returns {Promise<boolean>}
    */
@@ -4504,6 +4566,8 @@ DI.register('Provenance', function (DB, bus, Nostr) {
 // ─── DOMAIN/Influence ─── START ─────────────────────────────────────────────
 /**
  * Резонанс: уникальные авторы потомков по ключу uid родителя.
+ * Свои дети — 'self'; чужие — owner. mirror-дубли своих uid
+ * и неизвестные авторы не считаются.
  */
 DI.register('Influence', function (DB, bus, Logger) {
   /** @type {Map<string, Set<string>>} */
@@ -4531,16 +4595,21 @@ DI.register('Influence', function (DB, bus, Logger) {
 
       const m = new Map();
 
-      const add = (n, author) => {
-        const key = parentKey(n);
-        if (!key) return;
+      const add = (key, author) => {
+        if (!key || !author) return;
         if (!m.has(key)) m.set(key, new Set());
         m.get(key).add(author);
       };
 
-      notes.forEach(n => add(n, 'self'));
+      notes.forEach(n => {
+        if (!n) return;
+        add(parentKey(n), 'self');
+      });
+
       mirror.forEach(mm => {
-        if (mm && mm.visibility !== 'deleted') add(mm, mm.owner || 'anon');
+        if (!mm || mm.visibility !== 'public') return;
+        if (DB.hasOwn(mm.uid)) return;
+        add(parentKey(mm), mm.owner || null);
       });
 
       map.clear();
