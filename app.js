@@ -2956,9 +2956,8 @@ DI.register('Protocol', function (Config, Vec, Vault, Nostr) {
 // ─── NET/NetService ─── START ───────────────────────────────────────────────
 /**
  * Движение: подписка на комнату и на себя, публикация канонов
- * (очередь uids в localStorage, flush при доступности сети),
- * обработка запросов и отправка ответов-ссылок, отправка запросов
- * при контексте. Экспоненциальный реконнект.
+ * (очередь uids/deleted в localStorage), ответы-ссылки на запросы,
+ * запросы при контексте, расширение окна истории, реконнект.
  */
 DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Config, Logger, bus) {
   let started = false;
@@ -2989,7 +2988,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   let subEpoch = 0;
 
   const QUEUE_KEY = 'noomium:queue';
-  const DELETED_KEY = 'noomium:deleted';
 
   /**
    * @returns {{uids: string[], deleted: Array<{uid: string, version: number}>}}
@@ -3001,7 +2999,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
         const q = JSON.parse(raw);
         return {
           uids: Array.isArray(q.uids) ? q.uids.filter(Boolean) : [],
-          deleted: Array.isArray(q.deleted) ? q.deleted.filter(d => d && d.uid && d.version) : [],
+          deleted: Array.isArray(q.deleted) ? q.deleted.filter(d => d && d.uid && typeof d.version === 'number') : [],
         };
       }
     } catch (_) {}
@@ -3040,14 +3038,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   }
 
   /**
-   * @param {boolean} loading
-   * @param {number} [windowSec]
-   */
-  function emitHistory(loading, windowSec) {
-    try { bus.emit('net:history', { loading, window: windowSec }); } catch (_) {}
-  }
-
-  /**
    * @returns {boolean}
    */
   function isOffline() {
@@ -3075,6 +3065,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
 
   /**
    * @param {string} uid
+   * @param {number} version
    */
   function queueDeleted(uid, version) {
     if (!uid || !version) return;
@@ -3105,7 +3096,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   }
 
   /**
-   * Сброс очереди: каноны живых заметок, затем deleted.
+   * Сброс очереди: каноны живых, затем deleted.
    * @returns {Promise<void>}
    */
   async function flushQueue() {
@@ -3162,7 +3153,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   }
 
   /**
-   * Перестройка центроидов префильтра.
+   * Перестройка центроидов.
    */
   function rebuildCentroids() {
     DB.allNotes().then(notes => {
@@ -3210,7 +3201,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   }
 
   /**
-   * Обработчик событий комнатной подписки.
    * @param {Object} ev
    */
   function onEvent(ev) {
@@ -3428,7 +3418,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   }
 
   /**
-   * Обработка запроса Mirror на подтяжку цели.
+   * Подтяжка цели по ответу-ссылке.
    * @param {Object} p - {uid, owner}
    */
   function handleMirrorFetch(p) {
@@ -3439,14 +3429,22 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
       try { fetchSubscription.close(); } catch (_) {}
     }
 
+    let done = false;
+
     fetchSubscription = Nostr.subscribe(
       [{ authors: [p.owner], kinds: [kCanon()], '#d': [p.uid] }],
       {
         onevent: ev => {
           if (!ev || !ev.id) return;
+          done = true;
           try { bus.emit('net:canon', ev); } catch (_) {}
+          if (fetchSubscription && typeof fetchSubscription.close === 'function') {
+            try { fetchSubscription.close(); } catch (_) {}
+            fetchSubscription = null;
+          }
         },
         onclose: () => {
+          if (done) return;
           setTimeout(() => {
             if (fetchSubscription) {
               try { fetchSubscription.close(); } catch (_) {}
@@ -3511,6 +3509,41 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   }
 
   /**
+   * Расширение окна истории.
+   */
+  function loadHistory() {
+    if (!started || historyLoading) return;
+
+    const maxWindow = Config.get('historyMaxWindow', 2592000);
+    if (currentWindow >= maxWindow) {
+      emitHistoryDone(false);
+      return;
+    }
+
+    historyLoading = true;
+    emitHistoryDone(true);
+
+    currentWindow = Math.min(maxWindow, Math.max(currentWindow * 4, 86400));
+
+    try {
+      subscribeToRoom();
+      Logger.info('NetService: окно истории → ' + currentWindow + 's');
+    } finally {
+      setTimeout(() => {
+        historyLoading = false;
+        emitHistoryDone(false);
+      }, 1200);
+    }
+  }
+
+  /**
+   * @param {boolean} loading
+   */
+  function emitHistoryDone(loading) {
+    try { bus.emit('net:history', { loading: loading, window: currentWindow }); } catch (_) {}
+  }
+
+  /**
    * Старт.
    * @returns {Promise<void>}
    */
@@ -3522,7 +3555,10 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
 
     startPromise = Nostr.init()
       .then(() => DB.ready())
-      .then(() => Notes_initAndScan())
+      .then(() => {
+        const Notes = DI.resolve('Notes');
+        return Notes.init();
+      })
       .then(() => {
         started = true;
         reconnectAttempts = 0;
@@ -3573,7 +3609,13 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
 
         startHeartbeat();
         rebuildCentroids();
-        flushQueue();
+
+        DB.allNotes().then(notes => {
+          notes.forEach(n => {
+            if (n && n.uid) queuePublish(n.uid);
+          });
+          flushQueue();
+        }).catch(() => {});
 
         if (isOffline()) {
           setStatus('failed');
@@ -3598,22 +3640,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
       });
 
     return startPromise;
-  }
-
-  /**
-   * Notes.init (монотонность версий) + скан неопубликованных.
-   * @returns {Promise<void>}
-   */
-  function Notes_initAndScan() {
-    const NotesMod = DI.resolve('Notes');
-    return NotesMod.init().then(() => {
-      return DB.allNotes().then(notes => {
-        notes.forEach(n => {
-          if (n && n.uid) queuePublish(n.uid);
-        });
-        return flushQueue();
-      });
-    });
   }
 
   /**
@@ -3718,7 +3744,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     } catch (_) {}
   }
 
-  return { start, stop, resync, loadHistory: emitHistory, publishWipeAll };
+  return { start, stop, resync, loadHistory, publishWipeAll };
 }, ['Nostr', 'Protocol', 'DB', 'Ranker', 'Vec', 'Store', 'Config', 'Logger', 'EventBus']);
 // ─── NET/NetService ─── END ─────────────────────────────────────────────────
 
@@ -4016,42 +4042,931 @@ DI.register('Mirror', function (DB, Protocol, Notes, bus, Logger) {
 
 // ─── DOMAIN/Context ─── START ───────────────────────────────────────────────
 /**
- * Пин/дрейф/ввод. Пин = снимок {uid, owner, vector, text}.
+ * Контекст поиска: пин/дрейф/ввод. Приоритет drift > pin > input.
+ * Пин несёт идентичность заметки {uid, owner} (И1) и вектор.
  */
+DI.register('Context', function (Store, Embedder, Config, Utils, bus) {
+  /** @type {string} */
+  let inputText = '';
+  /** @type {Float32Array|null} */
+  let inputVector = null;
+  /** @type {Object|null} */
+  let pin = null;
+
+  /**
+   * Вычисление активного контекста.
+   * @returns {Object}
+   */
+  function activeContext() {
+    const hasInput = !!inputText.trim();
+
+    if (pin && hasInput) {
+      return {
+        source: 'drift',
+        uid: pin.uid,
+        owner: pin.owner,
+        text: inputText.trim(),
+        vector: inputVector,
+        pinText: pin.text,
+      };
+    }
+
+    if (pin) {
+      return {
+        source: 'pin',
+        uid: pin.uid,
+        owner: pin.owner,
+        text: pin.text,
+        vector: pin.vector,
+      };
+    }
+
+    if (hasInput) {
+      return {
+        source: 'input',
+        uid: null,
+        owner: null,
+        text: inputText.trim(),
+        vector: inputVector,
+      };
+    }
+
+    return {
+      source: null,
+      uid: null,
+      owner: null,
+      text: '',
+      vector: null,
+    };
+  }
+
+  /**
+   * Пуш контекста в Store.
+   */
+  function push() {
+    Store.setState({ context: activeContext() });
+  }
+
+  /**
+   * Дебаунс эмбеддинга ввода с защитой от гонок.
+   */
+  const debouncedEmbed = Utils.debounce(() => {
+    const t = inputText.trim();
+    if (!t) {
+      inputVector = null;
+      push();
+      return;
+    }
+
+    Embedder.embed(t).then(v => {
+      if (inputText.trim() === t) {
+        inputVector = v;
+        push();
+      }
+    });
+  }, Config.get('debounce', 350));
+
+  return {
+    /**
+     * @param {string} text
+     */
+    setInput(text) {
+      inputText = text || '';
+      if (!inputText.trim()) inputVector = null;
+      push();
+      debouncedEmbed();
+    },
+
+    /**
+     * @param {Object} note - Заметка с вектором (notes или mirror).
+     */
+    setPin(note) {
+      if (!note || !note.vector) return;
+      pin = {
+        uid: note.uid,
+        owner: note.owner !== undefined ? note.owner : (note.authorPubkey || null),
+        text: note.text,
+        vector: note.vector,
+      };
+      push();
+    },
+
+    clearPin() {
+      pin = null;
+      push();
+    },
+
+    clear() {
+      inputText = '';
+      inputVector = null;
+      pin = null;
+      debouncedEmbed.cancel();
+      push();
+    },
+
+    /**
+     * @returns {Float32Array|Array<number>|null}
+     */
+    getVector() {
+      return activeContext().vector;
+    },
+
+    /**
+     * @returns {Object}
+     */
+    getActive() {
+      return activeContext();
+    },
+
+    /**
+     * @returns {Object|null}
+     */
+    getPin() {
+      return pin;
+    },
+
+    init() {
+      bus.on('note:pin', note => {
+        if (note) this.setPin(note);
+      });
+    },
+  };
+}, ['Store', 'Embedder', 'Config', 'Utils', 'EventBus']);
 // ─── DOMAIN/Context ─── END ─────────────────────────────────────────────────
 
 // ─── DOMAIN/Feed ─── START ──────────────────────────────────────────────────
 /**
- * Сборка лент: хронология (notes public + mirror public) и
- * ранжирование по контексту. Дедуп: свои доминируют над зеркалом
- * по (uid, owner). Исключение пина по идентичности (И7).
+ * Сборка лент из notes (свои) и mirror (чужие).
+ * Хронология: свои public + чужие public. Ранжирование: по контексту.
+ * Дедуп: uid. Исключение пина: по идентичности (И7).
+ * Свои доминируют над mirror при совпадении uid.
  */
+DI.register('Feed', function (DB, Ranker, Store, bus, Logger) {
+  /** @type {number} */
+  let seq = 0;
+  /** @type {Array<Function>} */
+  let unsubs = [];
+
+  /**
+   * Пересборка лент (seq-guard).
+   * @returns {Promise<void>}
+   */
+  function refresh() {
+    const my = ++seq;
+    const ctx = Store.get('context');
+
+    return Promise.all([DB.allNotes(), DB.allMirror()]).then(([notes, mirror]) => {
+      if (my !== seq) return;
+
+      const ownUids = new Set();
+      notes.forEach(n => {
+        if (n) ownUids.add(n.uid);
+      });
+
+      const pinUid = ctx.uid || null;
+      const pinOwner = ctx.owner || null;
+
+      const publicNotes = notes
+        .filter(n => n && n.visibility === 'public' && n.text)
+        .map(n => ({ uid: n.uid, owner: null, text: n.text, vector: n.vector,
+                     parent: n.parent, createdAt: n.createdAt, updatedAt: n.updatedAt,
+                     own: true }));
+
+      const publicMirror = mirror
+        .filter(m => m && m.visibility === 'public' && m.text && !ownUids.has(m.uid))
+        .map(m => ({ uid: m.uid, owner: m.owner, text: m.text, vector: m.vec,
+                     parent: m.parent, createdAt: m.version * 1000, updatedAt: m.version * 1000,
+                     own: false }));
+
+      if (!ctx.source) {
+        const merged = [...publicNotes, ...publicMirror]
+          .filter(n => !isPin(n, pinUid, pinOwner))
+          .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+
+        Store.setState({
+          feed: merged,
+          lists: { local: [], world: [], seren: [] },
+        });
+
+        return;
+      }
+
+      if (!ctx.vector) return;
+
+      const all = [...publicNotes, ...publicMirror]
+        .filter(n => !isPin(n, pinUid, pinOwner));
+
+      const items = [];
+      const dataMap = new Map();
+      const seenUids = new Set();
+
+      for (const n of all) {
+        if (!n.vector || seenUids.has(n.uid)) continue;
+        seenUids.add(n.uid);
+        items.push({ id: n.uid, vector: n.vector });
+        dataMap.set(n.uid, n);
+      }
+
+      return Ranker.cosineBatch(ctx.vector, items).then(scored => {
+        if (my !== seq) return;
+
+        const { relevant, seren } = Ranker.split(scored);
+
+        const toRes = s => {
+          const n = dataMap.get(s.id);
+          return n ? Object.assign({}, n, { score: s.score }) : null;
+        };
+
+        const rel = relevant.map(toRes).filter(Boolean);
+        const srn = seren.map(toRes).filter(Boolean);
+
+        Store.setState({
+          lists: {
+            local: rel.filter(n => n.own),
+            world: rel.filter(n => !n.own),
+            seren: srn,
+          },
+          feed: [],
+        });
+      });
+    }).catch(err => {
+      Logger.warn('Feed: ошибка refresh', String(err && err.message || err));
+    });
+  }
+
+  /**
+   * @param {Object} n
+   * @param {string|null} pinUid
+   * @param {string|null} pinOwner
+   * @returns {boolean}
+   */
+  function isPin(n, pinUid, pinOwner) {
+    if (!pinUid) return false;
+    if (n.uid !== pinUid) return false;
+    if (n.own && !pinOwner) return true;
+    if (!n.own && pinOwner && n.owner === pinOwner) return true;
+    return false;
+  }
+
+  /**
+   * Инициализация.
+   */
+  function init() {
+    unsubs.push(Store.subscribe(s => s.context, () => refresh(), Store.shallowEqual));
+    unsubs.push(bus.on('db:change', () => refresh()));
+    unsubs.push(bus.on('db:mirror', () => refresh()));
+
+    refresh();
+  }
+
+  /**
+   * Отписка.
+   */
+  function destroy() {
+    unsubs.forEach(u => {
+      try { u(); } catch (_) {}
+    });
+    unsubs = [];
+  }
+
+  return { init, destroy, refresh };
+}, ['DB', 'Ranker', 'Store', 'EventBus', 'Logger']);
 // ─── DOMAIN/Feed ─── END ────────────────────────────────────────────────────
 
 // ─── DOMAIN/Provenance ─── START ────────────────────────────────────────────
 /**
  * Генеалогия по parent {uid, owner} через notes + mirror.
- * Фотография: родительский текст фиксируется у ребёнка при ответе.
+ * Резолв родителя: owner свой/null → notes; иначе → mirror.
+ * Резолв считается успешным при любом найденном состоянии —
+ * видимость решает UI (доступен/недоступен).
  */
+DI.register('Provenance', function (DB, bus, Nostr) {
+  /** @type {Map<string, {chain: Array, timestamp: number}>} */
+  const cache = new Map();
+  const CACHE_TTL = 5000;
+
+  /**
+   * @returns {Promise<Array<Object>>}
+   */
+  function loadAll() {
+    return Promise.all([DB.allNotes(), DB.allMirror()]).then(([notes, mirror]) => {
+      const out = notes.map(n => ({
+        uid: n.uid, owner: null, text: n.text, visibility: n.visibility,
+        parent: n.parent, isOwn: true,
+      }));
+      mirror.forEach(m => {
+        if (m && m.visibility !== 'deleted') {
+          out.push({
+            uid: m.uid, owner: m.owner, text: m.text, visibility: m.visibility,
+            parent: m.parent, isOwn: false,
+          });
+        }
+      });
+      return out;
+    });
+  }
+
+  /**
+   * @param {Array<Object>} all
+   * @returns {{byUid: Map}} Индекс по uid.
+   */
+  function buildIndex(all) {
+    const byUid = new Map();
+    all.forEach(n => {
+      if (n && n.uid) byUid.set(n.uid, n);
+    });
+    return { byUid };
+  }
+
+  /**
+   * @param {Object} note
+   * @param {{byUid: Map}} idx
+   * @returns {Object|null}
+   */
+  function resolveParent(note, idx) {
+    if (!note || !note.parent || !note.parent.uid) return null;
+    return idx.byUid.get(note.parent.uid) || null;
+  }
+
+  /**
+   * Прямые дети заметки.
+   * @param {string} uid
+   * @returns {Promise<Array<Object>>}
+   */
+  function children(uid) {
+    if (!uid) return Promise.resolve([]);
+
+    return loadAll().then(all => {
+      return all.filter(n => n.parent && n.parent.uid === uid);
+    });
+  }
+
+  /**
+   * @param {string} uid
+   * @returns {Promise<Array<Object>>}
+   */
+  function descendants(uid) {
+    if (!uid) return Promise.resolve([]);
+
+    return loadAll().then(all => {
+      const out = [];
+      const seenIds = new Set([uid]);
+      let frontier = [uid];
+
+      while (frontier.length) {
+        const next = [];
+
+        for (const n of all) {
+          if (!n.parent || !n.parent.uid) continue;
+          if (frontier.indexOf(n.parent.uid) !== -1 && !seenIds.has(n.uid)) {
+            seenIds.add(n.uid);
+            out.push(n);
+            next.push(n.uid);
+          }
+        }
+
+        frontier = next;
+      }
+
+      return out;
+    });
+  }
+
+  /**
+   * @param {string} uid
+   * @returns {Promise<Array<Object>>}
+   */
+  function ancestors(uid) {
+    if (!uid) return Promise.resolve([]);
+
+    const cached = cache.get(uid);
+    if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
+      return Promise.resolve(cached.chain);
+    }
+
+    return loadAll().then(all => {
+      const idx = buildIndex(all);
+
+      let current = idx.byUid.get(uid) || null;
+      const chain = [];
+      const seen = new Set([uid]);
+
+      while (current && current.parent && current.parent.uid) {
+        if (seen.has(current.parent.uid)) break;
+        seen.add(current.parent.uid);
+
+        const parent = resolveParent(current, idx);
+        if (!parent) break;
+
+        chain.push(parent);
+        if (seen.has(parent.uid)) break;
+        seen.add(parent.uid);
+        current = parent;
+      }
+
+      cache.set(uid, { chain, timestamp: Date.now() });
+      return chain;
+    });
+  }
+
+  /**
+   * Резолвится ли родитель (живая стрелка).
+   * @param {Object} note
+   * @returns {Promise<boolean>}
+   */
+  function hasResolvableParent(note) {
+    if (!note || !note.parent || !note.parent.uid) {
+      return Promise.resolve(false);
+    }
+
+    return loadAll().then(all => {
+      const idx = buildIndex(all);
+      return !!resolveParent(note, idx);
+    });
+  }
+
+  /**
+   * Очистка кэша.
+   */
+  function clearCache() {
+    cache.clear();
+  }
+
+  bus.on('db:change', clearCache);
+  bus.on('db:mirror', clearCache);
+
+  return { children, descendants, ancestors, hasResolvableParent, loadAll, clearCache };
+}, ['DB', 'EventBus', 'Nostr']);
 // ─── DOMAIN/Provenance ─── END ──────────────────────────────────────────────
 
 // ─── DOMAIN/Influence ─── START ─────────────────────────────────────────────
 /**
- * Резонанс: уникальные авторы потомков по ключу (uid, owner).
+ * Резонанс: уникальные авторы потомков по ключу uid родителя.
  */
+DI.register('Influence', function (DB, bus, Logger) {
+  /** @type {Map<string, Set<string>>} */
+  const map = new Map();
+  /** @type {number} */
+  let seq = 0;
+
+  /**
+   * @param {Object} n
+   * @returns {string|null}
+   */
+  function parentKey(n) {
+    if (!n || !n.parent || !n.parent.uid) return null;
+    return n.parent.uid;
+  }
+
+  /**
+   * @returns {Promise<void>}
+   */
+  function rebuild() {
+    const my = ++seq;
+
+    return Promise.all([DB.allNotes(), DB.allMirror()]).then(([notes, mirror]) => {
+      if (my !== seq) return;
+
+      const m = new Map();
+
+      const add = (n, author) => {
+        const key = parentKey(n);
+        if (!key) return;
+        if (!m.has(key)) m.set(key, new Set());
+        m.get(key).add(author);
+      };
+
+      notes.forEach(n => add(n, 'self'));
+      mirror.forEach(mm => {
+        if (mm && mm.visibility !== 'deleted') add(mm, mm.owner || 'anon');
+      });
+
+      map.clear();
+      m.forEach((v, k) => map.set(k, v));
+
+      try { bus.emit('influence:updated'); } catch (_) {}
+    }).catch(e => Logger.warn('Influence: ошибка rebuild', String(e)));
+  }
+
+  /**
+   * @param {Object} note
+   */
+  function updateForNote(note) {
+    const key = parentKey(note);
+    if (!key) return;
+
+    if (!map.has(key)) map.set(key, new Set());
+    map.get(key).add('self');
+
+    try { bus.emit('influence:updated'); } catch (_) {}
+  }
+
+  /**
+   * @param {string} uid
+   * @returns {number}
+   */
+  function resonance(uid) {
+    if (!uid) return 0;
+    const s = map.get(uid);
+    return s ? s.size : 0;
+  }
+
+  /**
+   * Инициализация.
+   */
+  function init() {
+    bus.on('note:created', updateForNote);
+    bus.on('note:updated', updateForNote);
+    bus.on('note:deleted', () => rebuild());
+    bus.on('db:change', () => rebuild());
+    bus.on('db:mirror', () => rebuild());
+
+    rebuild();
+  }
+
+  return { init, resonance, rebuild };
+}, ['DB', 'EventBus', 'Logger']);
 // ─── DOMAIN/Influence ─── END ───────────────────────────────────────────────
 
 // ─── DOMAIN/Account ─── START ───────────────────────────────────────────────
 /**
- * Аккаунт: ключи (nsec/npub/ncryptsec), вход, архив v3
- * ({version, app, pubkey, ncryptsec?, notes, config}).
+ * Аккаунт: показ/ввод ключа (nsec/npub/ncryptsec, NIP-49),
+ * вход с заменой ключа, JSON-архив v3 (заметки + конфиг).
  */
+DI.register('Account', function (Config, Nostr, Crypto, DB, bus, Logger) {
+  /** @type {Array<string>} */
+  const CONFIG_WHITELIST = [
+    'threshold',
+    'serendipity',
+    'duplicateThreshold',
+    'similarityDisplay',
+    'lang',
+    'theme',
+  ];
+
+  /**
+   * @returns {Promise<Object>} {pubkey, keyExported, syncEnabled}
+   */
+  async function getAccountInfo() {
+    await Nostr.init();
+    return {
+      pubkey: Nostr.getPubkey(),
+      keyExported: Config.get('keyExported', false),
+      syncEnabled: Config.get('syncEnabled', true),
+    };
+  }
+
+  /**
+   * @returns {Promise<string|null>}
+   */
+  async function getNpub() {
+    const pk = Nostr.getPubkey();
+    if (!pk) return null;
+    return Crypto.encodeNpub(pk);
+  }
+
+  /**
+   * @returns {Promise<boolean>}
+   */
+  async function canWrapKey() {
+    try {
+      return await Crypto.hasNip49();
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /**
+   * @param {string} [password]
+   * @returns {Promise<string|null>}
+   */
+  async function getWrappedKey(password) {
+    const sk = Nostr.getSecretKey();
+    if (!sk) return null;
+
+    const wrapped = await Crypto.encryptKey(sk, String(password || ''));
+    if (wrapped) {
+      Config.set('keyExported', true);
+      return wrapped;
+    }
+
+    const nsec = await Crypto.encodeNsec(sk);
+    if (nsec) {
+      Logger.warn('Account: NIP-49 недоступен, ключ в формате nsec');
+      Config.set('keyExported', true);
+      return nsec;
+    }
+
+    return null;
+  }
+
+  /**
+   * @param {string} input
+   * @param {string} [password]
+   * @returns {Promise<{ok: boolean, error?: string, pubkey?: string}>}
+   */
+  async function enterKey(input, password) {
+    const type = Crypto.classifyKeyInput(input);
+    if (!type) return { ok: false, error: 'bad' };
+
+    let sk = null;
+    try {
+      if (type === 'ncryptsec') {
+        sk = await Crypto.decryptKey(String(input || '').trim(), String(password || ''));
+      } else {
+        sk = await Crypto.decodeSecret(input);
+      }
+    } catch (e) {
+      Logger.warn('Account: enterKey decode', String(e && e.message || e));
+    }
+
+    if (!sk) return { ok: false, error: 'bad' };
+
+    try {
+      await Nostr.init();
+      const pk = Nostr.setKey(sk);
+
+      await DB.reset();
+
+      Config.set('keyExported', false);
+
+      try { bus.emit('account:changed', { pubkey: pk }); } catch (_) {}
+
+      try {
+        const NetService = DI.resolve('NetService');
+        NetService.stop(false);
+        setTimeout(() => { NetService.start(); }, 500);
+      } catch (_) {}
+
+      Logger.info('Account: ключ заменён, pubkey ' + pk.slice(0, 8) + '…');
+      return { ok: true, pubkey: pk };
+    } catch (e) {
+      Logger.error('Account: enterKey', String(e && e.message || e));
+      return { ok: false, error: 'failed' };
+    }
+  }
+
+  /**
+   * @param {Object} n
+   * @returns {Object|null}
+   */
+  function sanitizeNote(n) {
+    if (!n || typeof n.uid !== 'string' || typeof n.text !== 'string') return null;
+    if (n.text.length > Config.get('maxNoteTextLength', 10000)) return null;
+
+    let vector = null;
+    if (Array.isArray(n.vector)) {
+      vector = n.vector.filter(x => typeof x === 'number' && isFinite(x));
+    }
+
+    let parent = null;
+    if (n.parent && typeof n.parent === 'object' && typeof n.parent.uid === 'string' && n.parent.uid) {
+      parent = { uid: n.parent.uid, owner: n.parent.owner || null };
+    }
+
+    return {
+      uid: n.uid,
+      text: n.text,
+      vector,
+      visibility: n.visibility === 'public' ? 'public' : 'private',
+      parent,
+      version: typeof n.version === 'number' && n.version > 0 ? n.version : Math.floor(Date.now() / 1000),
+      createdAt: typeof n.createdAt === 'number' ? n.createdAt : Date.now(),
+      updatedAt: typeof n.updatedAt === 'number' ? n.updatedAt : Date.now(),
+    };
+  }
+
+  /**
+   * @param {boolean} [includeKey]
+   * @param {string} [keyPassword]
+   * @returns {Promise<{json: string, filename: string}|null>}
+   */
+  async function exportArchive(includeKey, keyPassword) {
+    try {
+      await Nostr.init();
+
+      const notes = await DB.allNotes();
+      const archive = {
+        version: 3,
+        app: 'noomium',
+        createdAt: Date.now(),
+        pubkey: Nostr.getPubkey(),
+        ncryptsec: null,
+        notes: notes.map(sanitizeNote).filter(Boolean),
+        config: {},
+      };
+
+      CONFIG_WHITELIST.forEach(k => {
+        archive.config[k] = Config.get(k);
+      });
+
+      if (includeKey) {
+        archive.ncryptsec = await getWrappedKey(keyPassword);
+        if (!archive.ncryptsec) {
+          return null;
+        }
+      }
+
+      const d = new Date();
+      const pad = n => String(n).padStart(2, '0');
+      const filename = 'noomium-backup-'
+        + d.getFullYear() + pad(d.getMonth() + 1) + pad(d.getDate())
+        + '-' + pad(d.getHours()) + pad(d.getMinutes())
+        + '.json';
+
+      return { json: JSON.stringify(archive, null, 2), filename };
+    } catch (e) {
+      Logger.error('Account: exportArchive', String(e && e.message || e));
+      return null;
+    }
+  }
+
+  /**
+   * @param {string} text
+   * @returns {{ok: boolean, error?: string, archive?: Object}}
+   */
+  function parseArchive(text) {
+    let data;
+    try {
+      data = JSON.parse(String(text || ''));
+    } catch (_) {
+      return { ok: false, error: 'bad' };
+    }
+
+    if (!data || typeof data !== 'object' || data.app !== 'noomium') {
+      return { ok: false, error: 'bad' };
+    }
+    if (!Array.isArray(data.notes)) {
+      return { ok: false, error: 'bad' };
+    }
+
+    const notes = [];
+    for (const raw of data.notes) {
+      const note = sanitizeNote(raw);
+      if (note) notes.push(note);
+    }
+
+    const config = {};
+    if (data.config && typeof data.config === 'object') {
+      CONFIG_WHITELIST.forEach(k => {
+        if (k in data.config) config[k] = data.config[k];
+      });
+    }
+
+    return {
+      ok: true,
+      archive: {
+        version: typeof data.version === 'number' ? data.version : 3,
+        pubkey: typeof data.pubkey === 'string' ? data.pubkey : null,
+        ncryptsec: (typeof data.ncryptsec === 'string' && data.ncryptsec) ? data.ncryptsec : null,
+        notes,
+        config,
+        noteCount: notes.length,
+      },
+    };
+  }
+
+  /**
+   * @param {Object} archive
+   * @returns {Promise<number>}
+   */
+  async function importArchive(archive) {
+    if (!archive || !Array.isArray(archive.notes)) return 0;
+
+    let applied = 0;
+    let maxVersion = 0;
+
+    for (const note of archive.notes) {
+      try {
+        const cur = await DB.getNote(note.uid);
+        if (cur && cur.version >= note.version) continue;
+
+        await DB.putNote({
+          uid: note.uid,
+          text: note.text,
+          vector: note.vector,
+          visibility: note.visibility,
+          parent: note.parent,
+          version: note.version,
+          createdAt: note.createdAt,
+          updatedAt: note.updatedAt,
+        });
+
+        try { bus.emit('note:created', note); } catch (_) {}
+
+        if (note.version > maxVersion) maxVersion = note.version;
+        applied++;
+      } catch (e) {
+        Logger.warn('Account: import note ' + note.uid, String(e && e.message || e));
+      }
+    }
+
+    if (maxVersion > 0) {
+      try { bus.emit('notes:imported', { maxVersion }); } catch (_) {}
+    }
+
+    const cfg = archive.config || {};
+    let cfgChanged = false;
+    CONFIG_WHITELIST.forEach(k => {
+      if (k in cfg) {
+        Config.set(k, cfg[k]);
+        cfgChanged = true;
+      }
+    });
+
+    if (cfgChanged) {
+      try { bus.emit('config:imported', { keys: Object.keys(cfg) }); } catch (_) {}
+    }
+
+    Logger.info('Account: импортировано заметок — ' + applied);
+    return applied;
+  }
+
+  /**
+   * @param {boolean} enabled
+   */
+  function setSyncEnabled(enabled) {
+    const v = enabled === true;
+    Config.set('syncEnabled', v);
+    try { bus.emit('sync:toggle', { enabled: v }); } catch (_) {}
+  }
+
+  return {
+    getAccountInfo,
+    getNpub,
+    canWrapKey,
+    getWrappedKey,
+    enterKey,
+    exportArchive,
+    parseArchive,
+    importArchive,
+    setSyncEnabled,
+  };
+}, ['Config', 'Nostr', 'Crypto', 'DB', 'EventBus', 'Logger']);
 // ─── DOMAIN/Account ─── END ─────────────────────────────────────────────────
 
 // ─── DOMAIN/NoteActions ─── START ───────────────────────────────────────────
 /**
- * UI-действия: remove/toggle/copy через Notes + подтверждения.
+ * UI-действия: удаление, видимость, копирование.
  */
+DI.register('NoteActions', function (Notes, Modal, Toast, I18n) {
+  /**
+   * @param {string} uid
+   */
+  function remove(uid) {
+    if (!uid) return;
+
+    Modal.confirm(I18n.t('btn.del'), I18n.t('del.confirm'), () => {
+      Notes.remove(uid).then(() => {
+        Toast.show('ok', I18n.t('toast.deleted'));
+      }).catch(() => {
+        Toast.show('err', I18n.t('toast.copy.fail'));
+      });
+    });
+  }
+
+  /**
+   * @param {string} uid
+   */
+  function toggle(uid) {
+    if (!uid) return;
+
+    Notes.toggle(uid).then(note => {
+      if (!note) return;
+      Toast.show('ok', I18n.t(note.visibility === 'public' ? 'toast.saved.public' : 'toast.saved.private'));
+    }).catch(() => {
+      Toast.show('err', I18n.t('toast.copy.fail'));
+    });
+  }
+
+  /**
+   * @param {string} text
+   */
+  function copy(text) {
+    const done = () => Toast.show('ok', I18n.t('toast.copied'));
+    const fail = () => Toast.show('err', I18n.t('toast.copy.fail'));
+
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text || '').then(done).catch(fail);
+    } else {
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = text || '';
+        ta.style.position = 'fixed';
+        ta.style.left = '-9999px';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        ta.remove();
+        done();
+      } catch (_) {
+        fail();
+      }
+    }
+  }
+
+  return { remove, toggle, copy };
+}, ['Notes', 'Modal', 'Toast', 'I18n']);
 // ─── DOMAIN/NoteActions ─── END ─────────────────────────────────────────────
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -4060,26 +4975,420 @@ DI.register('Mirror', function (DB, Protocol, Notes, bus, Logger) {
 
 // ─── UI/Modal ─── START ─────────────────────────────────────────────────────
 /**
- * Модалки: open/close/confirm, Escape, возврат фокуса.
+ * Универсальные модалки: open/close/confirm, Escape, клик по overlay,
+ * возврат фокуса, автофокус.
  */
+DI.register('Modal', function (I18n) {
+  let overlay, modal, titleEl, bodyEl, footEl, closeBtn;
+  let escHandler = null;
+  let lastFocus = null;
+
+  /**
+   * Ленивая привязка к DOM.
+   */
+  function bind() {
+    if (overlay) return;
+
+    overlay = document.getElementById('overlay');
+    modal = document.getElementById('modal');
+    titleEl = document.getElementById('modal-t');
+    bodyEl = document.getElementById('modal-b');
+    footEl = document.getElementById('modal-f');
+    closeBtn = document.getElementById('modal-x');
+
+    if (closeBtn) closeBtn.addEventListener('click', close);
+    if (overlay) overlay.addEventListener('click', e => {
+      if (e.target === overlay) close();
+    });
+  }
+
+  /**
+   * @param {Object} opts - {title, body (string|Element),
+   *   buttons: [{text, primary?, danger?, onClick}]}
+   */
+  function open(opts) {
+    bind();
+    if (!overlay) return;
+
+    opts = opts || {};
+    lastFocus = document.activeElement;
+
+    if (titleEl) titleEl.textContent = opts.title || '';
+
+    if (bodyEl) {
+      bodyEl.innerHTML = '';
+
+      if (opts.body) {
+        if (typeof opts.body === 'string') {
+          bodyEl.textContent = opts.body;
+        } else {
+          bodyEl.appendChild(opts.body);
+        }
+      }
+    }
+
+    if (footEl) {
+      footEl.innerHTML = '';
+
+      (opts.buttons || []).forEach(b => {
+        const btn = document.createElement('button');
+        btn.className = 'mbtn' + (b.primary ? ' primary' : '') + (b.danger ? ' danger' : '');
+        btn.textContent = b.text || 'OK';
+        btn.addEventListener('click', () => {
+          if (b.onClick) b.onClick();
+        });
+        footEl.appendChild(btn);
+      });
+    }
+
+    overlay.classList.add('on');
+
+    if (escHandler) document.removeEventListener('keydown', escHandler);
+    escHandler = e => {
+      if (e.key === 'Escape') close();
+    };
+    document.addEventListener('keydown', escHandler);
+
+    setTimeout(() => {
+      if (!modal) return;
+      const focusable = modal.querySelectorAll('button, input, textarea, [tabindex]:not([tabindex="-1"])');
+      if (focusable.length) focusable[0].focus();
+    }, 50);
+  }
+
+  /**
+   * Закрыть.
+   */
+  function close() {
+    if (!overlay) return;
+
+    overlay.classList.remove('on');
+
+    if (escHandler) {
+      document.removeEventListener('keydown', escHandler);
+      escHandler = null;
+    }
+
+    if (lastFocus && lastFocus.focus) {
+      try { lastFocus.focus(); } catch (_) {}
+    }
+  }
+
+  /**
+   * @param {string} title
+   * @param {string} text
+   * @param {Function} onOk
+   * @param {string} [okText]
+   */
+  function confirm(title, text, onOk, okText) {
+    open({
+      title,
+      body: text,
+      buttons: [
+        { text: I18n.t('btn.cancel'), onClick: close },
+        {
+          text: okText || 'OK',
+          primary: true,
+          danger: true,
+          onClick: () => {
+            close();
+            if (onOk) onOk();
+          },
+        },
+      ],
+    });
+  }
+
+  return { open, close, confirm };
+}, ['I18n']);
 // ─── UI/Modal ─── END ───────────────────────────────────────────────────────
 
 // ─── UI/Toast ─── START ─────────────────────────────────────────────────────
 /**
- * Тосты: 4 типа, лимит, haptic.
+ * Тосты: 4 типа, лимит, автоудаление, haptic.
  */
+DI.register('Toast', function (Config) {
+  /** @type {Object<string, string>} */
+  const ICONS = { ok: '✓', err: '✕', warn: '!', info: '◆' };
+
+  /** @type {HTMLElement|null} */
+  let container = null;
+
+  /**
+   * @param {'ok'|'err'|'warn'|'info'} type
+   */
+  function haptic(type) {
+    try {
+      const tg = DI.resolve('TelegramAdapter');
+      if (tg && tg.isTelegram()) {
+        if (type === 'ok') tg.hapticFeedback('success');
+        else if (type === 'err') tg.hapticFeedback('error');
+        else tg.hapticFeedback('light');
+      }
+    } catch (_) {}
+  }
+
+  /**
+   * @param {'ok'|'err'|'warn'|'info'} type
+   * @param {string} msg
+   * @param {number} [ms]
+   */
+  function show(type, msg, ms) {
+    if (!container) container = document.getElementById('toasts');
+    if (!container) return;
+
+    const cls = ICONS[type] ? type : 'info';
+    haptic(type);
+
+    const el = document.createElement('div');
+    el.className = 'toast ' + cls;
+
+    const ic = document.createElement('span');
+    ic.className = 't-ic';
+    ic.textContent = ICONS[cls];
+
+    const m = document.createElement('span');
+    m.textContent = String(msg || '');
+
+    el.appendChild(ic);
+    el.appendChild(m);
+    container.appendChild(el);
+
+    const limit = Config.get('toastMaxVisible', 3);
+    while (container.children.length > limit) {
+      container.removeChild(container.firstChild);
+    }
+
+    setTimeout(() => {
+      el.style.transition = 'opacity .25s, transform .25s';
+      el.style.opacity = '0';
+      el.style.transform = 'translateY(6px)';
+
+      setTimeout(() => {
+        try { el.remove(); } catch (_) {}
+      }, 260);
+    }, ms || Config.get('toastDefaultDuration', 2200));
+  }
+
+  return { show };
+}, ['Config']);
 // ─── UI/Toast ─── END ───────────────────────────────────────────────────────
 
 // ─── UI/Progress ─── START ──────────────────────────────────────────────────
 /**
- * Оверлей загрузки модели.
+ * Оверлей загрузки модели: задержка показа 500мс, скрытие по
+ * ai:status (model/demo).
  */
+DI.register('Progress', function (bus) {
+  let overlay, fill, pctEl, infoEl;
+  let showTimer = null;
+  const SHOW_DELAY = 500;
+
+  /**
+   * Привязка к DOM.
+   */
+  function bind() {
+    overlay = document.getElementById('progress');
+    fill = document.getElementById('prog-fill');
+    pctEl = document.getElementById('prog-pct');
+    infoEl = document.getElementById('prog-info');
+  }
+
+  /**
+   * Показ.
+   */
+  function show() {
+    if (overlay) overlay.classList.add('on');
+  }
+
+  /**
+   * Скрытие.
+   */
+  function hide() {
+    if (overlay) overlay.classList.remove('on');
+  }
+
+  /**
+   * @param {Object} data - {pct|percent, loadedMB, totalMB, model}
+   */
+  function update(data) {
+    if (!data) return;
+
+    const p = Math.max(0, Math.min(100, Math.round(data.pct || data.percent || 0)));
+
+    if (fill) {
+      fill.style.width = p + '%';
+    }
+
+    if (pctEl) {
+      let text = p + '%';
+
+      if (data.loadedMB) {
+        text = data.loadedMB + ' MB';
+        if (data.totalMB) text += ' / ' + data.totalMB + ' MB';
+      }
+
+      pctEl.textContent = text;
+    }
+
+    if (infoEl && data.model) {
+      infoEl.textContent = data.model;
+    }
+  }
+
+  /**
+   * Инициализация.
+   */
+  function init() {
+    bind();
+
+    bus.on('ai:progress', e => update(e));
+
+    bus.on('ai:status', e => {
+      if (!e) return;
+
+      if (e.mode === 'loading') {
+        update(e);
+
+        if (!showTimer && overlay && !overlay.classList.contains('on')) {
+          showTimer = setTimeout(() => {
+            show();
+            showTimer = null;
+          }, SHOW_DELAY);
+        }
+      } else {
+        if (showTimer) {
+          clearTimeout(showTimer);
+          showTimer = null;
+        }
+        hide();
+      }
+    });
+  }
+
+  return { init, show, hide, update };
+}, ['EventBus']);
 // ─── UI/Progress ─── END ────────────────────────────────────────────────────
 
 // ─── UI/HeaderStatus ─── START ──────────────────────────────────────────────
 /**
- * Индикаторы сети/ИИ, офлайн-бар, клик-переподключение.
+ * Индикаторы шапки: сеть/ИИ, офлайн-бар, клик по статусу сети —
+ * переподключение.
  */
+DI.register('HeaderStatus', function (bus, I18n, Embedder) {
+  let netDot, netTxt, aiDot, aiTxt, offlineBar;
+  let unsubs = [];
+  let currentNetStatus = 'disconnected';
+  let currentAiMode = 'loading';
+  let currentAiPercent = 0;
+
+  /**
+   * Привязка к DOM.
+   */
+  function bind() {
+    netDot = document.getElementById('st-net-dot');
+    netTxt = document.getElementById('st-net-txt');
+    aiDot = document.getElementById('st-ai-dot');
+    aiTxt = document.getElementById('st-ai-txt');
+    offlineBar = document.getElementById('offline-bar');
+  }
+
+  /**
+   * @param {'loading'|'model'|'demo'} mode
+   * @param {number} [percent]
+   */
+  function setAI(mode, percent) {
+    currentAiMode = mode;
+    currentAiPercent = percent || 0;
+
+    if (!aiDot || !aiTxt) return;
+
+    if (mode === 'model') {
+      aiDot.className = 'dot ok';
+      aiTxt.textContent = I18n.t('st.ai.ready');
+    } else if (mode === 'demo') {
+      aiDot.className = 'dot warn';
+      aiTxt.textContent = I18n.t('st.ai.demo');
+    } else {
+      aiDot.className = 'dot load';
+      aiTxt.textContent = I18n.t('st.ai.loading') + (currentAiPercent ? ' ' + Math.round(currentAiPercent) + '%' : '');
+    }
+  }
+
+  /**
+   * @param {string} status
+   */
+  function setNet(status) {
+    currentNetStatus = status;
+
+    if (!netDot || !netTxt) return;
+
+    const map = {
+      connected: ['ok', 'st.net.online'],
+      connecting: ['load', 'st.net.connecting'],
+      reconnecting: ['warn', 'st.net.reconnecting'],
+      failed: ['err', 'st.net.failed'],
+      disconnected: ['', 'st.net'],
+    };
+
+    const [cls, key] = map[status] || ['', 'st.net'];
+    netDot.className = 'dot' + (cls ? ' ' + cls : '');
+    netTxt.textContent = I18n.t(key);
+
+    if (offlineBar) {
+      const offline = status === 'failed' && typeof navigator !== 'undefined' && navigator.onLine === false;
+      offlineBar.classList.toggle('on', offline);
+    }
+  }
+
+  /**
+   * Инициализация.
+   */
+  function init() {
+    bind();
+
+    if (netTxt) {
+      netTxt.style.cursor = 'pointer';
+      netTxt.addEventListener('click', () => {
+        try {
+          const NetService = DI.resolve('NetService');
+          if (NetService) {
+            NetService.stop(false);
+            setTimeout(() => NetService.start(), 500);
+          }
+        } catch (_) {}
+      });
+    }
+
+    window.addEventListener('offline', () => setNet('failed'));
+    window.addEventListener('online', () => {
+      if (offlineBar) offlineBar.classList.remove('on');
+    });
+
+    unsubs.push(bus.on('ai:status', e => setAI(e.mode, e.percent)));
+    unsubs.push(bus.on('net:status', e => setNet(e.status)));
+
+    unsubs.push(bus.on('i18n:change', () => {
+      setAI(currentAiMode, currentAiPercent);
+      setNet(currentNetStatus);
+    }));
+
+    setAI(Embedder.getMode());
+    setNet('disconnected');
+  }
+
+  /**
+   * Отписка.
+   */
+  function destroy() {
+    unsubs.forEach(u => {
+      try { u(); } catch (_) {}
+    });
+    unsubs = [];
+  }
+
+  return { init, destroy };
+}, ['EventBus', 'I18n', 'Embedder']);
 // ─── UI/HeaderStatus ─── END ────────────────────────────────────────────────
 
 // ─── UI/Onboarding ─── START ────────────────────────────────────────────────
