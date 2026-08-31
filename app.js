@@ -38,7 +38,7 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 // ВЕРСИЯ ПРИЛОЖЕНИЯ
 // ═══════════════════════════════════════════════════════════════════════════════
-const APP_VERSION = '0.8.4';
+const APP_VERSION = '0.8.4a';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CORE/DI — ПРЕАМБУЛА
@@ -4491,7 +4491,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
         }
       });
 
-      peerQueryTimes.forEach((ts, pk) {
+      peerQueryTimes.forEach((ts, pk) => {
         if (now - ts > 60000) peerQueryTimes.delete(pk);
       });
 
