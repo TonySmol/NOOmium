@@ -25,7 +25,7 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 // ВЕРСИЯ ПРИЛОЖЕНИЯ
 // ═══════════════════════════════════════════════════════════════════════════════
-const APP_VERSION = '0.9.1';
+const APP_VERSION = '0.9.2';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CORE/DI — ПРЕАМБУЛА
@@ -6339,12 +6339,10 @@ DI.register('BaseView', function (Store, DB, I18n, Utils, Config, bus) {
 /**
  * Полноэкранный просмотр: свои (удалить/видимость/пин/правка),
  * чужие (просмотр/пин). Lookup: notes → mirror.
- * Правка разрешена всем своим (replaceable-канон).
  */
 DI.register('NoteView', function (DB, Notes, NoteActions, I18n, Utils, Toast, bus) {
   let root = null;
   let currentUid = null;
-  let currentOwner = null;
   let currentNote = null;
   let escHandler = null;
   let editMode = false;
@@ -6375,7 +6373,6 @@ DI.register('NoteView', function (DB, Notes, NoteActions, I18n, Utils, Toast, bu
     }
 
     currentUid = null;
-    currentOwner = null;
     currentNote = null;
     editMode = false;
     editTextarea = null;
@@ -6390,24 +6387,34 @@ DI.register('NoteView', function (DB, Notes, NoteActions, I18n, Utils, Toast, bu
 
     DB.getNote(uid).then(note => {
       if (note) {
-        render({ uid: note.uid, owner: null, text: note.text,
-                  vec: note.vector, visibility: note.visibility,
-                  isOwn: true });
+        render({
+          uid: note.uid,
+          owner: null,
+          text: note.text,
+          vector: note.vector,
+          visibility: note.visibility,
+          isOwn: true,
+        });
         return;
       }
 
       DB.getMirror(uid).then(m => {
         if (m) {
-          render({ uid: m.uid, owner: m.owner, text: m.text,
-                    vec: m.vec, visibility: m.visibility,
-                    isOwn: false });
+          render({
+            uid: m.uid,
+            owner: m.owner,
+            text: m.text,
+            vector: m.vec,
+            visibility: m.visibility,
+            isOwn: false,
+          });
         }
       });
     }).catch(() => {});
   }
 
   /**
-   * @param {Object} note - {uid, owner, text, vec, visibility, isOwn}
+   * @param {Object} note - {uid, owner, text, vector, visibility, isOwn}
    * @param {HTMLButtonElement} editBtn
    */
   function enterEditMode(note, editBtn) {
@@ -6462,9 +6469,9 @@ DI.register('NoteView', function (DB, Notes, NoteActions, I18n, Utils, Toast, bu
 
       Toast.show('ok', I18n.t('toast.edit.saved'));
       currentNote.text = updated.text;
-      render({ uid: updated.uid, owner: null, text: updated.text,
-               vec: updated.vector, visibility: updated.visibility,
-               isOwn: true });
+      currentNote.vector = updated.vector;
+      currentNote.visibility = updated.visibility;
+      render(currentNote);
     }).catch(() => {
       Toast.show('err', I18n.t('toast.copy.fail'));
 
@@ -6485,7 +6492,12 @@ DI.register('NoteView', function (DB, Notes, NoteActions, I18n, Utils, Toast, bu
     }
 
     try {
-      bus.emit('note:pin', currentNote);
+      bus.emit('note:pin', {
+        uid: currentNote.uid,
+        owner: currentNote.owner,
+        text: currentNote.text,
+        vector: currentNote.vector,
+      });
       Toast.show('ok', I18n.t('toast.pinned'));
     } catch (_) {}
 
@@ -6493,14 +6505,13 @@ DI.register('NoteView', function (DB, Notes, NoteActions, I18n, Utils, Toast, bu
   }
 
   /**
-   * @param {Object} note - {uid, owner, text, vec, visibility, isOwn}
+   * @param {Object} note - {uid, owner, text, vector, visibility, isOwn}
    */
   function render(note) {
     const r = ensureRoot();
     if (!r) return;
 
     currentUid = note.uid;
-    currentOwner = note.owner;
     currentNote = note;
     r.innerHTML = '';
     r.classList.add('on');
