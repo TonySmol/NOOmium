@@ -2955,13 +2955,771 @@ DI.register('Protocol', function (Config, Vec, Vault, Nostr) {
 
 // ─── NET/NetService ─── START ───────────────────────────────────────────────
 /**
- * Движение: подписка на комнату (kinds 30078/21000/21001 по t),
- * подписка на себя, публикация канона (паблиш-очередь: uids в
- * localStorage, flush при canPublish), ответы на запросы по своим
- * публичным, отправка запросов при контексте. Экспоненциальный
- * реконнект, rate-лимиты. Никакой интерпретации смысла —
- * события передаются Mirror/Notes через шину.
+ * Движение: подписка на комнату и на себя, публикация канонов
+ * (очередь uids в localStorage, flush при доступности сети),
+ * обработка запросов и отправка ответов-ссылок, отправка запросов
+ * при контексте. Экспоненциальный реконнект.
  */
+DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Config, Logger, bus) {
+  let started = false;
+  let startPromise = null;
+  let subscription = null;
+  let selfSubscription = null;
+  let fetchSubscription = null;
+  let hbTimer = null;
+  let activeQueryId = null;
+  let lastQueryVec = null;
+  let lastQueryTime = 0;
+  let centroids = [];
+  let contextUnsub = null;
+  let flushing = false;
+  let flushTimer = null;
+  let startRetryTimer = null;
+  let onlineListenerAdded = false;
+  let reconnectAttempts = 0;
+  let busUnsubs = [];
+
+  /** @type {Set<string>} */
+  const seen = new Set();
+  /** @type {Map<string, number>} */
+  const peerQueryTimes = new Map();
+
+  let currentWindow = Config.get('subWindow', 300);
+  let historyLoading = false;
+  let subEpoch = 0;
+
+  const QUEUE_KEY = 'noomium:queue';
+  const DELETED_KEY = 'noomium:deleted';
+
+  /**
+   * @returns {{uids: string[], deleted: Array<{uid: string, version: number}>}}
+   */
+  function loadQueue() {
+    try {
+      const raw = localStorage.getItem(QUEUE_KEY);
+      if (raw) {
+        const q = JSON.parse(raw);
+        return {
+          uids: Array.isArray(q.uids) ? q.uids.filter(Boolean) : [],
+          deleted: Array.isArray(q.deleted) ? q.deleted.filter(d => d && d.uid && d.version) : [],
+        };
+      }
+    } catch (_) {}
+
+    return { uids: [], deleted: [] };
+  }
+
+  /**
+   * Сохранение очереди.
+   */
+  function saveQueue() {
+    try {
+      localStorage.setItem(QUEUE_KEY, JSON.stringify(queue));
+    } catch (_) {}
+  }
+
+  let queue = loadQueue();
+
+  const kCanon = () => Config.get('kCanon', 30078);
+  const kQuery = () => Config.get('kQuery', 21000);
+  const kAnswer = () => Config.get('kAnswer', 21001);
+  const room = () => Config.get('room', 'noomium-main');
+
+  /**
+   * @param {string} s
+   */
+  function setStatus(s) {
+    try { bus.emit('net:status', { status: s }); } catch (_) {}
+  }
+
+  /**
+   * @param {string} phase
+   */
+  function emitSync(phase) {
+    try { bus.emit('sync:status', { phase }); } catch (_) {}
+  }
+
+  /**
+   * @param {boolean} loading
+   * @param {number} [windowSec]
+   */
+  function emitHistory(loading, windowSec) {
+    try { bus.emit('net:history', { loading, window: windowSec }); } catch (_) {}
+  }
+
+  /**
+   * @returns {boolean}
+   */
+  function isOffline() {
+    return typeof navigator !== 'undefined' && navigator.onLine === false;
+  }
+
+  /**
+   * @returns {boolean}
+   */
+  function canPublish() {
+    return Nostr.isReady() && !isOffline();
+  }
+
+  /**
+   * @param {string} uid
+   */
+  function queuePublish(uid) {
+    if (!uid) return;
+    if (queue.uids.indexOf(uid) === -1) {
+      queue.uids.push(uid);
+      saveQueue();
+    }
+    scheduleFlush();
+  }
+
+  /**
+   * @param {string} uid
+   */
+  function queueDeleted(uid, version) {
+    if (!uid || !version) return;
+
+    const i = queue.uids.indexOf(uid);
+    if (i > -1) queue.uids.splice(i, 1);
+
+    const existing = queue.deleted.find(d => d.uid === uid);
+    if (existing) {
+      if (version > existing.version) existing.version = version;
+    } else {
+      queue.deleted.push({ uid, version });
+    }
+    saveQueue();
+    scheduleFlush();
+  }
+
+  /**
+   * @param {number} [delay]
+   */
+  function scheduleFlush(delay) {
+    if (flushTimer) return;
+
+    flushTimer = setTimeout(() => {
+      flushTimer = null;
+      flushQueue();
+    }, delay || 5000);
+  }
+
+  /**
+   * Сброс очереди: каноны живых заметок, затем deleted.
+   * @returns {Promise<void>}
+   */
+  async function flushQueue() {
+    if (flushing) return;
+    if (!canPublish()) return;
+    if (!queue.uids.length && !queue.deleted.length) return;
+
+    flushing = true;
+
+    try {
+      if (Config.get('syncEnabled', true)) {
+        for (const uid of queue.uids.slice()) {
+          const note = await DB.getNote(uid).catch(() => null);
+          if (!note) {
+            const i = queue.uids.indexOf(uid);
+            if (i > -1) {
+              queue.uids.splice(i, 1);
+              saveQueue();
+            }
+            continue;
+          }
+          try {
+            const tpl = note.visibility === 'public'
+              ? await Protocol.canonPublic(note)
+              : await Protocol.canonPrivate(note);
+            await Nostr.publish(tpl);
+            const i = queue.uids.indexOf(uid);
+            if (i > -1) {
+              queue.uids.splice(i, 1);
+              saveQueue();
+            }
+          } catch (_) {}
+        }
+
+        for (const d of queue.deleted.slice()) {
+          try {
+            const tpl = await Protocol.canonDeleted(d.uid, d.version);
+            await Nostr.publish(tpl);
+            const i = queue.deleted.indexOf(d);
+            if (i > -1) {
+              queue.deleted.splice(i, 1);
+              saveQueue();
+            }
+          } catch (_) {}
+        }
+      }
+    } catch (_) {} finally {
+      flushing = false;
+
+      if (queue.uids.length || queue.deleted.length) {
+        scheduleFlush(10000);
+      }
+    }
+  }
+
+  /**
+   * Перестройка центроидов префильтра.
+   */
+  function rebuildCentroids() {
+    DB.allNotes().then(notes => {
+      const vecs = notes.filter(n => n.visibility === 'public' && n.vector).map(n => n.vector);
+      if (!vecs.length) {
+        centroids = [];
+        return;
+      }
+
+      centroids = Vec.kmeans(
+        vecs,
+        Math.min(Config.get('centroidCount', 12), vecs.length),
+        8
+      );
+    }).catch(() => {});
+  }
+
+  /**
+   * @param {Float32Array|Array<number>} queryVector
+   * @returns {boolean}
+   */
+  function passesPrefilter(queryVector) {
+    if (!centroids.length) return true;
+
+    const floor = Config.get('threshold', 0.81) - 0.20;
+    for (const c of centroids) {
+      if (Vec.cosine(queryVector, c) >= floor) return true;
+    }
+
+    return false;
+  }
+
+  /**
+   * @param {boolean} hard
+   */
+  function markConnected(hard) {
+    if (!started) return;
+
+    if (hard) {
+      reconnectAttempts = 0;
+    }
+
+    setStatus('connected');
+    flushQueue();
+  }
+
+  /**
+   * Обработчик событий комнатной подписки.
+   * @param {Object} ev
+   */
+  function onEvent(ev) {
+    if (!ev) return;
+
+    markConnected(true);
+
+    if (seen.has(ev.id)) return;
+
+    if (ev.kind === kCanon()) {
+      seen.add(ev.id);
+      trimSeen();
+      try { bus.emit('net:canon', ev); } catch (_) {}
+      return;
+    }
+
+    if (ev.kind === kQuery()) {
+      seen.add(ev.id);
+      trimSeen();
+      handleIncomingQuery(ev);
+      return;
+    }
+
+    if (ev.kind === kAnswer()) {
+      seen.add(ev.id);
+      trimSeen();
+      try { bus.emit('net:answer', Protocol.decodeAnswer(ev)); } catch (_) {}
+      return;
+    }
+  }
+
+  /**
+   * Обрезка seen.
+   */
+  function trimSeen() {
+    const max = Config.get('seenMaxSize', 1000);
+    if (seen.size <= max) return;
+
+    const arr = Array.from(seen);
+    seen.clear();
+
+    for (let i = arr.length - Math.floor(max / 2); i < arr.length; i++) {
+      seen.add(arr[i]);
+    }
+  }
+
+  /**
+   * @param {Object} ev
+   */
+  function handleIncomingQuery(ev) {
+    const q = Protocol.decodeQuery(ev);
+    if (!q) return;
+
+    if (q.owner === Nostr.getPubkey()) return;
+
+    const now = Date.now();
+    const last = peerQueryTimes.get(q.owner) || 0;
+
+    if (now - last < Config.get('queryRateLimit', 3000)) return;
+
+    peerQueryTimes.set(q.owner, now);
+
+    if (!passesPrefilter(q.vector)) return;
+
+    DB.allNotes().then(notes => {
+      const candidates = notes.filter(n => n.visibility === 'public' && n.vector);
+      if (!candidates.length) return null;
+
+      const byId = new Map(candidates.map(n => [n.uid, n]));
+      const items = candidates.map(n => ({ id: n.uid, vector: n.vector }));
+
+      return Ranker.cosineBatch(q.vector, items).then(scored => {
+        const top = scored
+          .filter(s => s.score >= Config.get('threshold', 0.81))
+          .slice(0, q.maxResponses || Config.get('maxResponses', 8));
+
+        top.forEach((s, i) => {
+          const note = byId.get(s.id);
+          if (!note) return;
+
+          setTimeout(() => {
+            Nostr.publish(Protocol.answerEvent(note, s.score, q.queryId))
+              .catch(e => Logger.warn('NetService: не отправить ответ', String(e)));
+          }, i * 250);
+        });
+      });
+    }).catch(e => Logger.warn('NetService: ошибка обработки запроса', String(e)));
+  }
+
+  /**
+   * Отправка запроса при изменении контекста.
+   */
+  function maybeSendQuery() {
+    const ctx = Store.get('context');
+
+    if ((ctx.source !== 'pin' && ctx.source !== 'drift') || !ctx.vector) {
+      lastQueryVec = null;
+      return;
+    }
+
+    if (!canPublish()) {
+      lastQueryVec = null;
+      return;
+    }
+
+    const now = Date.now();
+    if (now - lastQueryTime < Config.get('queryRateLimit', 3000)) return;
+
+    if (lastQueryVec && Ranker.isSimilar(lastQueryVec, ctx.vector)) return;
+
+    lastQueryVec = ctx.vector;
+    lastQueryTime = now;
+
+    const tpl = Protocol.queryEvent(
+      ctx.vector,
+      Config.get('maxResponses', 8),
+      Config.get('responseWindow', 6000)
+    );
+
+    Nostr.publish(tpl)
+      .then(ev => {
+        activeQueryId = ev.id;
+        Logger.info('NetService: запрос ' + ev.id.slice(0, 8) + '…');
+      })
+      .catch(e => {
+        lastQueryVec = null;
+        lastQueryTime = 0;
+        Logger.warn('NetService: не отправить запрос', String(e && e.message || e));
+      });
+  }
+
+  /**
+   * Подписка на комнату.
+   */
+  function subscribeToRoom() {
+    const since = Math.floor(Date.now() / 1000) - currentWindow;
+    const filters = [{
+      kinds: [kCanon(), kQuery(), kAnswer()],
+      '#t': [room()],
+      since,
+    }];
+
+    const myEpoch = ++subEpoch;
+
+    if (subscription && typeof subscription.close === 'function') {
+      try { subscription.close(); } catch (_) {}
+    }
+
+    subscription = Nostr.subscribe(filters, {
+      onevent: onEvent,
+      onclose: () => {
+        if (myEpoch !== subEpoch) return;
+
+        setStatus('reconnecting');
+
+        const maxAttempts = Config.get('reconnectMaxAttempts', 10);
+        const baseDelay = Config.get('reconnectBaseDelay', 1000);
+        const maxDelay = Config.get('reconnectMaxDelay', 60000);
+
+        reconnectAttempts++;
+
+        if (reconnectAttempts > maxAttempts) {
+          Logger.warn('NetService: ' + maxAttempts + ' неудачных подключений');
+          setStatus('failed');
+          return;
+        }
+
+        const delay = Math.min(baseDelay * Math.pow(2, reconnectAttempts - 1), maxDelay);
+        const jitter = delay * 0.25 * Math.random();
+
+        setTimeout(() => {
+          if (started && myEpoch === subEpoch && !isOffline()) {
+            subscribeToRoom();
+          }
+        }, delay + jitter);
+      },
+    });
+
+    if (subscription) {
+      setStatus('connecting');
+
+      setTimeout(() => {
+        if (myEpoch === subEpoch && started && !isOffline()) {
+          markConnected(false);
+        }
+      }, 5000);
+    }
+  }
+
+  /**
+   * Подписка на свои каноны (синк устройств).
+   */
+  function subscribeSelf() {
+    const pk = Nostr.getPubkey();
+    if (!pk) return;
+
+    if (selfSubscription && typeof selfSubscription.close === 'function') {
+      try { selfSubscription.close(); } catch (_) {}
+    }
+
+    selfSubscription = Nostr.subscribe(
+      [{ authors: [pk], kinds: [kCanon()] }],
+      {
+        onevent: ev => {
+          if (!ev || !ev.id) return;
+          try { bus.emit('net:canon', ev); } catch (_) {}
+        },
+        onclose: () => {
+          setTimeout(() => {
+            if (started) subscribeSelf();
+          }, 5000);
+        },
+      }
+    );
+  }
+
+  /**
+   * Обработка запроса Mirror на подтяжку цели.
+   * @param {Object} p - {uid, owner}
+   */
+  function handleMirrorFetch(p) {
+    if (!p || !p.uid || !p.owner) return;
+    if (!Nostr.isReady()) return;
+
+    if (fetchSubscription && typeof fetchSubscription.close === 'function') {
+      try { fetchSubscription.close(); } catch (_) {}
+    }
+
+    fetchSubscription = Nostr.subscribe(
+      [{ authors: [p.owner], kinds: [kCanon()], '#d': [p.uid] }],
+      {
+        onevent: ev => {
+          if (!ev || !ev.id) return;
+          try { bus.emit('net:canon', ev); } catch (_) {}
+        },
+        onclose: () => {
+          setTimeout(() => {
+            if (fetchSubscription) {
+              try { fetchSubscription.close(); } catch (_) {}
+              fetchSubscription = null;
+            }
+          }, 10000);
+        },
+      }
+    );
+  }
+
+  /**
+   * Слушатели online/offline.
+   */
+  function ensureOnlineListener() {
+    if (onlineListenerAdded) return;
+    onlineListenerAdded = true;
+
+    window.addEventListener('online', () => {
+      if (!started) {
+        start();
+        return;
+      }
+
+      if (!isOffline()) {
+        if (!subscription) subscribeToRoom();
+        if (!selfSubscription) subscribeSelf();
+      }
+
+      flushQueue();
+    });
+
+    window.addEventListener('offline', () => {
+      if (!started) return;
+
+      setStatus('failed');
+
+      subEpoch++;
+
+      if (subscription && typeof subscription.close === 'function') {
+        try { subscription.close(); } catch (_) {}
+      }
+      subscription = null;
+    });
+  }
+
+  /**
+   * Heartbeat.
+   */
+  function startHeartbeat() {
+    if (hbTimer) clearInterval(hbTimer);
+
+    hbTimer = setInterval(() => {
+      const now = Date.now();
+
+      peerQueryTimes.forEach((ts, pk) => {
+        if (now - ts > 60000) peerQueryTimes.delete(pk);
+      });
+
+      trimSeen();
+    }, Config.get('heartbeat', 30000));
+  }
+
+  /**
+   * Старт.
+   * @returns {Promise<void>}
+   */
+  function start() {
+    if (started) return Promise.resolve();
+    if (startPromise) return startPromise;
+
+    ensureOnlineListener();
+
+    startPromise = Nostr.init()
+      .then(() => DB.ready())
+      .then(() => Notes_initAndScan())
+      .then(() => {
+        started = true;
+        reconnectAttempts = 0;
+
+        busUnsubs.forEach(u => {
+          try { u(); } catch (_) {}
+        });
+        busUnsubs = [];
+
+        busUnsubs.push(bus.on('note:created', note => {
+          if (note && note.uid) queuePublish(note.uid);
+        }));
+
+        busUnsubs.push(bus.on('note:updated', note => {
+          if (note && note.uid) queuePublish(note.uid);
+        }));
+
+        busUnsubs.push(bus.on('note:deleted', p => {
+          if (p && p.uid && p.version) queueDeleted(p.uid, p.version);
+        }));
+
+        busUnsubs.push(bus.on('db:change', () => rebuildCentroids()));
+
+        busUnsubs.push(bus.on('account:changed', () => {
+          queue = { uids: [], deleted: [] };
+          saveQueue();
+          seen.clear();
+          peerQueryTimes.clear();
+        }));
+
+        busUnsubs.push(bus.on('sync:toggle', p => {
+          if (!p) return;
+          if (p.enabled) {
+            subscribeSelf();
+            flushQueue();
+          } else {
+            if (selfSubscription && typeof selfSubscription.close === 'function') {
+              try { selfSubscription.close(); } catch (_) {}
+            }
+            selfSubscription = null;
+            emitSync('off');
+          }
+        }));
+
+        busUnsubs.push(bus.on('mirror:fetch', handleMirrorFetch));
+
+        contextUnsub = Store.subscribe(s => s.context, () => maybeSendQuery());
+
+        startHeartbeat();
+        rebuildCentroids();
+        flushQueue();
+
+        if (isOffline()) {
+          setStatus('failed');
+          Logger.warn('NetService: офлайн, ожидаем появление сети');
+        } else {
+          subscribeToRoom();
+        }
+
+        subscribeSelf();
+
+        Logger.info('NetService: запущен, комната #' + room());
+      }).catch(e => {
+        Logger.error('NetService: не стартовать', String(e && e.message || e));
+        setStatus('failed');
+
+        if (startRetryTimer) clearTimeout(startRetryTimer);
+        startRetryTimer = setTimeout(() => {
+          if (!started) start();
+        }, 10000);
+      }).finally(() => {
+        startPromise = null;
+      });
+
+    return startPromise;
+  }
+
+  /**
+   * Notes.init (монотонность версий) + скан неопубликованных.
+   * @returns {Promise<void>}
+   */
+  function Notes_initAndScan() {
+    const NotesMod = DI.resolve('Notes');
+    return NotesMod.init().then(() => {
+      return DB.allNotes().then(notes => {
+        notes.forEach(n => {
+          if (n && n.uid) queuePublish(n.uid);
+        });
+        return flushQueue();
+      });
+    });
+  }
+
+  /**
+   * Полное переподключение.
+   */
+  function resync() {
+    if (!Nostr.isReady()) {
+      start();
+      return;
+    }
+
+    reconnectAttempts = 0;
+
+    if (!isOffline()) {
+      subscribeToRoom();
+      if (Config.get('syncEnabled', true)) subscribeSelf();
+    }
+
+    flushQueue();
+  }
+
+  /**
+   * @param {boolean} full
+   */
+  function stop(full) {
+    started = false;
+
+    if (subscription && typeof subscription.close === 'function') {
+      try { subscription.close(); } catch (_) {}
+    }
+    subscription = null;
+
+    if (selfSubscription && typeof selfSubscription.close === 'function') {
+      try { selfSubscription.close(); } catch (_) {}
+    }
+    selfSubscription = null;
+
+    if (fetchSubscription && typeof fetchSubscription.close === 'function') {
+      try { fetchSubscription.close(); } catch (_) {}
+    }
+    fetchSubscription = null;
+
+    if (hbTimer) {
+      clearInterval(hbTimer);
+      hbTimer = null;
+    }
+
+    if (contextUnsub) {
+      try { contextUnsub(); } catch (_) {}
+      contextUnsub = null;
+    }
+
+    busUnsubs.forEach(u => {
+      try { u(); } catch (_) {}
+    });
+    busUnsubs = [];
+
+    if (flushTimer) {
+      clearTimeout(flushTimer);
+      flushTimer = null;
+    }
+
+    if (startRetryTimer) {
+      clearTimeout(startRetryTimer);
+      startRetryTimer = null;
+    }
+
+    activeQueryId = null;
+    lastQueryVec = null;
+    lastQueryTime = 0;
+    reconnectAttempts = 0;
+
+    if (full) {
+      seen.clear();
+      peerQueryTimes.clear();
+    }
+
+    setStatus('disconnected');
+  }
+
+  /**
+   * Публичный wipe: каноны deleted для всех своих заметок.
+   * @returns {Promise<void>}
+   */
+  async function publishWipeAll() {
+    if (!canPublish()) return;
+
+    try {
+      const notes = await DB.allNotes();
+
+      const maxV = notes.reduce((m, n) => Math.max(m, n.version || 0), Math.floor(Date.now() / 1000));
+      let v = maxV;
+
+      for (const n of notes) {
+        if (!n || !n.uid) continue;
+        v = v + 1;
+        try {
+          const tpl = await Protocol.canonDeleted(n.uid, v);
+          await Nostr.publish(tpl);
+        } catch (_) {}
+      }
+    } catch (_) {}
+  }
+
+  return { start, stop, resync, loadHistory: emitHistory, publishWipeAll };
+}, ['Nostr', 'Protocol', 'DB', 'Ranker', 'Vec', 'Store', 'Config', 'Logger', 'EventBus']);
 // ─── NET/NetService ─── END ─────────────────────────────────────────────────
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -2971,18 +3729,289 @@ DI.register('Protocol', function (Config, Vec, Vault, Nostr) {
 // ─── DOMAIN/Notes ─── START ─────────────────────────────────────────────────
 /**
  * Переходы состояний своих заметок. Единственная точка записи в
- * notes. Каждая операция = bump version + запись + шина note:*,
- * паблиш-очередь обновляется. create/edit/hide/show/delete.
+ * notes. Каждая мутация = новая version + notes:changed событие;
+ * публикацию канона дергает NetService через шину.
  */
+DI.register('Notes', function (DB, Embedder, bus, Logger, Utils) {
+  /** @type {number} Монотонный счётчик версий. */
+  let versionCounter = 0;
+
+  /**
+   * @param {string} event
+   * @param {*} payload
+   */
+  function emit(event, payload) {
+    try { bus.emit(event, payload); } catch (_) {}
+  }
+
+  /**
+   * Восстановление монотонности версий после рестарта:
+   * счётчик = max(сохранённые version, Date.now() в секундах).
+   * @returns {Promise<void>}
+   */
+  async function init() {
+    try {
+      const notes = await DB.allNotes();
+      for (const n of notes) {
+        if (n && typeof n.version === 'number' && n.version > versionCounter) {
+          versionCounter = n.version;
+        }
+      }
+    } catch (_) {}
+
+    const now = Math.floor(Date.now() / 1000);
+    if (versionCounter < now) versionCounter = now;
+  }
+
+  /**
+   * Следующая версия (секунды, строго возрастающие).
+   * @returns {number}
+   */
+  function nextVersion() {
+    const t = Math.floor(Date.now() / 1000);
+    if (t <= versionCounter) versionCounter = versionCounter + 1;
+    else versionCounter = t;
+    return versionCounter;
+  }
+
+  /**
+   * Создание заметки.
+   * @param {string} text - Текст.
+   * @param {string} visibility - 'private' | 'public'.
+   * @param {Object|null} [parent] - {uid, owner} родителя.
+   * @returns {Promise<Object|null>}
+   */
+  async function create(text, visibility, parent) {
+    const t = (text || '').trim();
+    if (!t) return null;
+
+    try {
+      const vector = await Embedder.embed(t);
+      const now = Date.now();
+      const note = {
+        uid: Utils.uid('n'),
+        text: t,
+        vector: vector ? Array.from(vector) : null,
+        visibility: visibility === 'public' ? 'public' : 'private',
+        parent: parent && parent.uid ? { uid: parent.uid, owner: parent.owner || null } : null,
+        version: nextVersion(),
+        createdAt: now,
+        updatedAt: now,
+      };
+
+      await DB.putNote(note);
+      emit('note:created', note);
+      return note;
+    } catch (e) {
+      Logger.warn('Notes: create', String(e && e.message || e));
+      return null;
+    }
+  }
+
+  /**
+   * Редактирование текста. Публичные редактируются (новая версия
+   * канона) — заменой события, replaceable это позволяет.
+   * @param {string} uid
+   * @param {string} newText
+   * @returns {Promise<Object|null>}
+   */
+  async function edit(uid, newText) {
+    const t = (newText || '').trim();
+    if (!t) return null;
+
+    const note = await DB.getNote(uid);
+    if (!note) return null;
+
+    const vector = await Embedder.embed(t);
+    note.text = t;
+    note.vector = vector ? Array.from(vector) : null;
+    note.version = nextVersion();
+    note.updatedAt = Date.now();
+
+    await DB.putNote(note);
+    emit('note:updated', note);
+    return note;
+  }
+
+  /**
+   * @param {string} uid
+   * @returns {Promise<Object|null>}
+   */
+  async function remove(uid) {
+    const note = await DB.getNote(uid);
+    if (!note) return null;
+
+    const version = nextVersion();
+
+    await DB.delNote(uid);
+    emit('note:deleted', { uid, version, visibility: note.visibility });
+    return note;
+  }
+
+  /**
+   * Переключение видимости.
+   * @param {string} uid
+   * @returns {Promise<Object|null>}
+   */
+  async function toggle(uid) {
+    const note = await DB.getNote(uid);
+    if (!note) return null;
+
+    note.visibility = note.visibility === 'public' ? 'private' : 'public';
+    note.version = nextVersion();
+    note.updatedAt = Date.now();
+
+    await DB.putNote(note);
+    emit('note:updated', note);
+    return note;
+  }
+
+  /**
+   * @param {string} uid
+   * @returns {Promise<Object|undefined>}
+   */
+  function get(uid) {
+    return DB.getNote(uid);
+  }
+
+  /**
+   * Применение канона владельца с другого устройства (Mirror).
+   * LWW: version, затем updatedAt как tiebreak.
+   * @param {Object} canonical - Расшифрованная запись канона.
+   * @returns {Promise<boolean>} true — применено.
+   */
+  async function applyOwnCanonical(canonical) {
+    if (!canonical || !canonical.uid) return false;
+
+    const cur = await DB.getNote(canonical.uid);
+    if (!cur) return false;
+
+    if (canonical.version < cur.version) return false;
+    if (canonical.version === cur.version &&
+        (canonical.updatedAt || 0) <= (cur.updatedAt || 0)) return false;
+
+    cur.text = typeof canonical.text === 'string' ? canonical.text : cur.text;
+    cur.vector = canonical.vec || cur.vector;
+    cur.visibility = canonical.visibility || cur.visibility;
+    cur.parent = canonical.parent || cur.parent;
+    cur.version = canonical.version;
+    cur.updatedAt = Date.now();
+
+    await DB.putNote(cur);
+    emit('note:updated', cur);
+    return true;
+  }
+
+  /**
+   * Создание заметки из канона (restore на новом устройстве).
+   * @param {Object} canonical - Расшифрованная запись канона.
+   * @returns {Promise<boolean>}
+   */
+  async function restoreFromCanonical(canonical) {
+    if (!canonical || !canonical.uid) return false;
+
+    const cur = await DB.getNote(canonical.uid);
+    if (cur) return applyOwnCanonical(canonical);
+
+    await DB.putNote({
+      uid: canonical.uid,
+      text: canonical.text || '',
+      vector: canonical.vec || null,
+      visibility: canonical.visibility || 'private',
+      parent: canonical.parent || null,
+      version: canonical.version,
+      createdAt: (canonical.version * 1000) || Date.now(),
+      updatedAt: Date.now(),
+    });
+    emit('note:created', await DB.getNote(canonical.uid));
+    return true;
+  }
+
+  return {
+    init,
+    create,
+    edit,
+    remove,
+    toggle,
+    get,
+    applyOwnCanonical,
+    restoreFromCanonical,
+  };
+}, ['DB', 'Embedder', 'EventBus', 'Logger', 'Utils']);
 // ─── DOMAIN/Notes ─── END ───────────────────────────────────────────────────
 
 // ─── DOMAIN/Mirror ─── START ────────────────────────────────────────────────
 /**
- * Интерпретация входящих канонов: расшифровка (Protocol), свои —
- * применение к notes (синк устройств), чужие — upsertMirror.
- * Deleted — вычистка. Подтяжка по ответам-ссылкам. Единственная
- * точка записи в mirror.
+ * Интерпретация входящих канонов: свои — к notes (синк устройств),
+ * чужие — к mirror. Подтяжка по ответам-ссылкам.
+ * Единственная точка записи в mirror.
  */
+DI.register('Mirror', function (DB, Protocol, Notes, bus, Logger) {
+  /** @type {Set<string>} */
+  const fetched = new Set();
+
+  /**
+   * Инициализация: подписка на входящие события.
+   */
+  function init() {
+    bus.on('net:canon', ev => {
+      if (ev) applyCanon(ev);
+    });
+
+    bus.on('net:answer', a => {
+      if (a && a.uid && a.owner) fetchTarget(a.uid, a.owner);
+    });
+  }
+
+  /**
+   * Применить входящее событие канона.
+   * @param {Object} ev - Nostr-событие kind 30078.
+   * @returns {Promise<void>}
+   */
+  async function applyCanon(ev) {
+    try {
+      const canonical = await Protocol.decodeCanon(ev);
+      if (!canonical || !canonical.uid || !canonical.owner) return;
+
+      if (DB.hasOwn(canonical.uid)) {
+        const applied = await Notes.applyOwnCanonical(canonical);
+        if (applied) {
+          Logger.info('Mirror: синк ' + canonical.uid.slice(0, 6) + ' v' + canonical.version);
+        }
+        return;
+      }
+
+      await DB.upsertMirror(canonical);
+    } catch (e) {
+      Logger.warn('Mirror: applyCanon', String(e && e.message || e));
+    }
+  }
+
+  /**
+   * Подтяжка заметки по ответу-ссылке: подписка на автора + d-tag.
+   * Релей replaceable-семантики отдаёт последнюю версию.
+   * @param {string} uid
+   * @param {string} owner
+   */
+  function fetchTarget(uid, owner) {
+    if (!uid || !owner) return;
+    if (DB.hasOwn(uid)) return;
+    if (fetched.has(uid)) return;
+
+    fetched.add(uid);
+    if (fetched.size > 500) {
+      const arr = Array.from(fetched);
+      fetched.clear();
+      for (let i = Math.floor(arr.length / 2); i < arr.length; i++) {
+        fetched.add(arr[i]);
+      }
+    }
+
+    bus.emit('mirror:fetch', { uid, owner });
+  }
+
+  return { init, applyCanon, fetchTarget };
+}, ['DB', 'Protocol', 'Notes', 'EventBus', 'Logger']);
 // ─── DOMAIN/Mirror ─── END ──────────────────────────────────────────────────
 
 // ─── DOMAIN/Context ─── START ───────────────────────────────────────────────
