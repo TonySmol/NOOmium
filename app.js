@@ -5393,44 +5393,2447 @@ DI.register('HeaderStatus', function (bus, I18n, Embedder) {
 
 // ─── UI/Onboarding ─── START ────────────────────────────────────────────────
 /**
- * Онбординг: 8 секций, флажок.
+ * Онбординг: 8 секций механик, флажок «больше не показывать».
  */
+DI.register('Onboarding', function (Config, Modal, I18n, Embedder) {
+  /**
+   * @param {boolean} firstRun
+   * @returns {{el: Element, checkbox: HTMLInputElement|null}}
+   */
+  function buildBody(firstRun) {
+    const el = document.createElement('div');
+    el.style.cssText = 'display:flex;flex-direction:column;gap:14px;';
+
+    const sections = [
+      ['◇ ' + I18n.t('onb.what.t'), I18n.t('onb.what.d')],
+      ['▤ ' + I18n.t('onb.stream.t'), I18n.t('onb.stream.d')],
+      ['◈ ' + I18n.t('onb.pin.t'), I18n.t('onb.pin.d')],
+      ['∿ ' + I18n.t('onb.drift.t'), I18n.t('onb.drift.d')],
+      ['⌘ ' + I18n.t('onb.modes.t'), I18n.t('onb.modes.d')],
+      ['⚿ ' + I18n.t('onb.key.t'), I18n.t('onb.key.d')],
+      ['◆ ' + I18n.t('onb.resonance.t'), I18n.t('onb.resonance.d')],
+      ['⌫ ' + I18n.t('onb.delete.t'), I18n.t('onb.delete.d')],
+    ];
+
+    sections.forEach(([title, desc]) => {
+      const s = document.createElement('div');
+      const t = document.createElement('div');
+      t.style.cssText = 'font-weight:700;font-size:13px;margin-bottom:3px;';
+      t.textContent = title;
+
+      const d = document.createElement('div');
+      d.style.cssText = 'font-size:13px;color:var(--text-2);line-height:1.5;';
+      d.textContent = desc;
+
+      s.appendChild(t);
+      s.appendChild(d);
+      el.appendChild(s);
+    });
+
+    let checkbox = null;
+
+    if (firstRun) {
+      const label = document.createElement('label');
+      label.style.cssText = 'display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text-2);cursor:pointer;margin-top:4px;';
+
+      checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+
+      label.appendChild(checkbox);
+
+      const span = document.createElement('span');
+      span.textContent = I18n.t('onb.dontshow');
+      label.appendChild(span);
+
+      el.appendChild(label);
+    }
+
+    return { el, checkbox };
+  }
+
+  /**
+   * @param {boolean} [firstRun]
+   */
+  function showHelp(firstRun) {
+    const { el, checkbox } = buildBody(!!firstRun);
+
+    Modal.open({
+      title: I18n.t('onb.title'),
+      body: el,
+      buttons: [{
+        text: I18n.t('onb.gotit'),
+        primary: true,
+        onClick: () => {
+          if (firstRun && checkbox && checkbox.checked) {
+            Config.set('onboarded', true);
+          }
+          Modal.close();
+        },
+      }],
+    });
+  }
+
+  /**
+   * Инициализация.
+   */
+  function init() {
+    if (Config.get('onboarded', false)) return;
+
+    Embedder.load().then(() => {
+      showHelp(true);
+    });
+  }
+
+  return { init, showHelp };
+}, ['Config', 'Modal', 'I18n', 'Embedder']);
 // ─── UI/Onboarding ─── END ──────────────────────────────────────────────────
 
 // ─── UI/Composer ─── START ──────────────────────────────────────────────────
 /**
  * Ввод: лимиты, тумблер видимости, отправка через Notes.create.
+ * Родитель = пин {uid, owner} (И1).
  */
+DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils, Config) {
+  let ta, cnt, sendBtn, toggle, footEl;
+  let sending = false;
+  let unsubs = [];
+  let vvCleanup = null;
+  let iconTimer = null;
+
+  const SEND_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></svg>';
+
+  const SEND_SPINNER = '<span class="btn-spinner"></span>';
+
+  /**
+   * Вставить иконку отправки, если кнопка пуста.
+   */
+  function ensureSendIcon() {
+    if (!sendBtn || sending) return;
+    if (!sendBtn.querySelector('svg, .btn-spinner')) {
+      sendBtn.innerHTML = SEND_ICON;
+    }
+  }
+
+  /**
+   * Обновление счётчика и лимитов.
+   */
+  function updateCounter() {
+    if (!cnt || !ta) return;
+
+    const len = ta.value.length;
+    const max = Config.get('maxPostLength', 2500);
+    const soft = Config.get('softLimit', 1200);
+    const hard = Config.get('hardLimit', 2000);
+
+    cnt.textContent = Utils.word('symbols', len, I18n.getLang());
+
+    let color = 'var(--text-3)';
+    let hint = null;
+    let hintLevel = null;
+
+    if (len >= max) {
+      color = 'var(--rose)';
+      hint = I18n.t('ed.limit.max', { max });
+      hintLevel = 'err';
+    } else if (len >= hard) {
+      color = 'var(--rose)';
+      hint = I18n.t('ed.limit.hard');
+      hintLevel = 'err';
+    } else if (len >= soft) {
+      color = 'var(--amber)';
+      hint = I18n.t('ed.limit.soft');
+      hintLevel = 'warn';
+    }
+
+    cnt.style.color = color;
+    updateHint(hint, hintLevel);
+
+    if (sendBtn) {
+      sendBtn.disabled = len >= max || sending;
+    }
+  }
+
+  /**
+   * @param {string|null} text
+   * @param {'warn'|'err'|null} [level]
+   */
+  function updateHint(text, level) {
+    let hintEl = document.getElementById('ed-hint');
+
+    if (!text) {
+      if (hintEl) hintEl.remove();
+      return;
+    }
+
+    if (!hintEl) {
+      hintEl = document.createElement('div');
+      hintEl.id = 'ed-hint';
+      if (footEl && footEl.parentNode) {
+        footEl.parentNode.insertBefore(hintEl, footEl.nextSibling);
+      }
+    }
+
+    hintEl.textContent = text;
+    hintEl.className = level === 'err' ? 'err' : 'warn';
+  }
+
+  /**
+   * @param {string} mode
+   */
+  function reflectMode(mode) {
+    if (!toggle) return;
+    toggle.setAttribute('data-mode', mode);
+    toggle.querySelectorAll('.mt-opt').forEach(o =>
+      o.classList.toggle('on', o.getAttribute('data-v') === mode)
+    );
+  }
+
+  /**
+   * @param {boolean} on
+   */
+  function setSendingUI(on) {
+    if (!sendBtn) return;
+    sendBtn.disabled = on;
+    sendBtn.classList.toggle('sending', on);
+    sendBtn.innerHTML = on ? SEND_SPINNER : SEND_ICON;
+  }
+
+  /**
+   * Отправка: Notes.create(text, visibility, parent).
+   */
+  function send() {
+    if (sending) return;
+
+    const text = ta.value.trim();
+    if (!text) {
+      Toast.show('warn', I18n.t('toast.empty'));
+      return;
+    }
+
+    const max = Config.get('maxPostLength', 2500);
+    if (text.length > max) {
+      Toast.show('err', I18n.t('ed.limit.max', { max }));
+      return;
+    }
+
+    const sendMode = Store.get('sendMode');
+    const visibility = sendMode === 'world' ? 'public' : 'private';
+
+    sending = true;
+    setSendingUI(true);
+
+    const finish = () => {
+      sending = false;
+      setSendingUI(false);
+      ta.value = '';
+      ta.style.height = 'auto';
+      Context.setInput('');
+      updateCounter();
+    };
+
+    const pin = Context.getPin();
+    const parent = pin ? { uid: pin.uid, owner: pin.owner || null } : null;
+
+    Notes.create(text, visibility, parent)
+      .then(note => {
+        Toast.show('ok', I18n.t(visibility === 'public' ? 'toast.saved.public' : 'toast.saved.private')
+          + (note && note.parent ? ' · ' + I18n.t('inf.linked') : ''));
+        try { bus.emit('editor:sent'); } catch (_) {}
+        finish();
+      })
+      .catch(e => {
+        Toast.show('err', String(e && e.message || e));
+        sending = false;
+        setSendingUI(false);
+      });
+  }
+
+  /**
+   * VisualViewport-обработка клавиатуры.
+   */
+  function setupKeyboardHandler() {
+    if (!window.visualViewport) return;
+
+    const vv = window.visualViewport;
+
+    const onResize = () => {
+      const app = document.getElementById('app');
+      if (!app) return;
+
+      const keyboardHeight = window.innerHeight - vv.height;
+
+      if (keyboardHeight > 100) {
+        app.style.height = vv.height + 'px';
+        app.style.maxHeight = vv.height + 'px';
+      } else {
+        app.style.height = '';
+        app.style.maxHeight = '';
+      }
+    };
+
+    vv.addEventListener('resize', onResize);
+    vv.addEventListener('scroll', onResize);
+
+    vvCleanup = () => {
+      vv.removeEventListener('resize', onResize);
+      vv.removeEventListener('scroll', onResize);
+    };
+  }
+
+  /**
+   * Инициализация.
+   */
+  function init() {
+    ta = document.getElementById('ed-ta');
+    cnt = document.getElementById('ed-cnt');
+    sendBtn = document.getElementById('btn-send');
+    toggle = document.getElementById('mode-toggle');
+    footEl = document.getElementById('ed-foot');
+
+    if (!ta) return;
+
+    ensureSendIcon();
+
+    if (iconTimer) clearTimeout(iconTimer);
+    iconTimer = setTimeout(ensureSendIcon, 300);
+
+    ta.setAttribute('maxlength', Config.get('maxPostLength', 2500));
+
+    ta.addEventListener('input', () => {
+      ta.style.height = 'auto';
+      ta.style.height = Math.min(ta.scrollHeight, 120) + 'px';
+
+      updateCounter();
+      Context.setInput(ta.value);
+    });
+
+    setupKeyboardHandler();
+
+    ta.addEventListener('keydown', e => {
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        send();
+      }
+    });
+
+    if (sendBtn) sendBtn.addEventListener('click', send);
+
+    if (toggle) {
+      toggle.addEventListener('click', e => {
+        const opt = e.target.closest('.mt-opt');
+        if (opt && opt.getAttribute('data-v')) {
+          Store.setState({ sendMode: opt.getAttribute('data-v') });
+        }
+      });
+    }
+
+    unsubs.push(Store.subscribe(s => s.sendMode, reflectMode));
+
+    unsubs.push(bus.on('i18n:change', () => {
+      updateCounter();
+      reflectMode(Store.get('sendMode'));
+    }));
+
+    reflectMode(Store.get('sendMode'));
+    updateCounter();
+  }
+
+  /**
+   * Отписка.
+   */
+  function destroy() {
+    unsubs.forEach(u => {
+      try { u(); } catch (_) {}
+    });
+    unsubs = [];
+
+    if (iconTimer) {
+      clearTimeout(iconTimer);
+      iconTimer = null;
+    }
+
+    if (vvCleanup) {
+      try { vvCleanup(); } catch (_) {}
+      vvCleanup = null;
+    }
+  }
+
+  return { init, destroy, send };
+}, ['Context', 'Notes', 'Store', 'I18n', 'EventBus', 'Toast', 'Utils', 'Config']);
 // ─── UI/Composer ─── END ────────────────────────────────────────────────────
 
 // ─── UI/FeedView ─── START ──────────────────────────────────────────────────
 /**
- * Рендер ленты: три режима, карточки, связи, резонанс, история.
+ * Рендер ленты: три режима (хронология / пин-дрейф / ввод),
+ * карточки, связи, резонанс, история.
  */
+DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Influence, Provenance, Modal, NetService) {
+  let feedEl, emptyEl, emptyT, segBar, ctxBanner, ctxSrc, ctxTxt, ctxX;
+  let cLocal, cWorld, cSeren, histBtn;
+  let unsubs = [];
+  let rafPending = false;
+
+  /**
+   * Привязка к DOM.
+   */
+  function bind() {
+    feedEl = document.getElementById('feed');
+    emptyEl = document.getElementById('feed-empty');
+    emptyT = document.getElementById('feed-empty-t');
+    segBar = document.getElementById('seg');
+    ctxBanner = document.getElementById('ctx-banner');
+    ctxSrc = document.getElementById('ctx-src');
+    ctxTxt = document.getElementById('ctx-txt');
+    ctxX = document.getElementById('ctx-x');
+    cLocal = document.getElementById('c-local');
+    cWorld = document.getElementById('c-world');
+    cSeren = document.getElementById('c-seren');
+    histBtn = document.getElementById('btn-history');
+  }
+
+  /**
+   * Коалесценция рендеров.
+   */
+  function scheduleRender() {
+    if (rafPending) return;
+    rafPending = true;
+    requestAnimationFrame(() => {
+      rafPending = false;
+      render();
+    });
+  }
+
+  /**
+   * @param {Object} n
+   * @returns {boolean}
+   */
+  function isPinnedCard(n) {
+    const ctx = Store.get('context');
+    return ctx.source === 'pin' && ctx.uid === n.uid;
+  }
+
+  /**
+   * @param {Object} n
+   */
+  function onNoteClick(n) {
+    const ctx = Store.get('context');
+
+    if ((ctx.source === 'pin' || ctx.source === 'drift') && ctx.uid === n.uid) {
+      Context.clearPin();
+      return;
+    }
+
+    if (n.vector) Context.setPin(n);
+  }
+
+  /**
+   * @param {Array<Object>} childrenList
+   */
+  function renderChildrenModal(childrenList) {
+    const truncate = Config.get('truncateTextLength', 140);
+    const body = document.createElement('div');
+    body.style.cssText = 'display:flex;flex-direction:column;gap:8px;';
+
+    if (!childrenList.length) {
+      const empty = document.createElement('div');
+      empty.style.cssText = 'color:var(--text-3);font-size:13px;text-align:center;padding:12px;';
+      empty.textContent = I18n.t('inf.nochildren');
+      body.appendChild(empty);
+    } else {
+      childrenList.forEach(c => {
+        const item = document.createElement('button');
+        item.className = 'nv-act';
+        item.style.cssText = 'text-align:left;justify-content:flex-start;white-space:normal;height:auto;min-height:40px;width:100%;';
+        item.textContent = (c.text || '').slice(0, truncate);
+
+        item.addEventListener('click', () => {
+          Modal.close();
+          try { bus.emit('note:open', { uid: c.uid }); } catch (_) {}
+        });
+
+        body.appendChild(item);
+      });
+    }
+
+    Modal.open({
+      title: I18n.t('inf.children') + (childrenList.length ? ' · ' + childrenList.length : ''),
+      body: body,
+      buttons: [{ text: I18n.t('btn.close'), onClick: () => Modal.close() }],
+    });
+  }
+
+  /**
+   * @param {Object} note
+   */
+  function showChildren(note) {
+    Provenance.children(note.uid).then(childrenList => {
+      renderChildrenModal(childrenList);
+    }).catch(() => {});
+  }
+
+  /**
+   * @param {Object} note
+   * @param {Array<Object>} chain
+   */
+  function renderAncestorsModal(note, chain) {
+    const truncate = Config.get('truncateTextLength', 140);
+    const body = document.createElement('div');
+    body.style.cssText = 'display:flex;flex-direction:column;gap:8px;';
+
+    if (!chain.length) {
+      const empty = document.createElement('div');
+      empty.style.cssText = 'color:var(--text-3);font-size:13px;text-align:center;padding:12px;';
+      empty.textContent = I18n.t('inf.noancestors');
+      body.appendChild(empty);
+    } else {
+      chain.forEach((c, i) => {
+        const item = document.createElement('button');
+        item.className = 'nv-act';
+        item.style.cssText = 'text-align:left;justify-content:flex-start;white-space:normal;height:auto;min-height:40px;width:100%;';
+        item.style.paddingLeft = (16 + i * 14) + 'px';
+        item.textContent = '↳ ' + (c.text || '').slice(0, truncate);
+
+        item.addEventListener('click', () => {
+          Modal.close();
+          try { bus.emit('note:open', { uid: c.uid }); } catch (_) {}
+        });
+
+        body.appendChild(item);
+      });
+    }
+
+    Modal.open({
+      title: I18n.t('inf.lineage') + (chain.length ? ' · ' + chain.length : ''),
+      body: body,
+      buttons: [{ text: I18n.t('btn.close'), onClick: () => Modal.close() }],
+    });
+  }
+
+  /**
+   * @param {Object} note
+   */
+  function showAncestors(note) {
+    Provenance.ancestors(note.uid).then(chain => {
+      renderAncestorsModal(note, chain);
+    }).catch(() => {});
+  }
+
+  /**
+   * @returns {HTMLSpanElement}
+   */
+  function createSep() {
+    const sep = document.createElement('span');
+    sep.className = 'note-meta-sep';
+    return sep;
+  }
+
+  /**
+   * @param {Object} n
+   * @param {boolean} isRanked
+   * @param {number} i
+   * @returns {HTMLDivElement}
+   */
+  function card(n, isRanked, i) {
+    const el = document.createElement('div');
+    el.className = 'note' + (isPinnedCard(n) ? ' pinned' : '');
+    el.style.animationDelay = Math.min(i * 25, 300) + 'ms';
+    el.dataset.uid = n.uid;
+
+    const txt = document.createElement('div');
+    txt.className = 'note-txt';
+    txt.textContent = n.text || '';
+    el.appendChild(txt);
+
+    const meta = document.createElement('div');
+    meta.className = 'note-meta';
+
+    const tag = document.createElement('span');
+    if (n.own) {
+      tag.className = 'note-tag world';
+      tag.textContent = I18n.t('base.tag.shared');
+    } else {
+      tag.className = 'note-tag world';
+      tag.textContent = '· ' + Utils.shortPk(n.owner || '');
+    }
+    meta.appendChild(tag);
+
+    const hasNav = !!(n.parent && n.parent.uid);
+    const res = Influence.resonance(n.uid);
+    const hasResonance = res > 0;
+
+    if (hasNav || hasResonance) {
+      meta.appendChild(createSep());
+
+      if (hasNav) {
+        const link = document.createElement('button');
+        link.className = 'note-parent';
+        link.textContent = '↳';
+        link.title = I18n.t('inf.lineage');
+        link.setAttribute('aria-label', I18n.t('inf.openparent'));
+
+        Provenance.hasResolvableParent(n).then(ok => {
+          if (ok) {
+            link.addEventListener('click', e => {
+              e.stopPropagation();
+              showAncestors(n);
+            });
+          } else {
+            link.classList.add('orphan');
+            link.title = I18n.t('inf.orphan.hint');
+          }
+        }).catch(() => {
+          link.classList.add('orphan');
+          link.title = I18n.t('inf.orphan.hint');
+        });
+
+        meta.appendChild(link);
+      }
+
+      if (hasResonance) {
+        const r = document.createElement('button');
+        r.className = 'note-sim';
+        r.textContent = '◆' + res;
+        r.title = I18n.t('inf.resonance');
+        r.setAttribute('aria-label', I18n.t('inf.resonance'));
+
+        r.addEventListener('click', e => {
+          e.stopPropagation();
+          showChildren(n);
+        });
+
+        meta.appendChild(r);
+      }
+    }
+
+    meta.appendChild(createSep());
+
+    if (isRanked && typeof n.score === 'number') {
+      const threshold = Config.get('threshold', 0.81);
+      const serendipity = Config.get('serendipity', 0.07);
+      const serenMid = threshold - serendipity / 2;
+      const displayMode = Config.get('similarityDisplay', 'signal');
+      const pct = Math.round(n.score * 100);
+
+      const sim = document.createElement('span');
+      sim.className = 'note-sim-info';
+
+      if (displayMode === 'percent') {
+        sim.textContent = pct + '%';
+        sim.title = I18n.t('sim.score');
+      } else {
+        if (n.score >= threshold) {
+          sim.innerHTML = '<span class="sig-bar sig-full"></span><span class="sig-bar sig-full"></span><span class="sig-bar sig-full"></span>';
+          sim.title = I18n.t('sim.level.high') + ' (' + pct + '%)';
+        } else if (n.score >= serenMid) {
+          sim.innerHTML = '<span class="sig-bar sig-full"></span><span class="sig-bar sig-full"></span><span class="sig-bar sig-empty"></span>';
+          sim.title = I18n.t('sim.level.mid') + ' (' + pct + '%)';
+        } else {
+          sim.innerHTML = '<span class="sig-bar sig-full"></span><span class="sig-bar sig-empty"></span><span class="sig-bar sig-empty"></span>';
+          sim.title = I18n.t('sim.level.low') + ' (' + pct + '%)';
+        }
+        const label = document.createElement('span');
+        label.className = 'sig-label';
+        label.textContent = n.score >= threshold
+          ? I18n.t('sim.level.high')
+          : (n.score >= serenMid ? I18n.t('sim.level.mid') : I18n.t('sim.level.low'));
+        sim.appendChild(label);
+      }
+
+      meta.appendChild(sim);
+    }
+
+    const date = document.createElement('span');
+    date.className = 'note-date';
+    date.textContent = Utils.fmtRelativeTime(n.updatedAt || n.createdAt, I18n.getLang(), I18n.t);
+    meta.appendChild(date);
+
+    if (n.own) {
+      const openBtn = document.createElement('button');
+      openBtn.className = 'na';
+      openBtn.textContent = '✎';
+      openBtn.title = I18n.t('btn.open');
+      openBtn.setAttribute('aria-label', I18n.t('btn.open'));
+
+      openBtn.addEventListener('click', e => {
+        e.stopPropagation();
+        try { bus.emit('note:open', { uid: n.uid }); } catch (_) {}
+      });
+
+      meta.appendChild(openBtn);
+    }
+
+    el.appendChild(meta);
+    el.addEventListener('click', () => onNoteClick(n));
+    return el;
+  }
+
+  /**
+   * Полный рендер.
+   */
+  function render() {
+    if (!feedEl) return;
+
+    const state = Store.getState();
+    const ctx = state.context;
+    const isPinnedMode = ctx.source === 'pin';
+    const isTyping = ctx.source === 'input';
+    const isDrift = ctx.source === 'drift';
+    const isRanked = isPinnedMode || isTyping || isDrift;
+
+    segBar.classList.toggle('on', isTyping);
+    ctxBanner.classList.toggle('on', isPinnedMode || isDrift);
+
+    if (isPinnedMode || isDrift) {
+      ctxSrc.textContent = isDrift ? I18n.t('ctx.drift') : I18n.t('ctx.pinned');
+      ctxTxt.textContent = isDrift ? (ctx.pinText || ctx.text) : ctx.text;
+    }
+
+    document.querySelectorAll('.seg-b').forEach(b => {
+      b.classList.toggle('on', b.getAttribute('data-k') === state.seg);
+    });
+
+    cLocal.textContent = state.lists.local.length;
+    cWorld.textContent = state.lists.world.length;
+    cSeren.textContent = state.lists.seren.length;
+
+    let notes;
+
+    if (isPinnedMode || isDrift) {
+      notes = [...state.lists.local, ...state.lists.world, ...state.lists.seren]
+        .sort((a, b) => (b.score || 0) - (a.score || 0));
+    } else if (isTyping) {
+      notes = state.lists[state.seg] || [];
+    } else {
+      notes = state.feed;
+    }
+
+    feedEl.innerHTML = '';
+
+    if (!notes.length) {
+      emptyEl.classList.add('on');
+
+      emptyT.textContent = (isPinnedMode || isDrift)
+        ? I18n.t('empty.world.t')
+        : (isTyping ? I18n.t('empty.' + state.seg + '.t') : I18n.t('empty.local.t'));
+    } else {
+      emptyEl.classList.remove('on');
+
+      const frag = document.createDocumentFragment();
+      notes.forEach((n, i) => {
+        frag.appendChild(card(n, isRanked, i));
+      });
+      feedEl.appendChild(frag);
+    }
+  }
+
+  /**
+   * Инициализация.
+   */
+  function init() {
+    bind();
+    if (!feedEl) return;
+
+    unsubs.push(Store.subscribe(s => s.context, scheduleRender, Store.shallowEqual));
+    unsubs.push(Store.subscribe(s => s.lists, scheduleRender));
+    unsubs.push(Store.subscribe(s => s.feed, scheduleRender));
+    unsubs.push(Store.subscribe(s => s.seg, scheduleRender));
+    unsubs.push(bus.on('i18n:change', scheduleRender));
+    unsubs.push(bus.on('db:change', scheduleRender));
+    unsubs.push(bus.on('db:mirror', scheduleRender));
+    unsubs.push(bus.on('influence:updated', scheduleRender));
+
+    if (histBtn) {
+      histBtn.addEventListener('click', () => NetService.loadHistory());
+
+      unsubs.push(bus.on('net:history', e => {
+        if (!histBtn) return;
+
+        if (e && e.loading) {
+          histBtn.disabled = true;
+          histBtn.textContent = I18n.t('net.loading');
+        } else {
+          histBtn.disabled = false;
+          histBtn.textContent = I18n.t('net.loadmore');
+        }
+      }));
+    }
+
+    document.querySelectorAll('.seg-b').forEach(b => {
+      b.addEventListener('click', () => {
+        Store.setState({ seg: b.getAttribute('data-k') });
+      });
+    });
+
+    if (ctxX) {
+      ctxX.addEventListener('click', () => Context.clearPin());
+    }
+
+    render();
+  }
+
+  /**
+   * Отписка.
+   */
+  function destroy() {
+    unsubs.forEach(u => {
+      try { u(); } catch (_) {}
+    });
+    unsubs = [];
+  }
+
+  return { init, destroy, render };
+}, ['Store', 'Context', 'I18n', 'Utils', 'Config', 'EventBus', 'Influence', 'Provenance', 'Modal', 'NetService']);
 // ─── UI/FeedView ─── END ────────────────────────────────────────────────────
 
 // ─── UI/BaseView ─── START ──────────────────────────────────────────────────
 /**
- * База: статистика, поиск, сортировка по notes.
+ * База: статистика по visibility, поиск, сортировка по notes.
  */
+DI.register('BaseView', function (Store, DB, I18n, Utils, Config, bus) {
+  let listEl, statsTotal, statsOpen, statsPriv, qEl, sortEl;
+  let unsubs = [];
+  let rafPending = false;
+
+  /**
+   * Привязка к DOM.
+   */
+  function bind() {
+    listEl = document.getElementById('base-list');
+    statsTotal = document.getElementById('bs-total');
+    statsOpen = document.getElementById('bs-open');
+    statsPriv = document.getElementById('bs-priv');
+    qEl = document.getElementById('base-q');
+    sortEl = document.getElementById('base-sort');
+  }
+
+  /**
+   * Коалесценция рендеров.
+   */
+  function scheduleRender() {
+    if (rafPending) return;
+    rafPending = true;
+    requestAnimationFrame(() => {
+      rafPending = false;
+      render();
+    });
+  }
+
+  /**
+   * Рендер (только при view === 'base').
+   */
+  function render() {
+    if (!listEl) return;
+
+    const view = Store.get('view');
+    if (view !== 'base') return;
+
+    const q = (qEl && qEl.value || '').trim().toLowerCase();
+    const sort = (sortEl && sortEl.value) || 'new';
+
+    DB.allNotes().then(notes => {
+      let arr = notes.slice();
+
+      if (q) arr = arr.filter(n => (n.text || '').toLowerCase().includes(q));
+
+      if (sort === 'old') {
+        arr.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+      } else if (sort === 'az') {
+        arr.sort((a, b) => (a.text || '').localeCompare(b.text || '', I18n.getLang() === 'en' ? 'en' : 'ru'));
+      } else {
+        arr.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+      }
+
+      const publicCount = notes.filter(n => n.visibility === 'public').length;
+
+      if (statsTotal) statsTotal.textContent = notes.length;
+      if (statsOpen) statsOpen.textContent = publicCount;
+      if (statsPriv) statsPriv.textContent = notes.length - publicCount;
+
+      listEl.innerHTML = '';
+
+      if (!arr.length) {
+        const empty = document.createElement('div');
+        empty.className = 'note';
+        empty.style.cursor = 'default';
+        empty.textContent = q ? I18n.t('empty.base.empty') : I18n.t('empty.base.t');
+        listEl.appendChild(empty);
+        return;
+      }
+
+      const frag = document.createDocumentFragment();
+      arr.forEach(n => frag.appendChild(row(n)));
+      listEl.appendChild(frag);
+    }).catch(() => {});
+  }
+
+  /**
+   * @param {Object} n - Своя заметка.
+   * @returns {HTMLDivElement}
+   */
+  function row(n) {
+    const el = document.createElement('div');
+    el.className = 'bi';
+    el.dataset.uid = n.uid;
+
+    const t = document.createElement('div');
+    t.className = 'bi-t';
+    t.textContent = n.text || '';
+    el.appendChild(t);
+
+    const f = document.createElement('div');
+    f.className = 'bi-f';
+
+    const tag = document.createElement('span');
+    tag.className = 'note-tag ' + (n.visibility === 'public' ? 'world' : 'priv');
+    tag.textContent = n.visibility === 'public' ? I18n.t('base.tag.shared') : I18n.t('base.tag.private');
+    f.appendChild(tag);
+
+    const date = document.createElement('span');
+    date.textContent = Utils.fmtDate(n.updatedAt || n.createdAt, I18n.getLang());
+    f.appendChild(date);
+
+    el.appendChild(f);
+    el.addEventListener('click', () => {
+      try { bus.emit('note:open', { uid: n.uid }); } catch (_) {}
+    });
+
+    return el;
+  }
+
+  /**
+   * Инициализация.
+   */
+  function init() {
+    bind();
+    if (!listEl) return;
+
+    const debouncedRender = Utils.debounce(scheduleRender, Config.get('baseSearchDebounce', 200));
+
+    if (qEl) qEl.addEventListener('input', debouncedRender);
+    if (sortEl) sortEl.addEventListener('change', scheduleRender);
+
+    unsubs.push(bus.on('db:change', scheduleRender));
+    unsubs.push(bus.on('view:changed', scheduleRender));
+    unsubs.push(bus.on('i18n:change', scheduleRender));
+
+    render();
+  }
+
+  /**
+   * Отписка.
+   */
+  function destroy() {
+    unsubs.forEach(u => {
+      try { u(); } catch (_) {}
+    });
+    unsubs = [];
+  }
+
+  return { init, destroy, render };
+}, ['Store', 'DB', 'I18n', 'Utils', 'Config', 'EventBus']);
 // ─── UI/BaseView ─── END ────────────────────────────────────────────────────
 
 // ─── UI/NoteView ─── START ──────────────────────────────────────────────────
 /**
- * Просмотр: свои (удалить/видимость/пин/правка), чужие (просмотр/пин).
+ * Полноэкранный просмотр: свои (удалить/видимость/пин/правка),
+ * чужие (просмотр/пин). Lookup: notes → mirror.
+ * Правка разрешена всем своим (replaceable-канон).
  */
+DI.register('NoteView', function (DB, Notes, NoteActions, I18n, Utils, Toast, bus) {
+  let root = null;
+  let currentUid = null;
+  let currentOwner = null;
+  let currentNote = null;
+  let escHandler = null;
+  let editMode = false;
+  let editTextarea = null;
+  let i18nUnsub = null;
+
+  /**
+   * Ленивая привязка к DOM.
+   */
+  function ensureRoot() {
+    if (!root) root = document.getElementById('noteview');
+    return root;
+  }
+
+  /**
+   * Закрыть.
+   */
+  function close() {
+    const r = ensureRoot();
+    if (r) {
+      r.classList.remove('on');
+      r.innerHTML = '';
+    }
+
+    if (escHandler) {
+      document.removeEventListener('keydown', escHandler);
+      escHandler = null;
+    }
+
+    currentUid = null;
+    currentOwner = null;
+    currentNote = null;
+    editMode = false;
+    editTextarea = null;
+  }
+
+  /**
+   * Открыть по uid: notes → mirror.
+   * @param {string} uid
+   */
+  function open(uid) {
+    if (!uid) return;
+
+    DB.getNote(uid).then(note => {
+      if (note) {
+        render({ uid: note.uid, owner: null, text: note.text,
+                  vec: note.vector, visibility: note.visibility,
+                  isOwn: true });
+        return;
+      }
+
+      DB.getMirror(uid).then(m => {
+        if (m) {
+          render({ uid: m.uid, owner: m.owner, text: m.text,
+                    vec: m.vec, visibility: m.visibility,
+                    isOwn: false });
+        }
+      });
+    }).catch(() => {});
+  }
+
+  /**
+   * @param {Object} note - {uid, owner, text, vec, visibility, isOwn}
+   * @param {HTMLButtonElement} editBtn
+   */
+  function enterEditMode(note, editBtn) {
+    if (editMode) return;
+
+    editMode = true;
+    const r = ensureRoot();
+    if (!r) return;
+
+    const txt = r.querySelector('.nv-text');
+
+    if (txt) {
+      const ta = document.createElement('textarea');
+      ta.className = 'nv-text-edit';
+      ta.value = note.text || '';
+      ta.placeholder = I18n.t('note.edit.placeholder');
+      txt.replaceWith(ta);
+      editTextarea = ta;
+      ta.focus();
+    }
+
+    if (editBtn) {
+      editBtn.textContent = I18n.t('btn.save');
+    }
+  }
+
+  /**
+   * @param {Object} note
+   */
+  function saveEdit(note) {
+    if (!editMode || !editTextarea) return;
+
+    const newText = editTextarea.value.trim();
+
+    if (!newText) {
+      Toast.show('warn', I18n.t('toast.empty'));
+      return;
+    }
+
+    const editBtn = document.querySelector('[data-role="edit"]');
+
+    if (editBtn) {
+      editBtn.disabled = true;
+      editBtn.innerHTML = '<span class="btn-spinner"></span>';
+    }
+
+    Notes.edit(note.uid, newText).then(updated => {
+      if (!updated) {
+        Toast.show('err', I18n.t('toast.copy.fail'));
+        return;
+      }
+
+      Toast.show('ok', I18n.t('toast.edit.saved'));
+      currentNote.text = updated.text;
+      render({ uid: updated.uid, owner: null, text: updated.text,
+               vec: updated.vector, visibility: updated.visibility,
+               isOwn: true });
+    }).catch(() => {
+      Toast.show('err', I18n.t('toast.copy.fail'));
+
+      if (editBtn) {
+        editBtn.disabled = false;
+        editBtn.textContent = I18n.t('btn.save');
+      }
+    });
+  }
+
+  /**
+   * Пин текущей + закрытие.
+   */
+  function pinAndClose() {
+    if (!currentNote) {
+      close();
+      return;
+    }
+
+    try {
+      bus.emit('note:pin', currentNote);
+      Toast.show('ok', I18n.t('toast.pinned'));
+    } catch (_) {}
+
+    close();
+  }
+
+  /**
+   * @param {Object} note - {uid, owner, text, vec, visibility, isOwn}
+   */
+  function render(note) {
+    const r = ensureRoot();
+    if (!r) return;
+
+    currentUid = note.uid;
+    currentOwner = note.owner;
+    currentNote = note;
+    r.innerHTML = '';
+    r.classList.add('on');
+    editMode = false;
+    editTextarea = null;
+
+    const top = document.createElement('div');
+    top.className = 'nv-f';
+
+    if (note.isOwn) {
+      const del = document.createElement('button');
+      del.className = 'nv-act danger';
+      del.textContent = I18n.t('btn.del');
+      del.addEventListener('click', () => {
+        NoteActions.remove(note.uid);
+        close();
+      });
+      top.appendChild(del);
+
+      const tog = document.createElement('button');
+      tog.className = 'nv-act';
+      tog.textContent = note.visibility === 'public'
+        ? I18n.t('btn.toggle.priv')
+        : I18n.t('btn.toggle.pub');
+      tog.addEventListener('click', () => {
+        NoteActions.toggle(note.uid);
+        close();
+      });
+      top.appendChild(tog);
+    }
+
+    const pinBtn = document.createElement('button');
+    pinBtn.className = 'nv-act';
+    pinBtn.textContent = '◈ ' + I18n.t('btn.pin');
+    pinBtn.title = I18n.t('btn.pin.aria');
+    pinBtn.setAttribute('aria-label', I18n.t('btn.pin.aria'));
+    pinBtn.addEventListener('click', pinAndClose);
+    top.appendChild(pinBtn);
+
+    if (note.isOwn) {
+      const edit = document.createElement('button');
+      edit.className = 'nv-act';
+      edit.setAttribute('data-role', 'edit');
+      edit.textContent = I18n.t('btn.edit');
+
+      edit.addEventListener('click', () => {
+        if (editMode) {
+          saveEdit(note);
+        } else {
+          enterEditMode(note, edit);
+        }
+      });
+
+      top.appendChild(edit);
+    }
+
+    r.appendChild(top);
+
+    const body = document.createElement('div');
+    body.className = 'nv-b';
+
+    const info = document.createElement('div');
+    info.className = 'note-meta';
+    info.style.marginBottom = '12px';
+
+    const tag = document.createElement('span');
+
+    if (note.isOwn) {
+      tag.className = 'note-tag ' + (note.visibility === 'public' ? 'world' : 'priv');
+      tag.textContent = note.visibility === 'public' ? I18n.t('base.tag.shared') : I18n.t('base.tag.private');
+    } else {
+      tag.className = 'note-tag world';
+      tag.textContent = '· ' + Utils.shortPk(note.owner || '');
+    }
+
+    info.appendChild(tag);
+
+    const now = Date.now();
+    const date = document.createElement('span');
+    date.textContent = Utils.fmtDate(now, I18n.getLang()) + ' ' + Utils.fmtTime(now, I18n.getLang());
+    info.appendChild(date);
+    body.appendChild(info);
+
+    const txt = document.createElement('div');
+    txt.className = 'nv-text';
+    txt.textContent = note.text || '';
+    body.appendChild(txt);
+
+    r.appendChild(body);
+
+    const bottom = document.createElement('div');
+    bottom.className = 'nv-f-bottom';
+
+    const closeBtn = document.createElement('button');
+    closeBtn.className = 'nv-act';
+    closeBtn.textContent = I18n.t('btn.close');
+    closeBtn.addEventListener('click', close);
+    bottom.appendChild(closeBtn);
+
+    r.appendChild(bottom);
+
+    if (escHandler) document.removeEventListener('keydown', escHandler);
+    escHandler = e => {
+      if (e.key === 'Escape') close();
+    };
+    document.addEventListener('keydown', escHandler);
+  }
+
+  /**
+   * Инициализация.
+   */
+  function init() {
+    const r = ensureRoot();
+    if (!r) return;
+
+    r.addEventListener('click', e => {
+      if (e.target === r) close();
+    });
+
+    bus.on('note:open', p => {
+      if (p && p.uid) open(p.uid);
+    });
+
+    i18nUnsub = bus.on('i18n:change', () => {
+      if (currentNote && !editMode && root && root.classList.contains('on')) {
+        render(currentNote);
+      }
+    });
+  }
+
+  /**
+   * Закрытие + отписка.
+   */
+  function destroy() {
+    if (i18nUnsub) {
+      try { i18nUnsub(); } catch (_) {}
+      i18nUnsub = null;
+    }
+    close();
+  }
+
+  return { init, destroy, open, close };
+}, ['DB', 'Notes', 'NoteActions', 'I18n', 'Utils', 'Toast', 'EventBus']);
 // ─── UI/NoteView ─── END ────────────────────────────────────────────────────
 
 // ─── UI/AccountView ─── START ───────────────────────────────────────────────
 /**
- * Аккаунт: ключ, вход, экспорт/импорт, синк.
+ * Экран аккаунта: ключ, вход, данные (экспорт/импорт), синк.
  */
+DI.register('AccountView', function (Account, Modal, Toast, I18n, Config, bus) {
+  let unsubs = [];
+
+  /**
+   * @param {string} text
+   * @param {Function} onClick
+   * @returns {HTMLButtonElement}
+   */
+  function actionBtn(text, onClick) {
+    const b = document.createElement('button');
+    b.className = 'nv-act';
+    b.style.cssText = 'flex:1;min-width:100px;font-size:12px;';
+    b.textContent = text;
+    b.addEventListener('click', onClick);
+    return b;
+  }
+
+  /**
+   * @param {string} text
+   * @returns {Promise<boolean>}
+   */
+  async function copyText(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      try {
+        await navigator.clipboard.writeText(text || '');
+        return true;
+      } catch (_) {
+        return false;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * @returns {Promise<string|null>}
+   */
+  async function readClipboard() {
+    if (navigator.clipboard && navigator.clipboard.readText) {
+      try {
+        return await navigator.clipboard.readText();
+      } catch (_) {
+        return null;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Модалка показа ключа.
+   */
+  async function openShowKey() {
+    const wrapAvailable = await Account.canWrapKey().catch(() => false);
+
+    const body = document.createElement('div');
+    body.className = 'acc-body';
+
+    let pwInput = null;
+
+    if (wrapAvailable) {
+      const pwField = document.createElement('div');
+      pwField.className = 'field';
+
+      const pwLabel = document.createElement('span');
+      pwLabel.className = 'field-label';
+      pwLabel.textContent = I18n.t('account.password.set');
+      pwField.appendChild(pwLabel);
+
+      pwInput = document.createElement('input');
+      pwInput.type = 'password';
+      pwInput.className = 'field-input';
+      pwInput.placeholder = I18n.t('account.password.hint');
+      pwField.appendChild(pwInput);
+
+      body.appendChild(pwField);
+    }
+
+    const hint = document.createElement('div');
+    hint.className = 'field-hint';
+    hint.textContent = I18n.t('account.nsec.hint');
+    body.appendChild(hint);
+
+    const keyBox = document.createElement('div');
+    keyBox.className = 'key-box masked';
+    keyBox.textContent = I18n.t('account.nsec.masked');
+    body.appendChild(keyBox);
+
+    const reveal = () => {
+      keyBox.textContent = '…';
+      Account.getWrappedKey(wrapAvailable && pwInput ? pwInput.value : '').then(wrapped => {
+        if (!wrapped) {
+          keyBox.textContent = I18n.t('account.nsec.masked');
+          Toast.show('err', I18n.t('toast.copy.fail'));
+          return;
+        }
+        keyBox.textContent = wrapped;
+        keyBox.classList.remove('masked');
+        keyBox.classList.add('focused');
+        copyText(wrapped);
+        Toast.show('ok', I18n.t('toast.key.copied'));
+      });
+    };
+
+    Modal.open({
+      title: I18n.t('account.identity'),
+      body,
+      buttons: [
+        { text: I18n.t('btn.show'), primary: true, onClick: reveal },
+        { text: I18n.t('btn.close'), onClick: () => Modal.close() },
+      ],
+    });
+  }
+
+  /**
+   * Модалка входа по ключу.
+   */
+  function openEnterKey() {
+    const body = document.createElement('div');
+    body.className = 'acc-body';
+
+    const desc = document.createElement('div');
+    desc.className = 'acc-desc';
+    desc.textContent = I18n.t('account.enter.desc');
+    body.appendChild(desc);
+
+    const keyField = document.createElement('div');
+    keyField.className = 'field';
+
+    const keyLabel = document.createElement('span');
+    keyLabel.className = 'field-label';
+    keyLabel.textContent = I18n.t('account.enter.title');
+    keyField.appendChild(keyLabel);
+
+    const keyInput = document.createElement('input');
+    keyInput.type = 'text';
+    keyInput.className = 'field-input mono';
+    keyInput.placeholder = I18n.t('account.enter.placeholder');
+    keyInput.autocomplete = 'off';
+    keyInput.spellcheck = false;
+    keyField.appendChild(keyInput);
+    body.appendChild(keyField);
+
+    const pwField = document.createElement('div');
+    pwField.className = 'field';
+    pwField.style.display = 'none';
+
+    const pwLabel = document.createElement('span');
+    pwLabel.className = 'field-label';
+    pwLabel.textContent = I18n.t('account.password.set');
+    pwField.appendChild(pwLabel);
+
+    const pwInput = document.createElement('input');
+    pwInput.type = 'password';
+    pwInput.className = 'field-input';
+    pwField.appendChild(pwInput);
+    body.appendChild(pwField);
+
+    keyInput.addEventListener('input', () => {
+      const v = keyInput.value.trim();
+      pwField.style.display = v.startsWith('ncryptsec1') ? '' : 'none';
+    });
+
+    const hint = document.createElement('div');
+    hint.className = 'field-hint';
+    hint.textContent = I18n.t('account.nsec.hint');
+    body.appendChild(hint);
+
+    const submit = () => {
+      const raw = keyInput.value.trim();
+      if (!raw) return;
+
+      Modal.confirm(
+        I18n.t('account.enter.confirm'),
+        I18n.t('account.enter.confirm.d'),
+        async () => {
+          const res = await Account.enterKey(raw, pwInput.value);
+          if (res.ok) {
+            Toast.show('ok', I18n.t('account.enter.done'));
+          } else {
+            Toast.show('err', I18n.t(res.error === 'bad'
+              ? 'account.enter.bad'
+              : 'toast.copy.fail'));
+          }
+        },
+        I18n.t('btn.confirm')
+      );
+    };
+
+    Modal.open({
+      title: I18n.t('account.enter.title'),
+      body,
+      buttons: [
+        { text: I18n.t('btn.cancel'), onClick: () => Modal.close() },
+        { text: I18n.t('btn.confirm'), primary: true, onClick: submit },
+      ],
+    });
+  }
+
+  /**
+   * Модалка экспорта.
+   */
+  async function openExport() {
+    const wrapAvailable = await Account.canWrapKey().catch(() => false);
+
+    const body = document.createElement('div');
+    body.className = 'acc-body';
+
+    const desc = document.createElement('div');
+    desc.className = 'acc-desc';
+    desc.textContent = I18n.t('account.export.desc');
+    body.appendChild(desc);
+
+    let withKey = false;
+
+    const displayGroup = document.createElement('div');
+    displayGroup.className = 'range-display';
+
+    const lbl = document.createElement('span');
+    lbl.className = 'range-display-lbl';
+    lbl.textContent = I18n.t('account.export.withkey');
+    displayGroup.appendChild(lbl);
+
+    const btnsWrap = document.createElement('div');
+    btnsWrap.className = 'range-display-btns';
+
+    /** @type {Array<HTMLButtonElement>} */
+    const btns = [];
+
+    function paint() {
+      btns.forEach(b => {
+        const mode = b.getAttribute('data-key-mode') === 'on';
+        b.classList.toggle('selected', mode === withKey);
+      });
+    }
+
+    [['off', false], ['on', true]].forEach(([mode, val]) => {
+      const btn = document.createElement('button');
+      btn.className = 'nv-act';
+      btn.setAttribute('data-key-mode', mode);
+      btn.style.cssText = 'flex:1;font-size:12px;';
+      btn.textContent = I18n.t(mode === 'on' ? 'btn.on' : 'btn.off');
+
+      btn.addEventListener('click', () => {
+        withKey = val;
+        paint();
+        if (pwField) pwField.style.display = (withKey && wrapAvailable) ? '' : 'none';
+      });
+
+      btns.push(btn);
+      btnsWrap.appendChild(btn);
+    });
+
+    paint();
+    displayGroup.appendChild(btnsWrap);
+    body.appendChild(displayGroup);
+
+    const withKeyHint = document.createElement('div');
+    withKeyHint.className = 'field-hint';
+    withKeyHint.textContent = I18n.t('account.export.withkey.hint');
+    body.appendChild(withKeyHint);
+
+    let pwInput = null;
+    let pwField = null;
+
+    if (wrapAvailable) {
+      pwField = document.createElement('div');
+      pwField.className = 'field';
+      pwField.style.display = 'none';
+
+      const pwLabel = document.createElement('span');
+      pwLabel.className = 'field-label';
+      pwLabel.textContent = I18n.t('account.password.set');
+      pwField.appendChild(pwLabel);
+
+      pwInput = document.createElement('input');
+      pwInput.type = 'password';
+      pwInput.className = 'field-input';
+      pwField.appendChild(pwInput);
+      body.appendChild(pwField);
+    }
+
+    const run = async () => {
+      const res = await Account.exportArchive(withKey, withKey && wrapAvailable && pwInput ? pwInput.value : '');
+      if (!res) {
+        Toast.show('err', I18n.t('toast.copy.fail'));
+        return;
+      }
+      Modal.close();
+      downloadText(res.json, res.filename);
+      Toast.show('ok', I18n.t('account.export.title'));
+    };
+
+    const runCopy = async () => {
+      const res = await Account.exportArchive(withKey, withKey && wrapAvailable && pwInput ? pwInput.value : '');
+      if (!res) {
+        Toast.show('err', I18n.t('toast.copy.fail'));
+        return;
+      }
+      const ok = await copyText(res.json);
+      Toast.show(ok ? 'ok' : 'err', I18n.t(ok ? 'toast.json.copied' : 'toast.clip.bad'));
+    };
+
+    Modal.open({
+      title: I18n.t('account.export.title'),
+      body,
+      buttons: [
+        { text: I18n.t('btn.cancel'), onClick: () => Modal.close() },
+        { text: I18n.t('btn.copy'), onClick: runCopy },
+        { text: I18n.t('btn.download'), primary: true, onClick: run },
+      ],
+    });
+  }
+
+  /**
+   * @param {string} text
+   * @param {string} filename
+   */
+  function downloadText(text, filename) {
+    try {
+      const blob = new Blob([text], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => { try { URL.revokeObjectURL(url); } catch (_) {} }, 1000);
+    } catch (e) {
+      Toast.show('err', I18n.t('toast.copy.fail'));
+    }
+  }
+
+  /**
+   * Модалка импорта.
+   */
+  function openImport() {
+    const body = document.createElement('div');
+    body.className = 'acc-body';
+
+    const desc = document.createElement('div');
+    desc.className = 'acc-desc';
+    desc.textContent = I18n.t('account.import.desc');
+    body.appendChild(desc);
+
+    const actions = document.createElement('div');
+    actions.className = 'acc-actions';
+    actions.appendChild(actionBtn(I18n.t('account.import.file'), importFromFile));
+    actions.appendChild(actionBtn(I18n.t('account.import.clip'), importFromClipboard));
+    body.appendChild(actions);
+
+    Modal.open({
+      title: I18n.t('account.import.title'),
+      body,
+      buttons: [{ text: I18n.t('btn.close'), onClick: () => Modal.close() }],
+    });
+  }
+
+  /**
+   * Импорт из файла.
+   */
+  function importFromFile() {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'application/json,.json';
+    input.style.display = 'none';
+    document.body.appendChild(input);
+
+    input.addEventListener('change', () => {
+      const file = input.files && input.files[0];
+      input.remove();
+
+      if (!file) return;
+
+      const reader = new FileReader();
+      reader.onload = () => {
+        const parsed = Account.parseArchive(String(reader.result || ''));
+        if (!parsed.ok) {
+          Toast.show('err', I18n.t('account.import.bad'));
+          return;
+        }
+        Modal.close();
+        confirmImport(parsed.archive);
+      };
+      reader.onerror = () => {
+        Toast.show('err', I18n.t('account.import.bad'));
+      };
+      reader.readAsText(file);
+    });
+
+    input.click();
+  }
+
+  /**
+   * Импорт из буфера.
+   */
+  async function importFromClipboard() {
+    const clip = await readClipboard();
+
+    if (clip && clip.trim()) {
+      const parsed = Account.parseArchive(clip);
+      if (parsed.ok) {
+        Modal.close();
+        confirmImport(parsed.archive);
+        return;
+      }
+      Toast.show('err', I18n.t('account.import.bad'));
+      return;
+    }
+
+    const body = document.createElement('div');
+    body.className = 'acc-body';
+
+    const field = document.createElement('div');
+    field.className = 'field';
+
+    const label = document.createElement('span');
+    label.className = 'field-label';
+    label.textContent = I18n.t('account.import.clip');
+    field.appendChild(label);
+
+    const ta = document.createElement('textarea');
+    ta.className = 'field-input mono';
+    ta.style.cssText = 'min-height:80px;resize:vertical;';
+    ta.placeholder = I18n.t('account.import.clip.ph');
+    field.appendChild(ta);
+    body.appendChild(field);
+
+    Modal.open({
+      title: I18n.t('account.import.title'),
+      body,
+      buttons: [
+        { text: I18n.t('btn.cancel'), onClick: () => Modal.close() },
+        {
+          text: I18n.t('btn.import'),
+          primary: true,
+          onClick: () => {
+            const parsed = Account.parseArchive(ta.value);
+            if (!parsed.ok) {
+              Toast.show('err', I18n.t('account.import.clip.empty'));
+              return;
+            }
+            Modal.close();
+            confirmImport(parsed.archive);
+          },
+        },
+      ],
+    });
+  }
+
+  /**
+   * @param {Object} archive
+   */
+  function confirmImport(archive) {
+    const apply = async (password) => {
+      if (archive.ncryptsec && archive.pubkey) {
+        let currentPk = null;
+        try {
+          currentPk = (await Account.getAccountInfo()).pubkey;
+        } catch (_) {}
+
+        if (currentPk !== archive.pubkey) {
+          const enter = await Account.enterKey(archive.ncryptsec, password);
+          if (!enter.ok) {
+            Toast.show('err', I18n.t('account.enter.bad'));
+            return;
+          }
+          Toast.show('ok', I18n.t('account.enter.done'));
+        }
+      }
+
+      const count = await Account.importArchive(archive);
+      Toast.show('ok', I18n.t('account.import.done', { count }));
+    };
+
+    if (!archive.ncryptsec) {
+      Modal.confirm(
+        I18n.t('account.import.confirm'),
+        I18n.t('account.import.desc') + ' (' + archive.noteCount + ')',
+        () => { apply(''); },
+        I18n.t('btn.import')
+      );
+      return;
+    }
+
+    if (archive.ncryptsec.startsWith('ncryptsec1')) {
+      const body = document.createElement('div');
+      body.className = 'acc-body';
+
+      const desc = document.createElement('div');
+      desc.className = 'acc-desc';
+      desc.textContent = I18n.t('account.import.desc') + ' (' + archive.noteCount + ')';
+      body.appendChild(desc);
+
+      const pwField = document.createElement('div');
+      pwField.className = 'field';
+
+      const pwLabel = document.createElement('span');
+      pwLabel.className = 'field-label';
+      pwLabel.textContent = I18n.t('account.password.set');
+      pwField.appendChild(pwLabel);
+
+      const pwInput = document.createElement('input');
+      pwInput.type = 'password';
+      pwInput.className = 'field-input';
+      pwField.appendChild(pwInput);
+      body.appendChild(pwField);
+
+      Modal.open({
+        title: I18n.t('account.import.confirm'),
+        body,
+        buttons: [
+          { text: I18n.t('btn.cancel'), onClick: () => Modal.close() },
+          {
+            text: I18n.t('btn.import'),
+            primary: true,
+            onClick: () => {
+              Modal.close();
+              apply(pwInput.value);
+            },
+          },
+        ],
+      });
+      return;
+    }
+
+    Modal.confirm(
+      I18n.t('account.import.confirm'),
+      I18n.t('account.import.desc') + ' (' + archive.noteCount + ')',
+      () => { apply(''); },
+      I18n.t('btn.import')
+    );
+  }
+
+  /**
+   * @param {string} phase
+   */
+  function paintSyncStatus(phase) {
+    const wrap = document.querySelector('.acc-sync');
+    if (!wrap) return;
+
+    const dot = wrap.querySelector('.dot');
+    const txt = wrap.querySelector('.acc-sync-txt');
+    if (!dot || !txt) return;
+
+    dot.className = 'dot '
+      + (phase === 'off' ? 'err'
+        : phase === 'active' ? 'load'
+        : 'ok');
+    txt.textContent = phase === 'off' ? I18n.t('account.sync.off')
+      : phase === 'active' ? I18n.t('account.sync.running')
+      : I18n.t('account.sync.on');
+  }
+
+  /**
+   * @returns {HTMLDivElement}
+   */
+  function buildSyncRow() {
+    const row = document.createElement('div');
+    row.className = 'acc-section';
+
+    const title = document.createElement('span');
+    title.className = 'acc-title';
+    title.textContent = I18n.t('account.sync.status');
+    row.appendChild(title);
+
+    const hint = document.createElement('div');
+    hint.className = 'acc-desc';
+    hint.textContent = I18n.t('account.sync.hint');
+    row.appendChild(hint);
+
+    const syncLine = document.createElement('div');
+    syncLine.className = 'acc-sync';
+
+    const dot = document.createElement('span');
+    dot.className = 'dot';
+    syncLine.appendChild(dot);
+
+    const statusTxt = document.createElement('span');
+    statusTxt.className = 'acc-sync-txt';
+    syncLine.appendChild(statusTxt);
+
+    const toggleBtn = document.createElement('button');
+    toggleBtn.className = 'nv-act';
+    toggleBtn.style.cssText = 'flex:1;font-size:12px;';
+
+    function paint() {
+      const enabled = Config.get('syncEnabled', true);
+      toggleBtn.textContent = enabled ? I18n.t('account.sync.on') : I18n.t('account.sync.off');
+      toggleBtn.classList.toggle('danger', !enabled);
+    }
+
+    toggleBtn.addEventListener('click', () => {
+      const next = !Config.get('syncEnabled', true);
+      Account.setSyncEnabled(next);
+      Toast.show('ok', I18n.t(next ? 'toast.sync.enabled' : 'toast.sync.disabled'));
+      paint();
+      paintSyncStatus(next ? 'idle' : 'off');
+    });
+
+    syncLine.appendChild(toggleBtn);
+    row.appendChild(syncLine);
+
+    const nowHint = document.createElement('div');
+    nowHint.className = 'acc-desc';
+    nowHint.textContent = I18n.t('account.sync.now.hint');
+    row.appendChild(nowHint);
+
+    const nowActions = document.createElement('div');
+    nowActions.className = 'acc-actions';
+    nowActions.appendChild(actionBtn(I18n.t('account.sync.now'), () => {
+      Toast.show('info', I18n.t('toast.sync.now'));
+      try {
+        DI.resolve('NetService').resync();
+      } catch (_) {}
+    }));
+    row.appendChild(nowActions);
+
+    paint();
+
+    const phase = Config.get('syncEnabled', true) ? 'idle' : 'off';
+    dot.className = 'dot ' + (phase === 'off' ? 'err' : phase === 'active' ? 'load' : 'ok');
+    statusTxt.textContent = phase === 'off' ? I18n.t('account.sync.off') : I18n.t('account.sync.on');
+
+    return row;
+  }
+
+  /**
+   * Открыть экран аккаунта.
+   */
+  function open() {
+    const body = document.createElement('div');
+    body.className = 'acc-body';
+
+    Account.getNpub().then(npub => {
+      if (!npub) return;
+
+      const sec = document.createElement('div');
+      sec.className = 'acc-section';
+
+      const t = document.createElement('span');
+      t.className = 'acc-title';
+      t.textContent = I18n.t('account.npub');
+      sec.appendChild(t);
+
+      const box = document.createElement('div');
+      box.className = 'key-box';
+      box.textContent = npub;
+      sec.appendChild(box);
+
+      const actions = document.createElement('div');
+      actions.className = 'acc-actions';
+      actions.appendChild(actionBtn(I18n.t('btn.copy'), () => {
+        copyText(npub);
+        Toast.show('ok', I18n.t('toast.copied'));
+      }));
+      sec.appendChild(actions);
+
+      body.insertBefore(sec, body.firstChild);
+    }).catch(() => {});
+
+    const desc = document.createElement('div');
+    desc.className = 'acc-desc';
+    desc.textContent = I18n.t('account.identity.desc');
+    body.appendChild(desc);
+
+    const keySec = document.createElement('div');
+    keySec.className = 'acc-section';
+
+    const keyTitle = document.createElement('span');
+    keyTitle.className = 'acc-title';
+    keyTitle.textContent = I18n.t('account.identity');
+    keySec.appendChild(keyTitle);
+
+    const keyHint = document.createElement('div');
+    keyHint.className = 'acc-desc';
+    keyHint.textContent = I18n.t('account.nsec.hint');
+    keySec.appendChild(keyHint);
+
+    const keyActions = document.createElement('div');
+    keyActions.className = 'acc-actions';
+    keyActions.appendChild(actionBtn(I18n.t('btn.show'), () => { openShowKey(); }));
+    keyActions.appendChild(actionBtn(I18n.t('account.enter.title'), openEnterKey));
+    keySec.appendChild(keyActions);
+
+    body.appendChild(keySec);
+
+    const dataSec = document.createElement('div');
+    dataSec.className = 'acc-section';
+
+    const dataTitle = document.createElement('span');
+    dataTitle.className = 'acc-title';
+    dataTitle.textContent = I18n.t('account.data.section');
+    dataSec.appendChild(dataTitle);
+
+    const dataDesc = document.createElement('div');
+    dataDesc.className = 'acc-desc';
+    dataDesc.textContent = I18n.t('account.data.desc');
+    dataSec.appendChild(dataDesc);
+
+    const dataActions = document.createElement('div');
+    dataActions.className = 'acc-actions';
+    dataActions.appendChild(actionBtn(I18n.t('account.export.title'), openExport));
+    dataActions.appendChild(actionBtn(I18n.t('account.import.title'), openImport));
+    dataSec.appendChild(dataActions);
+
+    body.appendChild(dataSec);
+
+    body.appendChild(buildSyncRow());
+
+    Modal.open({
+      title: I18n.t('account.title'),
+      body,
+      buttons: [{ text: I18n.t('btn.close'), onClick: () => Modal.close() }],
+    });
+  }
+
+  /**
+   * Инициализация.
+   */
+  function init() {
+    unsubs.push(bus.on('sync:status', e => {
+      if (e && e.phase) paintSyncStatus(e.phase);
+    }));
+
+    unsubs.push(bus.on('account:changed', () => {
+      const overlay = document.getElementById('overlay');
+      if (overlay && overlay.classList.contains('on')) {
+        open();
+      }
+    }));
+  }
+
+  /**
+   * Отписка.
+   */
+  function destroy() {
+    unsubs.forEach(u => {
+      try { u(); } catch (_) {}
+    });
+    unsubs = [];
+  }
+
+  return { init, destroy, open };
+}, ['Account', 'Modal', 'Toast', 'I18n', 'Config', 'EventBus']);
 // ─── UI/AccountView ─── END ─────────────────────────────────────────────────
 
 // ─── UI/MenuView ─── START ──────────────────────────────────────────────────
 /**
- * Меню: тема, язык, ранжирование, аккаунт, сбросы.
+ * Меню: тема, язык, ранжирование, аккаунт, wipe, полный сброс.
  */
+DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboarding, Nostr) {
+  let unsubs = [];
+
+  /**
+   * @param {string} theme
+   */
+  function applyTheme(theme) {
+    document.body.setAttribute('data-theme', theme);
+    Config.set('theme', theme);
+  }
+
+  /**
+   * @param {string} [theme]
+   * @returns {string}
+   */
+  function themeGlyph(theme) {
+    const t = theme || Config.get('theme', 'dark');
+    return t === 'dark' ? '◐' : '○';
+  }
+
+  /**
+   * @param {string} view
+   */
+  function setView(view) {
+    Store.setState({ view });
+
+    const isBase = view === 'base';
+
+    ['ctx-banner', 'seg', 'feed-wrap', 'btn-history', 'composer'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.classList.toggle('hidden', isBase);
+    });
+
+    const base = document.getElementById('base');
+    if (base) base.classList.toggle('on', isBase);
+
+    try { bus.emit('view:changed', { view }); } catch (_) {}
+  }
+
+  /**
+   * Синхронизация состояния кнопок.
+   */
+  function viewSync() {
+    const view = Store.get('view');
+
+    const bb = document.getElementById('btn-base');
+    if (bb) bb.classList.toggle('active', view === 'base');
+  }
+
+  /**
+   * @param {string} label
+   * @param {string} [val]
+   * @param {Function} onClick
+   * @param {boolean} [danger]
+   * @returns {HTMLButtonElement}
+   */
+  function menuRow(label, val, onClick, danger) {
+    const row = document.createElement('button');
+    row.className = 'menu-row' + (danger ? ' danger' : '');
+    row.addEventListener('click', onClick);
+
+    const lbl = document.createElement('span');
+    lbl.textContent = label;
+    row.appendChild(lbl);
+
+    if (val) {
+      const v = document.createElement('span');
+      v.className = 'menu-row-val';
+      v.textContent = val;
+      row.appendChild(v);
+    }
+
+    return row;
+  }
+
+  /**
+   * Настройки ранжирования.
+   */
+  function openRankingSettings() {
+    const body = document.createElement('div');
+    body.className = 'range-body';
+
+    const sliders = [
+      {
+        key: 'threshold',
+        min: 0.50,
+        max: 0.95,
+        step: 0.01,
+        label: I18n.t('ranking.threshold'),
+        hint: I18n.t('ranking.threshold.hint'),
+        color: 'amber',
+      },
+      {
+        key: 'serendipity',
+        min: 0.05,
+        max: 0.30,
+        step: 0.01,
+        label: I18n.t('ranking.serendipity'),
+        hint: I18n.t('ranking.serendipity.hint'),
+        color: 'teal',
+      },
+      {
+        key: 'duplicateThreshold',
+        min: 0.88,
+        max: 0.99,
+        step: 0.01,
+        label: I18n.t('ranking.similarity'),
+        hint: I18n.t('ranking.similarity.hint'),
+        color: 'rose',
+      },
+    ];
+
+    /** @type {Object<string, {slider: HTMLInputElement, val: HTMLSpanElement}>} */
+    const valueEls = {};
+
+    sliders.forEach(cfg => {
+      const current = Number(Config.get(cfg.key, cfg.min));
+      const safe = Number.isFinite(current) ? current : cfg.min;
+
+      const group = document.createElement('div');
+      group.className = 'range-group';
+
+      const labelRow = document.createElement('div');
+      labelRow.className = 'range-head';
+
+      const lbl = document.createElement('span');
+      lbl.className = 'range-lbl';
+      lbl.textContent = cfg.label;
+
+      const val = document.createElement('span');
+      val.className = 'range-val ' + cfg.color;
+      val.textContent = safe.toFixed(2);
+
+      labelRow.appendChild(lbl);
+      labelRow.appendChild(val);
+
+      const slider = document.createElement('input');
+      slider.type = 'range';
+      slider.min = String(cfg.min);
+      slider.max = String(cfg.max);
+      slider.step = String(cfg.step);
+      slider.value = String(safe);
+      slider.className = 'no-range ' + cfg.color;
+
+      const hintEl = document.createElement('div');
+      hintEl.className = 'range-hint';
+      hintEl.textContent = cfg.hint;
+
+      slider.addEventListener('input', () => {
+        const v = parseFloat(slider.value);
+        val.textContent = Number.isFinite(v) ? v.toFixed(2) : cfg.min.toFixed(2);
+      });
+
+      valueEls[cfg.key] = { slider, val };
+
+      group.appendChild(labelRow);
+      group.appendChild(slider);
+      group.appendChild(hintEl);
+      body.appendChild(group);
+    });
+
+    const previewEl = document.createElement('div');
+    previewEl.className = 'range-preview';
+
+    const pvRelevant = document.createElement('div');
+    const pvSeren = document.createElement('div');
+    const pvHidden = document.createElement('div');
+    previewEl.appendChild(pvRelevant);
+    previewEl.appendChild(pvSeren);
+    previewEl.appendChild(pvHidden);
+
+    function updatePreview() {
+      const threshold = parseFloat(valueEls['threshold'].slider.value);
+      const serendipity = parseFloat(valueEls['serendipity'].slider.value);
+      const lowerBound = threshold - serendipity;
+
+      pvRelevant.textContent = I18n.t('preview.relevant', { lo: Math.round(threshold * 100) });
+      pvSeren.textContent = I18n.t('preview.seren', { lo: Math.round(lowerBound * 100), hi: Math.round(threshold * 100) });
+      pvHidden.textContent = I18n.t('preview.hidden', { lo: Math.round(lowerBound * 100) });
+    }
+
+    updatePreview();
+    body.appendChild(previewEl);
+
+    valueEls['threshold'].slider.addEventListener('input', updatePreview);
+    valueEls['serendipity'].slider.addEventListener('input', updatePreview);
+
+    let pendingDisplay = Config.get('similarityDisplay', 'signal');
+    if (pendingDisplay !== 'signal' && pendingDisplay !== 'percent') {
+      pendingDisplay = 'signal';
+    }
+
+    const displayGroup = document.createElement('div');
+    displayGroup.className = 'range-display';
+
+    const displayLabel = document.createElement('span');
+    displayLabel.className = 'range-display-lbl';
+    displayLabel.textContent = I18n.t('ranking.display');
+
+    const displayToggle = document.createElement('div');
+    displayToggle.className = 'range-display-btns';
+
+    /** @type {Array<HTMLButtonElement>} */
+    const displayBtns = [];
+
+    function paintDisplayButtons() {
+      displayBtns.forEach(btn => {
+        btn.classList.toggle('selected', btn.getAttribute('data-display-mode') === pendingDisplay);
+      });
+    }
+
+    ['signal', 'percent'].forEach(mode => {
+      const btn = document.createElement('button');
+      btn.className = 'nv-act';
+      btn.setAttribute('data-display-mode', mode);
+      btn.textContent = I18n.t('ranking.display.' + mode);
+
+      btn.addEventListener('click', () => {
+        pendingDisplay = mode;
+        paintDisplayButtons();
+      });
+
+      displayBtns.push(btn);
+      displayToggle.appendChild(btn);
+    });
+
+    paintDisplayButtons();
+
+    displayGroup.appendChild(displayLabel);
+    displayGroup.appendChild(displayToggle);
+    body.appendChild(displayGroup);
+
+    Modal.open({
+      title: I18n.t('menu.ranking'),
+      body,
+      buttons: [
+        {
+          text: I18n.t('btn.cancel'),
+          onClick: () => Modal.close(),
+        },
+        {
+          text: I18n.t('btn.save'),
+          primary: true,
+          onClick: () => {
+            sliders.forEach(cfg => {
+              const v = parseFloat(valueEls[cfg.key].slider.value);
+              if (Number.isFinite(v)) Config.set(cfg.key, v);
+            });
+
+            Config.set('similarityDisplay', pendingDisplay);
+
+            try { bus.emit('db:change'); } catch (_) {}
+
+            Toast.show('ok', I18n.t('ranking.saved'));
+            Modal.close();
+          },
+        },
+        {
+          text: I18n.t('ranking.reset'),
+          danger: true,
+          onClick: () => {
+            const d = Config.defaults();
+
+            sliders.forEach(cfg => {
+              const def = Number(d[cfg.key]);
+              const safe = Number.isFinite(def) ? def : cfg.min;
+
+              Config.set(cfg.key, safe);
+              valueEls[cfg.key].slider.value = String(safe);
+              valueEls[cfg.key].val.textContent = safe.toFixed(2);
+            });
+
+            pendingDisplay = d.similarityDisplay === 'percent' ? 'percent' : 'signal';
+            Config.set('similarityDisplay', pendingDisplay);
+            paintDisplayButtons();
+            updatePreview();
+
+            try { bus.emit('db:change'); } catch (_) {}
+
+            Toast.show('ok', I18n.t('ranking.reset'));
+          },
+        },
+      ],
+    });
+  }
+
+  /**
+   * Полный сброс.
+   */
+  function fullReset() {
+    Modal.confirm(
+      I18n.t('menu.fullreset'),
+      I18n.t('menu.fullreset.confirm'),
+      () => {
+        let wipePromise = Promise.resolve();
+        try {
+          const NetService = DI.resolve('NetService');
+          wipePromise = NetService.publishWipeAll().catch(() => {});
+        } catch (_) {}
+
+        wipePromise.finally(() => {
+          try { Nostr.close(); } catch (_) {}
+
+          if (window.indexedDB && typeof indexedDB.databases === 'function') {
+            indexedDB.databases().then(dbs => {
+              dbs.forEach(dbInfo => {
+                if (dbInfo.name) {
+                  indexedDB.deleteDatabase(dbInfo.name);
+                }
+              });
+            }).catch(() => {});
+          } else if (window.indexedDB) {
+            try {
+              indexedDB.deleteDatabase(Config.get('dbName', 'noomium_v3'));
+            } catch (_) {}
+          }
+
+          try { localStorage.clear(); } catch (_) {}
+          try { sessionStorage.clear(); } catch (_) {}
+
+          if (window.caches) {
+            caches.keys().then(names => {
+              names.forEach(name => caches.delete(name));
+            }).catch(() => {});
+          }
+
+          if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
+            try {
+              navigator.serviceWorker.controller.postMessage('CLEAR_CACHE');
+            } catch (_) {}
+          }
+
+          Toast.show('ok', I18n.t('menu.fullreset.done'));
+
+          setTimeout(() => {
+            window.location.reload();
+          }, 1500);
+        });
+      }
+    );
+  }
+
+  /**
+   * Открыть меню.
+   */
+  function openMenu() {
+    const body = document.createElement('div');
+    body.className = 'menu-list';
+
+    body.appendChild(menuRow(I18n.t('menu.help'), '', () => {
+      Modal.close();
+      Onboarding.showHelp(false);
+    }));
+
+    const themeVal = themeGlyph() + ' ' + I18n.t(Config.get('theme', 'dark') === 'dark' ? 'theme.dark' : 'theme.light');
+    body.appendChild(menuRow(I18n.t('menu.theme'), themeVal, () => {
+      const next = Config.get('theme', 'dark') === 'dark' ? 'light' : 'dark';
+      applyTheme(next);
+      Config.set('userThemeOverride', true);
+      Modal.close();
+      Toast.show('ok', I18n.t('menu.theme') + ': ' + themeGlyph(next) + ' ' + I18n.t(next === 'dark' ? 'theme.dark' : 'theme.light'));
+    }));
+
+    body.appendChild(menuRow(I18n.t('menu.lang'), I18n.getLang().toUpperCase(), () => {
+      I18n.setLang(I18n.getLang() === 'ru' ? 'en' : 'ru');
+      Modal.close();
+    }));
+
+    body.appendChild(menuRow(I18n.t('menu.ranking'), '', () => {
+      Modal.close();
+      openRankingSettings();
+    }));
+
+    body.appendChild(menuRow(I18n.t('menu.account'), '', () => {
+      Modal.close();
+      DI.resolve('AccountView').open();
+    }));
+
+    body.appendChild(menuRow(I18n.t('base.wipe'), '', () => {
+      Modal.close();
+      Modal.confirm(I18n.t('base.wipe'), I18n.t('base.wipe.confirm'), () => {
+        try { bus.emit('wipe:request'); } catch (_) {}
+      });
+    }, true));
+
+    body.appendChild(menuRow(I18n.t('menu.fullreset'), '', () => {
+      Modal.close();
+      fullReset();
+    }, true));
+
+    const version = document.createElement('div');
+    version.className = 'menu-version';
+    version.textContent = 'v' + APP_VERSION;
+    body.appendChild(version);
+
+    Modal.open({ title: I18n.t('menu.settings'), body });
+  }
+
+  /**
+   * Инициализация.
+   */
+  function init() {
+    applyTheme(Config.get('theme', 'dark'));
+
+    const menuBtn = document.getElementById('btn-menu');
+    if (menuBtn) menuBtn.addEventListener('click', openMenu);
+
+    const baseBtn = document.getElementById('btn-base');
+    if (baseBtn) {
+      baseBtn.addEventListener('click', () =>
+        setView(Store.get('view') === 'base' ? 'stream' : 'base')
+      );
+    }
+
+    unsubs.push(bus.on('view:set', p => {
+      if (p && p.view) setView(p.view);
+    }));
+
+    unsubs.push(Store.subscribe(s => s.view, viewSync));
+    unsubs.push(bus.on('i18n:change', viewSync));
+
+    viewSync();
+  }
+
+  /**
+   * Отписка.
+   */
+  function destroy() {
+    unsubs.forEach(u => {
+      try { u(); } catch (_) {}
+    });
+    unsubs = [];
+  }
+
+  return { init, destroy, setView, openMenu };
+}, ['Store', 'Config', 'Modal', 'Toast', 'I18n', 'EventBus', 'Onboarding', 'Nostr']);
 // ─── UI/MenuView ─── END ────────────────────────────────────────────────────
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -5441,6 +7844,126 @@ DI.register('HeaderStatus', function (bus, I18n, Embedder) {
 /**
  * Telegram Mini Apps: тема, haptic, нативные диалоги.
  */
+DI.register('TelegramAdapter', function (Config, bus, Logger) {
+  /** @type {Object|null} */
+  let tg = null;
+  /** @type {boolean} */
+  let isActive = false;
+
+  /**
+   * Инициализация.
+   */
+  function init() {
+    if (!window.Telegram || !window.Telegram.WebApp) {
+      Logger.info('TelegramAdapter: не в Telegram, пропускаем');
+      return;
+    }
+
+    tg = window.Telegram.WebApp;
+
+    try {
+      tg.ready();
+      tg.expand();
+      isActive = true;
+      Logger.info('TelegramAdapter: активирован');
+    } catch (e) {
+      Logger.warn('TelegramAdapter: ошибка инициализации', String(e));
+      return;
+    }
+
+    applyTheme();
+
+    tg.onEvent('themeChanged', () => {
+      applyTheme();
+    });
+
+    try {
+      tg.setHeaderColor(tg.colorScheme === 'dark' ? '#0a0a0b' : '#fafafa');
+      tg.setBackgroundColor(tg.colorScheme === 'dark' ? '#0a0a0b' : '#fafafa');
+    } catch (_) {}
+  }
+
+  /**
+   * Применение темы Telegram.
+   */
+  function applyTheme() {
+    if (!tg) return;
+
+    if (Config.get('userThemeOverride', false)) {
+      return;
+    }
+
+    const scheme = tg.colorScheme || 'dark';
+    document.body.setAttribute('data-theme', scheme);
+
+    try {
+      tg.setHeaderColor(scheme === 'dark' ? '#0a0a0b' : '#fafafa');
+      tg.setBackgroundColor(scheme === 'dark' ? '#0a0a0b' : '#fafafa');
+    } catch (_) {}
+
+    try {
+      bus.emit('telegram:theme', { scheme });
+    } catch (_) {}
+  }
+
+  /**
+   * @returns {boolean}
+   */
+  function isTelegram() {
+    return isActive;
+  }
+
+  /**
+   * @param {'success'|'error'|'light'} type
+   */
+  function hapticFeedback(type) {
+    if (!tg || !tg.HapticFeedback) return;
+
+    try {
+      if (type === 'success') {
+        tg.HapticFeedback.notificationOccurred('success');
+      } else if (type === 'error') {
+        tg.HapticFeedback.notificationOccurred('error');
+      } else {
+        tg.HapticFeedback.impactOccurred('light');
+      }
+    } catch (_) {}
+  }
+
+  /**
+   * @param {string} message
+   */
+  function showAlert(message) {
+    if (!tg) return;
+
+    try {
+      tg.showAlert(message);
+    } catch (_) {
+      alert(message);
+    }
+  }
+
+  /**
+   * @param {string} message
+   * @param {Function} callback
+   */
+  function showConfirm(message, callback) {
+    if (!tg) {
+      if (confirm(message)) callback();
+      return;
+    }
+
+    try {
+      tg.showConfirm(message, confirmed => {
+        if (confirmed) callback();
+      });
+    } catch (_) {
+      if (confirm(message)) callback();
+    }
+  }
+
+  return { init, isTelegram, hapticFeedback, showAlert, showConfirm };
+}, ['Config', 'EventBus', 'Logger']);
 // ─── PLATFORM/TelegramAdapter ─── END ───────────────────────────────────────
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -5449,9 +7972,57 @@ DI.register('HeaderStatus', function (bus, I18n, Embedder) {
 
 // ─── BOOT ─── START ─────────────────────────────────────────────────────────
 /**
- * Старт: тема/i18n → подписчики → Telegram → Context → DOM →
- * wipe-обработчик → показ → Embedder+NetService+Mirror → онбординг.
+ * Точка входа: порядок инициализации модели состояний v0.9.
  */
+DI.register('Boot', function () {
+  function mount() {
+    const Config = DI.resolve('Config');
+    document.body.setAttribute('data-theme', Config.get('theme', 'dark'));
+    DI.resolve('I18n').init();
+
+    DI.resolve('Progress').init();
+    DI.resolve('HeaderStatus').init();
+    DI.resolve('Feed').init();
+    DI.resolve('Influence').init();
+    DI.resolve('Mirror').init();
+
+    DI.resolve('TelegramAdapter').init();
+
+    DI.resolve('Context').init();
+
+    DI.resolve('Composer').init();
+    DI.resolve('FeedView').init();
+    DI.resolve('NoteView').init();
+    DI.resolve('BaseView').init();
+    DI.resolve('MenuView').init();
+    DI.resolve('AccountView').init();
+
+    const bus = DI.resolve('EventBus');
+    const DB = DI.resolve('DB');
+    const Toast = DI.resolve('Toast');
+    const I18n = DI.resolve('I18n');
+    const NetService = DI.resolve('NetService');
+
+    bus.on('wipe:request', () => {
+      NetService.publishWipeAll()
+        .catch(() => {})
+        .finally(() => DB.reset())
+        .then(() => {
+          Toast.show('ok', I18n.t('toast.base.wiped'));
+          try { bus.emit('view:set', { view: 'stream' }); } catch (_) {}
+        });
+    });
+
+    document.body.classList.add('ready');
+
+    DI.resolve('Embedder').load();
+    NetService.start();
+
+    DI.resolve('Onboarding').init();
+  }
+
+  return { mount };
+});
 // ─── BOOT ─── END ───────────────────────────────────────────────────────────
 
 // ═══════════════════════════════════════════════════════════════════════════════
