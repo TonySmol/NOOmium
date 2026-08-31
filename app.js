@@ -38,7 +38,7 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 // ВЕРСИЯ ПРИЛОЖЕНИЯ
 // ═══════════════════════════════════════════════════════════════════════════════
-const APP_VERSION = '0.9.1';
+const APP_VERSION = '0.8.1';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CORE/DI — ПРЕАМБУЛА
@@ -2923,17 +2923,13 @@ DI.register('Nostr', function (Config, bus, Logger) {
 /**
  * Сериализация/десериализация Nostr-событий NOOmium.
  *
- * МОДЕЛЬ СВЯЗЕЙ v0.9.0 (вариант Б — версии происхождения):
- * Тег parent: ['parent', parentUid, parentPk, parentEventId].
- * - parentUid/parentPk — резолв родителя (живость стрелки);
- * - parentEventId — версия родителя НА МОМЕНТ ответа (четвёртый элемент,
- *   '' — родитель не был опубликован). Линейка ребёнка показывает
- *   эту версию из кэша читателя; лента родителя — всегда текущую.
- * Резолв «жива ли стрелка» НЕ зависит от eventId: правка/переиздание
- * родителя не ломает связи.
- *
- * Локальная семантика: parentPk = null («родитель мой») подставляется
- * pubkey автора при упаковке public-проекции (v0.8.1).
+ * МОДЕЛЬ СВЯЗЕЙ v0.8.1 (фикс резолва чужих дочек):
+ * Локальная запись/канон: parentPk = null означает «родитель мой».
+ * Публичная проекция: pk родителя пишется ВСЕГДА явно — для «моего»
+ * родителя подставляется pubkey автора при упаковке (noteEvent).
+ * Читатель резолвит пару (parentUid, parentPk) единым путём:
+ * кэш чужих по (srcUid, srcPk), при pk === собственному — своя база
+ * по uid. Без pk (старые события) — только своя база (v0.7-путь).
  *
  * Виды событий:
  * - kind 1:     Публичная проекция (текст + вектор + parent + uid)
@@ -2976,9 +2972,9 @@ DI.register('Protocol', function (Config, Vec, Crypto, Nostr) {
 
   /**
    * Событие публичной проекции заметки.
-   * v0.9: тег parent = [uid, pk, eventId-версии родителя].
-   * parentEventId берётся из заметки (зафиксирован при создании
-   * ответа; '' если родитель не был опубликован).
+   * v0.8.1: тег parent = [parentUid, parentPk-ЯВНО]. Если локально
+   * parentPk = null («родитель мой») — подставляется pubkey автора.
+   * Читатель всегда получает однозначную пару для резолва.
    * @param {Object} note - Заметка (id = uid).
    * @param {string} room - Имя комнаты (тег t).
    * @returns {Object} Шаблон события (без подписи).
@@ -2988,8 +2984,7 @@ DI.register('Protocol', function (Config, Vec, Crypto, Nostr) {
     if (note.vector) tags.push(['v', Vec.toB64(note.vector)]);
     if (note.parentUid) {
       const parentPk = note.parentPk || Nostr.getPubkey() || '';
-      const parentEventId = note.parentEventId || '';
-      tags.push(['parent', note.parentUid, parentPk, parentEventId]);
+      tags.push(['parent', note.parentUid, parentPk]);
     }
 
     return {
@@ -3002,7 +2997,6 @@ DI.register('Protocol', function (Config, Vec, Crypto, Nostr) {
 
   /**
    * Декодирование чужой публичной заметки (kind 1).
-   * v0.9: вычитывает eventId-версии родителя (4-й элемент тега).
    * @param {Object} ev - Nostr-событие.
    * @returns {Object|null} Заметка-кандидат для сетевого кэша.
    */
@@ -3026,7 +3020,6 @@ DI.register('Protocol', function (Config, Vec, Crypto, Nostr) {
       srcPk: ev.pubkey,
       parentUid: pTag ? pTag[1] : null,
       parentPk: pTag ? (pTag[2] || null) : null,
-      parentEventId: pTag ? (pTag[3] || null) : null,
       createdAt: (ev.created_at || 0) * 1000,
     };
   }
@@ -3035,20 +3028,18 @@ DI.register('Protocol', function (Config, Vec, Crypto, Nostr) {
 
   /**
    * Событие приватного канона заметки. Полная версия (upsert).
-   * v0.9: payload несёт parentEventId — для симметрии линеек на всех
-   * устройствах автора.
+   * Локальная семантика parentPk (null = «мой») сохраняется в каноне.
    * @param {Object} note - Локальная заметка (id = uid).
    * @returns {Promise<Object>} Шаблон события с зашифрованным content.
    * @throws {Error} При недоступности NIP-44.
    */
   async function privateEvent(note) {
     const payload = {
-      v: 3,
+      v: 2,
       text: note.text || '',
       vec: note.vector ? Vec.toB64(note.vector) : null,
       parentUid: note.parentUid || null,
       parentPk: note.parentPk || null,
-      parentEventId: note.parentEventId || null,
       shared: note.shared === true,
       ev: note.eventId || null,
       ts: Number(note.updatedAt || note.createdAt) || Date.now(),
@@ -3071,7 +3062,7 @@ DI.register('Protocol', function (Config, Vec, Crypto, Nostr) {
    * @throws {Error} При недоступности NIP-44.
    */
   async function privateTombstone(uid) {
-    const content = await Crypto.encryptSelf(JSON.stringify({ v: 3, del: true, ts: Date.now() }));
+    const content = await Crypto.encryptSelf(JSON.stringify({ v: 2, del: true, ts: Date.now() }));
 
     return {
       kind: Config.get('kPrivate', 30078),
@@ -3134,7 +3125,6 @@ DI.register('Protocol', function (Config, Vec, Crypto, Nostr) {
       shared: data.shared === true,
       parentUid: (typeof data.parentUid === 'string' && data.parentUid) ? data.parentUid : null,
       parentPk: (typeof data.parentPk === 'string' && data.parentPk) ? data.parentPk : null,
-      parentEventId: (typeof data.parentEventId === 'string' && data.parentEventId) ? data.parentEventId : null,
       parentPubkey: null,
       authorPubkey: null,
       eventId: (typeof data.ev === 'string' && data.ev) ? data.ev : null,
@@ -3311,14 +3301,27 @@ DI.register('Protocol', function (Config, Vec, Crypto, Nostr) {
 
 // ─── NET/NetService ─── START ───────────────────────────────────────────────
 /**
- * Оркестрация Nostr-сети: подписки, публикация, обработка входящих.
+ * Оркестрация Nostr-сети: подписки, публикация, обработка входящих событий.
  *
- * v0.9.0 (единственное изменение против 0.8.x):
- * Чистка старых версий чужого источника при приёме новой — теперь
- * ОСТОРОЖНАЯ: старая кэш-запись сохраняется, если на её eventId
- * ссылается хоть один ребёнок в кэше (parentEventId детей —
- * «фотографии момента» для линеек, Provenance v0.9). Версий без
- * ссылок — чистим, как раньше (антидюпликация bySrc).
+ * Три канала:
+ * 1. Комнатная подписка (kind 1/21000/21001/5 по тегу t).
+ * 2. Подписка на себя (kind 30078, authors = свой pk) — живой синк.
+ * 3. Исходящая публикация: приватный канон (30078) + публичная проекция
+ *    (kind 1) для shared.
+ *
+ * МОДЕЛЬ v0.8 (связи через (parentUid, parentPk)):
+ * - Публикация проекции — тупая упаковка (Protocol.noteEvent(note, room)),
+ *   БЕЗ резолва родителя: резолв происходит у читателя по паре.
+ *   buildNoteEvent удалён.
+ * - Приём чужой проекции: cachePut с чисткой старых версий того же
+ *   источника (srcUid + srcPk, другой id) — Provenance.bySrc не плодит
+ *   дублей при переиздании источника.
+ * - Эхо своих переизданий отсекается по srcUid (мой uid в теге чужого
+ *   события = моя проекция вернулась).
+ * - unshare: eventId сбрасывается (для повторной публикации), дети
+ *   НЕ трогаются — их ссылки на uid стабильны.
+ *
+ * LWW-модель канона: syncTs, tombstone-удаления, canonTs (самолечение).
  */
 DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Config, Logger, bus) {
   let started = false;
@@ -3526,6 +3529,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
 
   /**
    * Сброс очередей: priv → announce → del → privdel.
+   * Фазы priv/privdel — только при syncEnabled.
    * @returns {Promise<void>}
    */
   async function flushOutbox() {
@@ -3559,6 +3563,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
       }
 
       // Фаза 2: публичные проекции — параллельно.
+      // v0.8: Protocol.noteEvent(note, room) — без резолва родителя.
       const announceIds = outbox.announce.slice();
       const tasks = announceIds.map(async noteId => {
         const note = await DB.get(noteId).catch(() => null);
@@ -3738,7 +3743,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
 
   /**
    * Применить входящий канон (LWW по syncTs, tombstone = удаление).
-   * v0.9: parentEventId из decodePrivate.
+   * v0.8: новые поля parentUid/parentPk из decodePrivate.
    * @param {Object} d - Результат Protocol.decodePrivate.
    * @returns {Promise<void>}
    */
@@ -3767,7 +3772,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
           shared: d.shared,
           parentUid: d.parentUid || null,
           parentPk: d.parentPk || null,
-          parentEventId: d.parentEventId || null,
           authorPubkey: null,
           eventId: d.eventId,
           createdAt: d.createdAt,
@@ -3787,7 +3791,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
           shared: d.shared,
           parentUid: d.parentUid || null,
           parentPk: d.parentPk || null,
-          parentEventId: d.parentEventId || null,
           authorPubkey: null,
           eventId: d.eventId,
           createdAt: cur.createdAt || d.createdAt,
@@ -4032,9 +4035,11 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
 
   /**
    * Приём чужой публичной заметки.
-   * v0.9: чистка старых версий источника — осторожная: версия с
-   * eventId, на который ссылаются дети (parentEventId), сохраняется
-   * для линеек (Provenance.resolveParentForDisplay).
+   * v0.8:
+   * - эхо своих проекций отсекается и по eventId, и по srcUid
+   *   (переизданная проекция несёт мой uid в теге);
+   * - перед cachePut чистятся старые версии того же источника
+   *   (srcUid + srcPk, другой id) — Provenance.bySrc без дублей.
    * @param {Object} ev
    * @returns {boolean}
    */
@@ -4058,41 +4063,13 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     if (note.srcUid && DB.hasLocal(note.srcUid)) return true;
 
     DB.cacheAll().then(cached => {
-      // Чистка старых версий того же источника — только версий
-      // без детских ссылок на них.
+      // Чистка старых версий того же источника (переиздание).
       if (note.srcUid && note.srcPk) {
         const stale = cached.filter(c =>
           c && c.srcUid === note.srcUid && c.srcPk === note.srcPk && c.id !== note.id
         );
-
         if (stale.length) {
-          // eventId'ы, на которые ссылаются дети (фотографии момента).
-          const referenced = new Set();
-          cached.forEach(c => {
-            if (c && c.parentEventId) referenced.add(c.parentEventId);
-          });
-          // Свои дети тоже ссылаются (их в кэше нет) — учтём ниже.
-
-          const deletable = stale.filter(s => !referenced.has(s.id));
-
-          if (deletable.length < stale.length) {
-            // Есть версии с детскими ссылками: проверить и своих детей.
-            DB.all().then(own => {
-              own.forEach(n => {
-                if (n && n.parentEventId) referenced.add(n.parentEventId);
-              });
-              const finalDel = stale.filter(s => !referenced.has(s.id));
-              Promise.all(finalDel.map(s => DB.cacheDel(s.id).catch(() => {})))
-                .then(() => DB.cachePut(note))
-                .then(() => notifyPeers())
-                .catch(() => {});
-            }).catch(() => {
-              DB.cachePut(note).catch(() => {});
-            });
-            return;
-          }
-
-          Promise.all(deletable.map(s => DB.cacheDel(s.id).catch(() => {})))
+          Promise.all(stale.map(c => DB.cacheDel(c.id).catch(() => {})))
             .then(() => DB.cachePut(note))
             .then(() => notifyPeers())
             .catch(() => {});
@@ -4209,16 +4186,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
       if (eventId) DB.cacheDel(eventId);
     });
 
-    // ФИКС v0.8.2: вычищаем «виденный контент» автора — иначе после
-    // цикла отзыв→возврат заметка с тем же текстом считается дублем
-    // и не попадает в ленту до перезагрузки.
-    if (del.authorPubkey) {
-      const prefix = del.authorPubkey + '::';
-      for (const key of Array.from(contentSeen.keys())) {
-        if (key.startsWith(prefix)) contentSeen.delete(key);
-      }
-      peers.set(del.authorPubkey, Date.now());
-    }
+    if (del.authorPubkey) peers.set(del.authorPubkey, Date.now());
     notifyPeers();
 
     return true;
@@ -4228,6 +4196,8 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
 
   /**
    * Анонс публичной проекции (kind 1).
+   * v0.8: Protocol.noteEvent(note, room) — тупая упаковка тегов,
+   * без резолва родителя (резолв у читателя).
    * @param {Object} note
    * @returns {Promise<void>}
    */
@@ -4266,6 +4236,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
 
   /**
    * Запрос удаления публичной проекции (kind 5).
+   * v0.8: дети заметки не трогаются — их ссылки на uid стабильны.
    * @param {Object} note - Заметка (нужны id и eventId).
    * @returns {Promise<void>}
    */
@@ -4488,7 +4459,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
 
           if (!note.shared && note.eventId) {
             // Сброс eventId для повторной публикации проекции.
-            // Дети не трогаются — их ссылки (parentUid) стабильны.
+            // v0.8: дети не трогаются — их ссылки (parentUid) стабильны.
             const oldEventId = note.eventId;
 
             DB.get(note.id).then(cur => {
@@ -4704,16 +4675,18 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
 // СЛОЙ: DOMAIN — бизнес-логика
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// ─── Notes ─── START ─────────────────────────────────────────────────
+// ─── DOMAIN/Notes ─── START ─────────────────────────────────────────────────
 /**
  * CRUD для локальных заметок.
+ * Каждая заметка при создании/редактировании получает вектор через Embedder.
  * События: note:created, note:updated, note:deleted, note:shared, note:unshared.
  *
- * МОДЕЛЬ v0.9:
- * - id — стабильный uid;
- * - parentUid/parentPk — резолв родителя (живость стрелки);
- * - parentEventId — версия родителя на момент ответа (показ линейки);
- * - syncTs — LWW канона; eventId — ссылка на свою публичную проекцию.
+ * МОДЕЛЬ v0.8:
+ * - id — стабильный uid, никогда не меняется;
+ * - parentUid — uid родителя; parentPk — pubkey автора родителя
+ *   (null = родитель мой). Никаких eventId в связях;
+ * - syncTs — метка последнего локального изменения (LWW канона);
+ * - eventId — ссылка на публичную проекцию, проставляется NetService'ом.
  */
 DI.register('Notes', function (DB, Embedder, bus, Logger, Utils) {
   /**
@@ -4730,12 +4703,11 @@ DI.register('Notes', function (DB, Embedder, bus, Logger, Utils) {
    * @param {string} text - Текст заметки.
    * @param {string} mode - 'private' или 'world'.
    * @param {string|null} parentUid - uid родительской заметки.
-   * @param {string|null} [parentPk] - Pubkey автора родителя (null = мой).
-   * @param {string|null} [parentEventId] - Версия родителя на момент
-   *   ответа (eventId его публичной проекции; null — не опубликован).
-   * @returns {Promise<Object|null>} Созданная заметка или null.
+   * @param {string|null} [parentPk] - Pubkey автора родителя
+   *   (null/undefined = родитель мой).
+   * @returns {Promise<Object|null>} Созданная заметка или null при пустом тексте.
    */
-  function create(text, mode, parentUid, parentPk, parentEventId) {
+  function create(text, mode, parentUid, parentPk) {
     const t = (text || '').trim();
     if (!t) return Promise.resolve(null);
 
@@ -4748,7 +4720,6 @@ DI.register('Notes', function (DB, Embedder, bus, Logger, Utils) {
         shared: mode === 'world',
         parentUid: parentUid || null,
         parentPk: parentPk || null,
-        parentEventId: parentEventId || null,
         parentPubkey: null,
         createdAt: now,
         updatedAt: now,
@@ -4810,6 +4781,7 @@ DI.register('Notes', function (DB, Embedder, bus, Logger, Utils) {
 
   /**
    * Переключение видимости: личное ↔ мир.
+   * При публикации NetService обновляет канон и анонсирует/удаляет проекцию.
    * @param {string} id - uid заметки.
    * @returns {Promise<Object|null>} Обновлённая заметка или null.
    */
@@ -4839,17 +4811,23 @@ DI.register('Notes', function (DB, Embedder, bus, Logger, Utils) {
 
   return { create, edit, remove, toggleShared, get };
 }, ['DB', 'Embedder', 'EventBus', 'Logger', 'Utils']);
-// ─── Notes ─── END ───────────────────────────────────────────────────
+// ─── DOMAIN/Notes ─── END ───────────────────────────────────────────────────
 
-// ─── Context ─── START ───────────────────────────────────────────────
+// ─── DOMAIN/Context ─── START ───────────────────────────────────────────────
 /**
  * Управление текущим контекстом поиска.
  *
- * Состояния: 'pin' / 'drift' / 'input' / null. Приоритет drift > pin >
- * input > none.
+ * Состояния контекста:
+ * - 'pin':   Заметка закреплена (клик по карточке). Лента показывает созвучное.
+ * - 'drift': Закреплённая заметка + пользователь печатает. Контекст плавно
+ *            смещается от закреплённой мысли к вводимому тексту.
+ * - 'input': Пользователь печатает без закреплённой заметки.
+ * - null:    Контекста нет. Лента в хронологическом порядке.
  *
- * v0.9: снапшот пина хранит eventId — Composer фиксирует версию
- * родителя (parentEventId) при создании ответа.
+ * Событие 'note:pin' от NoteView/FeedView активирует пин.
+ *
+ * v0.8: снапшот пина хранит authorPubkey — Composer передаёт пару
+ * (parentUid, parentPk) при создании потомка (pk = null для своих).
  */
 DI.register('Context', function (Store, Embedder, Config, Utils, bus) {
   /** @type {string} */
@@ -4920,6 +4898,7 @@ DI.register('Context', function (Store, Embedder, Config, Utils, bus) {
     }
 
     Embedder.embed(t).then(v => {
+      // Защита от race condition.
       if (inputText.trim() === t) {
         inputVector = v;
         push();
@@ -5004,9 +4983,9 @@ DI.register('Context', function (Store, Embedder, Config, Utils, bus) {
     },
   };
 }, ['Store', 'Embedder', 'Config', 'Utils', 'EventBus']);
-// ─── Context ─── END ─────────────────────────────────────────────────
+// ─── DOMAIN/Context ─── END ─────────────────────────────────────────────────
 
-// ─── Feed ─── START ──────────────────────────────────────────────────
+// ─── DOMAIN/Feed ─── START ──────────────────────────────────────────────────
 /**
  * Формирование ленты.
  *
@@ -5140,23 +5119,22 @@ DI.register('Feed', function (DB, Ranker, Store, bus, Logger) {
 
   return { init, destroy, refresh };
 }, ['DB', 'Ranker', 'Store', 'EventBus', 'Logger']);
-// ─── Feed ─── END ────────────────────────────────────────────────────
+// ─── DOMAIN/Feed ─── END ────────────────────────────────────────────────────
 
 // ─── DOMAIN/Provenance ─── START ────────────────────────────────────────────
 /**
  * Построение генеалогических связей между заметками.
  *
- * МОДЕЛЬ v0.9.0 (вариант Б — версии происхождения):
- * - Живость стрелки: резолв по паре (parentUid, parentPk) —
- *   правка/переиздание родителя связь не ломает (v0.8.1).
- * - Показ линейки: если у ребёнка зафиксирован parentEventId
- *   (версия родителя на момент ответа) и эта версия есть в кэше —
- *   показываем её («фотографию момента»); иначе — текущую запись
- *   по паре.
+ * МОДЕЛЬ v0.8.1 (фикс): резолв родителя по паре (parentUid, parentPk).
+ * - parentPk = pk автора родителя (в публичных событиях — всегда явно,
+ *   включая случай «родитель мой»: pk совпадает с моим).
+ * - Резолв: кэш чужих по (srcUid, srcPk); если pk === мой — своя база
+ *   по uid (родитель — моя заметка, но ссылка пришла из чужого события
+ *   или из моего же переиздания).
+ * - parentPk = null (старые/канонические записи своих заметок):
+ *   родитель мой, резолв в своей базе по uid.
  *
- * Резолв родителя (v0.8.1): pk явный → кэш по (srcUid, srcPk),
- * при pk === моему — своя база по uid; parentPk = null (старые/
- * канонические записи) → своя база по uid.
+ * Связи переживают отзыв/переиздание родителя: uid стабилен.
  */
 DI.register('Provenance', function (DB, bus, Nostr) {
   /** @type {Map<string, {chain: Array, timestamp: number}>} */
@@ -5191,10 +5169,10 @@ DI.register('Provenance', function (DB, bus, Nostr) {
   }
 
   /**
-   * Резолв родителя по ссылке заметки (живость стрелки).
+   * Резолв родителя по ссылке заметки (v0.8.1).
    * @param {Object} note - Заметка со ссылкой (parentUid/parentPk).
    * @param {{byId: Map, bySrc: Map}} idx - Индексы.
-   * @returns {Object|null} Заметка-родитель (текущая) или null.
+   * @returns {Object|null} Заметка-родитель или null.
    */
   function resolveParent(note, idx) {
     if (!note.parentUid) return null;
@@ -5202,9 +5180,11 @@ DI.register('Provenance', function (DB, bus, Nostr) {
     const myPk = Nostr.getPubkey();
 
     if (note.parentPk) {
+      // Пара явная: сначала кэш чужих по (srcUid, srcPk).
       const cached = idx.bySrc.get(note.parentUid + '::' + note.parentPk);
       if (cached) return cached;
 
+      // pk мой → родитель — моя заметка (ссылка из чужого/своего события).
       if (myPk && note.parentPk === myPk) {
         return idx.byId.get(note.parentUid) || null;
       }
@@ -5212,27 +5192,9 @@ DI.register('Provenance', function (DB, bus, Nostr) {
       return null;
     }
 
+    // parentPk нет: родитель мой (локальные/канонические записи,
+    // а также старые события) — своя база по uid.
     return idx.byId.get(note.parentUid) || null;
-  }
-
-  /**
-   * Показывающая запись родителя для линейки ребёнка (v0.9).
-   * Порядок: версия по parentEventId (фотография момента) →
-   * текущая по резолву пары.
-   * @param {Object} child - Заметка-ребёнок.
-   * @param {{byId: Map, bySrc: Map}} idx - Индексы.
-   * @param {Array<Object>} all - Все заметки (для поиска по eventId).
-   * @returns {Object|null}
-   */
-  function resolveParentForDisplay(child, idx, all) {
-    // 1. Версия, на которую отвечали (если зафиксирована и найдена).
-    if (child.parentEventId) {
-      const versioned = idx.byId.get(child.parentEventId);
-      if (versioned) return versioned;
-    }
-
-    // 2. Текущая запись по резолву пары.
-    return resolveParent(child, idx);
   }
 
   /**
@@ -5302,8 +5264,6 @@ DI.register('Provenance', function (DB, bus, Nostr) {
 
   /**
    * Цепочка предков от текущей заметки до корня.
-   * v0.9: показывающая запись каждого родителя — с предпочтением
-   * версии (parentEventId ребёнка), если она есть в кэше.
    * @param {string} id - uid своей или id кэш-записи чужой.
    * @returns {Promise<Array<Object>>}
    */
@@ -5318,7 +5278,6 @@ DI.register('Provenance', function (DB, bus, Nostr) {
     return loadAll().then(all => {
       const idx = buildIndexes(all);
 
-      // Стартовая заметка: по id (свой uid или кэш-id).
       let current = idx.byId.get(id) || null;
       const chain = [];
       const seen = new Set([id]);
@@ -5328,8 +5287,7 @@ DI.register('Provenance', function (DB, bus, Nostr) {
         if (seen.has(seenKey)) break;
         seen.add(seenKey);
 
-        // Показывающая запись: версия момента ответа → текущая.
-        const parent = resolveParentForDisplay(current, idx, all);
+        const parent = resolveParent(current, idx);
         if (!parent) break;
 
         chain.push(parent);
@@ -5345,9 +5303,7 @@ DI.register('Provenance', function (DB, bus, Nostr) {
   }
 
   /**
-   * Резолвится ли родитель заметки (для UI: живая стрелка).
-   * Живость определяется по текущему резолву пары — версия
-   * не влияет.
+   * Резолвится ли родитель заметки (для UI).
    * @param {Object} note - Заметка со ссылкой.
    * @returns {Promise<boolean>}
    */
@@ -6485,10 +6441,15 @@ DI.register('Onboarding', function (Config, Modal, I18n, Embedder) {
 /**
  * Композер: поле ввода, счётчик символов, переключатель Личное/Мир, отправка.
  *
- * v0.9: при создании ответа фиксирует версию родителя —
- * parentEventId = pin.eventId (снимок момента ответа).
- * Для неопубликованного родителя — null: линейка покажет текущую
- * версию, когда родитель станет публичным.
+ * Лимиты длины поста (из Config):
+ * - softLimit: жёлтая подсветка, подсказка «пиши короче»
+ * - hardLimit: красная подсветка, подсказка «вектор обрезается»
+ * - maxPostLength: блокировка ввода через maxlength + блокировка кнопки
+ *
+ * v0.8: связь с родителем передаётся парой (parentUid, parentPk).
+ * Пин своей заметки → pk = null (родитель мой).
+ * Пин чужой заметки → pk = её автор (Notes.resolver справится на своей
+ * стороне; чужой uid в нашей базе не резолвится, поэтому pk обязателен).
  */
 DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils, Config) {
   let ta, cnt, sendBtn, toggle, footEl;
@@ -6554,6 +6515,7 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
 
   /**
    * Показ/скрытие/обновление подсказки лимитов (#ed-hint).
+   * Вставляется ПОСЛЕ #ed-foot — строкой под футером композера.
    * @param {string|null} text - Текст подсказки или null для скрытия.
    * @param {'warn'|'err'|null} [level] - Уровень (цвет).
    */
@@ -6602,8 +6564,8 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
 
   /**
    * Отправка: создание заметки.
-   * v0.9: фиксация версии родителя — pin.eventId на момент ответа.
-   * Для своего неопубликованного родителя eventId нет → null.
+   * v0.8: parentId = pin.id, parentPk = null для своих,
+   * pin.authorPubkey для чужих.
    */
   function send() {
     if (sending) return;
@@ -6636,9 +6598,8 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
     const pin = Context.getPin();
     const parentUid = pin ? pin.id : null;
     const parentPk = (pin && pin.authorPubkey) ? pin.authorPubkey : null;
-    const parentEventId = (pin && pin.eventId) ? pin.eventId : null;
 
-    Notes.create(text, mode, parentUid, parentPk, parentEventId)
+    Notes.create(text, mode, parentUid, parentPk)
       .then(note => {
         Toast.show('ok', I18n.t(mode === 'world' ? 'toast.saved.public' : 'toast.saved.private')
           + (note && note.parentUid ? ' · ' + I18n.t('inf.linked') : ''));
