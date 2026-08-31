@@ -38,7 +38,7 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 // ВЕРСИЯ ПРИЛОЖЕНИЯ
 // ═══════════════════════════════════════════════════════════════════════════════
-const APP_VERSION = '0.8.2';
+const APP_VERSION = '0.8.2.3';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CORE/DI — ПРЕАМБУЛА
@@ -3301,27 +3301,19 @@ DI.register('Protocol', function (Config, Vec, Crypto, Nostr) {
 
 // ─── NET/NetService ─── START ───────────────────────────────────────────────
 /**
- * Оркестрация Nostr-сети: подписки, публикация, обработка входящих событий.
+ * Оркестрация Nostr-сети: подписки, публикация, обработка входящих.
  *
  * Три канала:
  * 1. Комнатная подписка (kind 1/21000/21001/5 по тегу t).
- * 2. Подписка на себя (kind 30078, authors = свой pk) — живой синк.
- * 3. Исходящая публикация: приватный канон (30078) + публичная проекция
- *    (kind 1) для shared.
+ * 2. Подписка на себя (kind 30078) — живой синк.
+ * 3. Исходящая публикация: канон (30078) + проекции (kind 1).
  *
- * МОДЕЛЬ v0.8 (связи через (parentUid, parentPk)):
- * - Публикация проекции — тупая упаковка (Protocol.noteEvent(note, room)),
- *   БЕЗ резолва родителя: резолв происходит у читателя по паре.
- *   buildNoteEvent удалён.
- * - Приём чужой проекции: cachePut с чисткой старых версий того же
- *   источника (srcUid + srcPk, другой id) — Provenance.bySrc не плодит
- *   дублей при переиздании источника.
- * - Эхо своих переизданий отсекается по srcUid (мой uid в теге чужого
- *   события = моя проекция вернулась).
- * - unshare: eventId сбрасывается (для повторной публикации), дети
- *   НЕ трогаются — их ссылки на uid стабильны.
- *
- * LWW-модель канона: syncTs, tombstone-удаления, canonTs (самолечение).
+ * v0.8.2-ф3 (баг «мама не возвращается»): приём чужой заметки при
+ * срабатывании contentDuplicate проверяет кэш — если заметки с этим id
+ * НЕТ в кэше, это не дубликат, а ВОЗВРАЩЕНИЕ источника после
+ * отзыв-цикла: кладём. Устойчиво к порядку доставки (kind 5 может
+ * прийти позже нового события — раньше это теряло заметку навсегда).
+ * Плюс чистка contentSeen автора при kind 5 (страховка).
  */
 DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Config, Logger, bus) {
   let started = false;
@@ -3529,7 +3521,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
 
   /**
    * Сброс очередей: priv → announce → del → privdel.
-   * Фазы priv/privdel — только при syncEnabled.
    * @returns {Promise<void>}
    */
   async function flushOutbox() {
@@ -3563,7 +3554,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
       }
 
       // Фаза 2: публичные проекции — параллельно.
-      // v0.8: Protocol.noteEvent(note, room) — без резолва родителя.
       const announceIds = outbox.announce.slice();
       const tasks = announceIds.map(async noteId => {
         const note = await DB.get(noteId).catch(() => null);
@@ -3743,7 +3733,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
 
   /**
    * Применить входящий канон (LWW по syncTs, tombstone = удаление).
-   * v0.8: новые поля parentUid/parentPk из decodePrivate.
    * @param {Object} d - Результат Protocol.decodePrivate.
    * @returns {Promise<void>}
    */
@@ -4035,11 +4024,9 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
 
   /**
    * Приём чужой публичной заметки.
-   * v0.8:
-   * - эхо своих проекций отсекается и по eventId, и по srcUid
-   *   (переизданная проекция несёт мой uid в теге);
-   * - перед cachePut чистятся старые версии того же источника
-   *   (srcUid + srcPk, другой id) — Provenance.bySrc без дублей.
+   * v0.8.2-ф3: contentDuplicate больше не приговор — если заметки нет
+   * в кэше, это ВОЗВРАЩЕНИЕ источника (цикл отзыв→возврат, kind 5
+   * мог прийти позже нового события). Кладём.
    * @param {Object} ev
    * @returns {boolean}
    */
@@ -4052,15 +4039,22 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
       return false;
     }
 
-    if (isContentDuplicate(note.authorPubkey, note.text)) {
-      return true;
-    }
-
-    peers.set(note.authorPubkey, Date.now());
-
     // Эхо своей проекции: по id события или по моему uid в теге.
     if (DB.hasLocal(note.id)) return true;
     if (note.srcUid && DB.hasLocal(note.srcUid)) return true;
+
+    peers.set(note.authorPubkey, Date.now());
+
+    const dup = isContentDuplicate(note.authorPubkey, note.text);
+
+    if (dup && !DB.hasCache(note.id)) {
+      // v0.8.2-ф3: контент «видели», но в кэше его нет — источник
+      // вернулся. Продолжаем приём, кэш ниже решит окончательно.
+      Logger.debug('NetService: возврат источника после дубля', note.id.slice(0, 8));
+    } else if (dup) {
+      // Настоящий дубликат: контент видели И заметка уже в кэше.
+      return true;
+    }
 
     DB.cacheAll().then(cached => {
       // Чистка старых версий того же источника (переиздание).
@@ -4186,7 +4180,15 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
       if (eventId) DB.cacheDel(eventId);
     });
 
-    if (del.authorPubkey) peers.set(del.authorPubkey, Date.now());
+    // v0.8.2: чистка «виденного контента» автора — при последующем
+    // возврате источника приём не задушится дедупликацией.
+    if (del.authorPubkey) {
+      const prefix = del.authorPubkey + '::';
+      for (const key of Array.from(contentSeen.keys())) {
+        if (key.startsWith(prefix)) contentSeen.delete(key);
+      }
+      peers.set(del.authorPubkey, Date.now());
+    }
     notifyPeers();
 
     return true;
@@ -4196,8 +4198,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
 
   /**
    * Анонс публичной проекции (kind 1).
-   * v0.8: Protocol.noteEvent(note, room) — тупая упаковка тегов,
-   * без резолва родителя (резолв у читателя).
    * @param {Object} note
    * @returns {Promise<void>}
    */
@@ -4236,7 +4236,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
 
   /**
    * Запрос удаления публичной проекции (kind 5).
-   * v0.8: дети заметки не трогаются — их ссылки на uid стабильны.
    * @param {Object} note - Заметка (нужны id и eventId).
    * @returns {Promise<void>}
    */
@@ -4459,7 +4458,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
 
           if (!note.shared && note.eventId) {
             // Сброс eventId для повторной публикации проекции.
-            // v0.8: дети не трогаются — их ссылки (parentUid) стабильны.
+            // Дети не трогаются — их ссылки (parentUid) стабильны.
             const oldEventId = note.eventId;
 
             DB.get(note.id).then(cur => {
@@ -5125,18 +5124,12 @@ DI.register('Feed', function (DB, Ranker, Store, bus, Logger) {
  * Построение генеалогических связей между заметками.
  *
  * МОДЕЛЬ v0.8.1: резолв родителя по паре (parentUid, parentPk).
- * - parentPk явный → кэш чужих по (srcUid, srcPk);
- *   при pk === моему → своя база по uid;
- * - parentPk = null (локальные записи своих) → своя база по uid.
- *
- * v0.8.3 (фикс теста 1 + самолечение): страховочный фолбэк при промахе
- * bySrc — попытка byId.get(parentUid). Оживает два случая:
- * (а) старые битые дочки, опубликованные со ссылкой на eventId
- *     родителя вместо uid (byId индексирует кэш и по eventId);
- * (б) заметки, пришедшие как ответы на запросы (kind 21001) —
- *     у их кэш-записей нет srcUid, но в byId они попадают по id.
- * Фолбэк не вредит разделению «свой/чужой»: byId содержит и свои,
- * и кэш — при промахе пары любое попадание лучше «недоступен».
+ * v0.8.2-ф1: фолбэк byId при промахе bySrc (самолечение eventId-ссылок
+ * и answer-записей без srcUid) — из этапа 1.
+ * v0.8.2-ф2: children своего источника (pk = null) находит ВСЕХ детей
+ * по parentUid — и своих (parentPk = null), и чужих, ссылающихся на
+ * мой uid (parentPk = мой pk). Раньше чужие дети не находились —
+ * ромбик показывал «1», модалка — «нет потомков».
  */
 DI.register('Provenance', function (DB, bus, Nostr) {
   /** @type {Map<string, {chain: Array, timestamp: number}>} */
@@ -5172,8 +5165,7 @@ DI.register('Provenance', function (DB, bus, Nostr) {
 
   /**
    * Резолв родителя по ссылке заметки.
-   * v0.8.3: фолбэк byId при промахе bySrc — самолечение старых
-   * eventId-ссылок и ответов без srcUid.
+   * v0.8.2-ф1: фолбэк byId при промахе bySrc.
    * @param {Object} note - Заметка со ссылкой (parentUid/parentPk).
    * @param {{byId: Map, bySrc: Map}} idx - Индексы.
    * @returns {Object|null} Заметка-родитель или null.
@@ -5188,29 +5180,28 @@ DI.register('Provenance', function (DB, bus, Nostr) {
       const cached = idx.bySrc.get(note.parentUid + '::' + note.parentPk);
       if (cached) return cached;
 
-      // 2. pk мой → родитель — моя заметка (ссылка из чужого/своего
-      //    события, eventId-ссылки старых дочек тоже попадают сюда
-      //    на устройстве автора родителя).
+      // 2. pk мой → родитель — моя заметка.
       if (myPk && note.parentPk === myPk) {
         return idx.byId.get(note.parentUid) || null;
       }
 
-      // 3. v0.8.3 Фолбэк: ссылка на чужой uid/eventId, промах по паре.
-      //    byId индексирует кэш-записи по их id (eventId проекции) —
-      //    старые eventId-ссылки и answer-записи резолвятся здесь.
+      // 3. v0.8.2-ф1 Фолбэк: byId (eventId-ссылки старых дочек,
+      //    answer-записи без srcUid).
       const fallback = idx.byId.get(note.parentUid);
       if (fallback) return fallback;
 
       return null;
     }
 
-    // parentPk нет: родитель мой (локальные/канонические записи,
-    // а также старые события) — своя база по uid.
+    // parentPk нет: родитель мой — своя база по uid.
     return idx.byId.get(note.parentUid) || null;
   }
 
   /**
    * Прямые дети заметки.
+   * v0.8.2-ф2: свой источник (pk = null) → дети с parentUid = id
+   * и parentPk ∈ {null, мой pk}: свои И чужие ответы на мой uid.
+   * Чужой источник (pk явный) → по паре, как раньше.
    * @param {string} id - uid своей заметки ИЛИ srcUid чужой.
    * @param {string} [pk] - Pubkey автора для чужой заметки.
    * @returns {Promise<Array<Object>>}
@@ -5218,12 +5209,21 @@ DI.register('Provenance', function (DB, bus, Nostr) {
   function children(id, pk) {
     if (!id) return Promise.resolve([]);
 
+    const myPk = Nostr.getPubkey();
+
     return loadAll().then(all => {
       return all.filter(n => {
         if (!n || !n.parentUid) return false;
-        if (!pk && !n.parentPk && n.parentUid === id) return true;
-        if (pk && n.parentPk === pk && n.parentUid === id) return true;
-        return false;
+        if (n.parentUid !== id) return false;
+
+        if (pk) {
+          // Чужой источник: точная пара.
+          return n.parentPk === pk;
+        }
+
+        // Свой источник: свой ребёнок (pk null) или чужой ребёнок
+        // на мой uid (pk = мой).
+        return !n.parentPk || (myPk && n.parentPk === myPk);
       });
     });
   }
