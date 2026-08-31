@@ -38,7 +38,7 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 // ВЕРСИЯ ПРИЛОЖЕНИЯ
 // ═══════════════════════════════════════════════════════════════════════════════
-const APP_VERSION = '0.8.1';
+const APP_VERSION = '0.8.2';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CORE/DI — ПРЕАМБУЛА
@@ -4817,17 +4817,12 @@ DI.register('Notes', function (DB, Embedder, bus, Logger, Utils) {
 /**
  * Управление текущим контекстом поиска.
  *
- * Состояния контекста:
- * - 'pin':   Заметка закреплена (клик по карточке). Лента показывает созвучное.
- * - 'drift': Закреплённая заметка + пользователь печатает. Контекст плавно
- *            смещается от закреплённой мысли к вводимому тексту.
- * - 'input': Пользователь печатает без закреплённой заметки.
- * - null:    Контекста нет. Лента в хронологическом порядке.
+ * Состояния: 'pin' / 'drift' / 'input' / null. Приоритет drift > pin >
+ * input > none.
  *
- * Событие 'note:pin' от NoteView/FeedView активирует пин.
- *
- * v0.8: снапшот пина хранит authorPubkey — Composer передаёт пару
- * (parentUid, parentPk) при создании потомка (pk = null для своих).
+ * v0.8.3 (фикс теста 1): снапшот пина захватывает srcUid/srcPk —
+ * авторский uid чужой заметки. Composer строит ссылку на правильный
+ * идентификатор (srcUid чужого, uid своего), а не на eventId проекции.
  */
 DI.register('Context', function (Store, Embedder, Config, Utils, bus) {
   /** @type {string} */
@@ -4920,6 +4915,8 @@ DI.register('Context', function (Store, Embedder, Config, Utils, bus) {
 
     /**
      * Закрепить заметку (пин).
+     * v0.8.3: снапшот несёт srcUid/srcPk — авторский uid чужой
+     * заметки (у кэш-записей) для правильной ссылки в Composer.
      * @param {Object} note - Заметка с вектором.
      */
     setPin(note) {
@@ -4928,6 +4925,8 @@ DI.register('Context', function (Store, Embedder, Config, Utils, bus) {
         id: note.id,
         eventId: note.eventId || null,
         authorPubkey: note.authorPubkey || null,
+        srcUid: note.srcUid || null,
+        srcPk: note.srcPk || null,
         text: note.text,
         vector: note.vector,
       };
@@ -5125,16 +5124,19 @@ DI.register('Feed', function (DB, Ranker, Store, bus, Logger) {
 /**
  * Построение генеалогических связей между заметками.
  *
- * МОДЕЛЬ v0.8.1 (фикс): резолв родителя по паре (parentUid, parentPk).
- * - parentPk = pk автора родителя (в публичных событиях — всегда явно,
- *   включая случай «родитель мой»: pk совпадает с моим).
- * - Резолв: кэш чужих по (srcUid, srcPk); если pk === мой — своя база
- *   по uid (родитель — моя заметка, но ссылка пришла из чужого события
- *   или из моего же переиздания).
- * - parentPk = null (старые/канонические записи своих заметок):
- *   родитель мой, резолв в своей базе по uid.
+ * МОДЕЛЬ v0.8.1: резолв родителя по паре (parentUid, parentPk).
+ * - parentPk явный → кэш чужих по (srcUid, srcPk);
+ *   при pk === моему → своя база по uid;
+ * - parentPk = null (локальные записи своих) → своя база по uid.
  *
- * Связи переживают отзыв/переиздание родителя: uid стабилен.
+ * v0.8.3 (фикс теста 1 + самолечение): страховочный фолбэк при промахе
+ * bySrc — попытка byId.get(parentUid). Оживает два случая:
+ * (а) старые битые дочки, опубликованные со ссылкой на eventId
+ *     родителя вместо uid (byId индексирует кэш и по eventId);
+ * (б) заметки, пришедшие как ответы на запросы (kind 21001) —
+ *     у их кэш-записей нет srcUid, но в byId они попадают по id.
+ * Фолбэк не вредит разделению «свой/чужой»: byId содержит и свои,
+ * и кэш — при промахе пары любое попадание лучше «недоступен».
  */
 DI.register('Provenance', function (DB, bus, Nostr) {
   /** @type {Map<string, {chain: Array, timestamp: number}>} */
@@ -5169,7 +5171,9 @@ DI.register('Provenance', function (DB, bus, Nostr) {
   }
 
   /**
-   * Резолв родителя по ссылке заметки (v0.8.1).
+   * Резолв родителя по ссылке заметки.
+   * v0.8.3: фолбэк byId при промахе bySrc — самолечение старых
+   * eventId-ссылок и ответов без srcUid.
    * @param {Object} note - Заметка со ссылкой (parentUid/parentPk).
    * @param {{byId: Map, bySrc: Map}} idx - Индексы.
    * @returns {Object|null} Заметка-родитель или null.
@@ -5180,14 +5184,22 @@ DI.register('Provenance', function (DB, bus, Nostr) {
     const myPk = Nostr.getPubkey();
 
     if (note.parentPk) {
-      // Пара явная: сначала кэш чужих по (srcUid, srcPk).
+      // 1. Пара явная: кэш чужих по (srcUid, srcPk).
       const cached = idx.bySrc.get(note.parentUid + '::' + note.parentPk);
       if (cached) return cached;
 
-      // pk мой → родитель — моя заметка (ссылка из чужого/своего события).
+      // 2. pk мой → родитель — моя заметка (ссылка из чужого/своего
+      //    события, eventId-ссылки старых дочек тоже попадают сюда
+      //    на устройстве автора родителя).
       if (myPk && note.parentPk === myPk) {
         return idx.byId.get(note.parentUid) || null;
       }
+
+      // 3. v0.8.3 Фолбэк: ссылка на чужой uid/eventId, промах по паре.
+      //    byId индексирует кэш-записи по их id (eventId проекции) —
+      //    старые eventId-ссылки и answer-записи резолвятся здесь.
+      const fallback = idx.byId.get(note.parentUid);
+      if (fallback) return fallback;
 
       return null;
     }
@@ -6446,10 +6458,11 @@ DI.register('Onboarding', function (Config, Modal, I18n, Embedder) {
  * - hardLimit: красная подсветка, подсказка «вектор обрезается»
  * - maxPostLength: блокировка ввода через maxlength + блокировка кнопки
  *
- * v0.8: связь с родителем передаётся парой (parentUid, parentPk).
- * Пин своей заметки → pk = null (родитель мой).
- * Пин чужой заметки → pk = её автор (Notes.resolver справится на своей
- * стороне; чужой uid в нашей базе не резолвится, поэтому pk обязателен).
+ * v0.8.3 (фикс теста 1): parentUid = pin.srcUid || pin.id —
+ * пин чужой заметки даёт её авторский uid (srcUid из тега uid),
+ * пин своей — её uid. Раньше чужой пин передавал eventId проекции,
+ * на который не резолвился ни один индекс — стрелка у автора
+ * ответа была перечёркнута.
  */
 DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils, Config) {
   let ta, cnt, sendBtn, toggle, footEl;
@@ -6564,8 +6577,8 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
 
   /**
    * Отправка: создание заметки.
-   * v0.8: parentId = pin.id, parentPk = null для своих,
-   * pin.authorPubkey для чужих.
+   * v0.8.3: parentUid = pin.srcUid || pin.id — авторский uid
+   * для чужого родителя, uid для своего.
    */
   function send() {
     if (sending) return;
@@ -6596,7 +6609,7 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
     };
 
     const pin = Context.getPin();
-    const parentUid = pin ? pin.id : null;
+    const parentUid = pin ? (pin.srcUid || pin.id) : null;
     const parentPk = (pin && pin.authorPubkey) ? pin.authorPubkey : null;
 
     Notes.create(text, mode, parentUid, parentPk)
