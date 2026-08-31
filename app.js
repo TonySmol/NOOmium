@@ -1420,11 +1420,346 @@ DI.register('Vec', function () {
 
 // ─── DATA/DB ─── START ──────────────────────────────────────────────────────
 /**
- * Хранение: notes (свои, keyPath uid) и mirror (чужие, keyPath uid,
- * index owner). upsertMirror — строго по version (сходимость И3).
- * API: putNote/getNote/delNote/allNotes/hasOwn,
- *      upsertMirror/getMirror/allMirror/delMirror, reset, ready.
+ * Хранение: notes (свои, истина владельца, keyPath uid) и
+ * mirror (зеркало чужих, keyPath uid, index owner).
+ * upsertMirror — строгое сравнение версий: повторная доставка и
+ * ретро-доставка безопасны, порядок обработки любых версий
+ * сходится к последней (И3).
  */
+DI.register('DB', function (Config, bus, Logger) {
+  let db = null;
+  let memNotes = null;
+  let memMirror = null;
+  let openPromise = null;
+
+  const NOTES = () => Config.get('notesStore', 'notes');
+  const MIRROR = () => Config.get('mirrorStore', 'mirror');
+
+  /** @type {Set<string>} */
+  const ownUids = new Set();
+  /** @type {Set<string>} */
+  const mirrorUids = new Set();
+
+  function emitChange() {
+    try { bus.emit('db:change'); } catch (_) {}
+  }
+
+  function emitMirror() {
+    try { bus.emit('db:mirror'); } catch (_) {}
+  }
+
+  /**
+   * @param {IDBRequest} req
+   * @returns {Promise<*>}
+   */
+  function reqPromise(req) {
+    return new Promise((res, rej) => {
+      req.onsuccess = () => res(req.result);
+      req.onerror = () => rej(req.error);
+    });
+  }
+
+  /**
+   * Открытие БД с построением индексов до резолва.
+   * @returns {Promise<IDBDatabase|null>}
+   */
+  function open() {
+    if (openPromise) return openPromise;
+
+    openPromise = new Promise(resolve => {
+      if (!window.indexedDB) {
+        memNotes = new Map();
+        memMirror = new Map();
+        Logger.warn('DB: IndexedDB недоступен, in-memory fallback');
+        return resolve(null);
+      }
+
+      try {
+        const req = indexedDB.open(Config.get('dbName', 'noomium_v3'), 1);
+
+        req.onupgradeneeded = e => {
+          const d = e.target.result;
+
+          if (!d.objectStoreNames.contains(NOTES())) {
+            d.createObjectStore(NOTES(), { keyPath: 'uid' });
+          }
+
+          if (!d.objectStoreNames.contains(MIRROR())) {
+            const s = d.createObjectStore(MIRROR(), { keyPath: 'uid' });
+            s.createIndex('owner', 'owner', { unique: false });
+          }
+        };
+
+        req.onsuccess = e => {
+          db = e.target.result;
+          buildIndexes().then(() => resolve(db)).catch(() => resolve(db));
+        };
+
+        req.onerror = () => {
+          memNotes = new Map();
+          memMirror = new Map();
+          Logger.warn('DB: ошибка открытия, fallback');
+          resolve(null);
+        };
+
+        req.onblocked = () => {
+          memNotes = new Map();
+          memMirror = new Map();
+          Logger.warn('DB: open blocked, fallback');
+          resolve(null);
+        };
+      } catch (err) {
+        memNotes = new Map();
+        memMirror = new Map();
+        Logger.warn('DB: не поддерживается, fallback', String(err));
+        resolve(null);
+      }
+    });
+
+    return openPromise;
+  }
+
+  /**
+   * Построение индексов ownUids/mirrorUids.
+   * @returns {Promise<void>}
+   */
+  function buildIndexes() {
+    const t = db.transaction([NOTES(), MIRROR()], 'readonly');
+
+    return Promise.all([
+      reqPromise(t.objectStore(NOTES()).getAllKeys()).catch(() => []),
+      reqPromise(t.objectStore(MIRROR()).getAllKeys()).catch(() => []),
+    ]).then(([nKeys, mKeys]) => {
+      ownUids.clear();
+      mirrorUids.clear();
+
+      (nKeys || []).forEach(k => ownUids.add(k));
+      (mKeys || []).forEach(k => mirrorUids.add(k));
+
+      Logger.info('DB: индексы (' + ownUids.size + ' своих, ' + mirrorUids.size + ' в зеркале)');
+    });
+  }
+
+  /**
+   * @param {string} store
+   * @param {string} mode
+   * @param {Function} fn
+   * @param {Function} memFn
+   * @returns {Promise<*>}
+   */
+  function withStore(store, mode, fn, memFn) {
+    return open().then(d => {
+      if (!d) return memFn();
+
+      return new Promise((res, rej) => {
+        try {
+          const r = fn(d.transaction(store, mode).objectStore(store));
+          r.onsuccess = () => res(r.result);
+          r.onerror = () => rej(r.error);
+        } catch (e) {
+          rej(e);
+        }
+      });
+    });
+  }
+
+  // ─── Свои заметки ─────────────────────────────────────────────────────────
+
+  /**
+   * Запись своей заметки. Единственная точка записи — Notes.
+   * @param {Object} note - {uid, text, vector, visibility, parent, version, createdAt, updatedAt}
+   * @returns {Promise<string>}
+   */
+  function putNote(note) {
+    return withStore(
+      NOTES(),
+      'readwrite',
+      s => s.put(note),
+      () => { memNotes.set(note.uid, note); return note.uid; }
+    ).then(res => {
+      if (note && note.uid) ownUids.add(note.uid);
+      emitChange();
+      return res;
+    });
+  }
+
+  /**
+   * @param {string} uid
+   * @returns {Promise<Object|undefined>}
+   */
+  function getNote(uid) {
+    return withStore(
+      NOTES(),
+      'readonly',
+      s => s.get(uid),
+      () => memNotes.get(uid)
+    );
+  }
+
+  /**
+   * @param {string} uid
+   * @returns {Promise<*>}
+   */
+  function delNote(uid) {
+    return withStore(
+      NOTES(),
+      'readwrite',
+      s => s.delete(uid),
+      () => { memNotes.delete(uid); }
+    ).then(res => {
+      ownUids.delete(uid);
+      emitChange();
+      return res;
+    });
+  }
+
+  /**
+   * @returns {Promise<Array<Object>>}
+   */
+  function allNotes() {
+    return withStore(
+      NOTES(),
+      'readonly',
+      s => s.getAll(),
+      () => Array.from(memNotes.values())
+    );
+  }
+
+  /**
+   * @param {string} uid
+   * @returns {boolean}
+   */
+  function hasOwn(uid) {
+    return !!uid && ownUids.has(uid);
+  }
+
+  // ─── Зеркало чужих ────────────────────────────────────────────────────────
+
+  /**
+   * Upsert записи зеркала по version. Downgrade и повтор одной
+   * версии игнорируются — сходимость к последней версии (И3).
+   * @param {Object} entry - {uid, owner, version, visibility,
+   *   text?, vec?, parent?, deleted?}
+   * @returns {Promise<boolean>} true — запись обновлена.
+   */
+  function upsertMirror(entry) {
+    if (!entry || !entry.uid || typeof entry.version !== 'number') {
+      return Promise.resolve(false);
+    }
+
+    return withStore(
+      MIRROR(),
+      'readonly',
+      s => s.get(entry.uid),
+      () => memMirror.get(entry.uid)
+    ).then(existing => {
+      if (existing && existing.version >= entry.version) {
+        return false;
+      }
+
+      return withStore(
+        MIRROR(),
+        'readwrite',
+        s => s.put(entry),
+        () => { memMirror.set(entry.uid, entry); return entry.uid; }
+      ).then(() => {
+        mirrorUids.add(entry.uid);
+        emitMirror();
+        return true;
+      });
+    }).catch(e => {
+      Logger.warn('DB: upsertMirror', String(e && e.message || e));
+      return false;
+    });
+  }
+
+  /**
+   * @param {string} uid
+   * @returns {Promise<Object|undefined>}
+   */
+  function getMirror(uid) {
+    return withStore(
+      MIRROR(),
+      'readonly',
+      s => s.get(uid),
+      () => memMirror.get(uid)
+    );
+  }
+
+  /**
+   * @returns {Promise<Array<Object>>}
+   */
+  function allMirror() {
+    return withStore(
+      MIRROR(),
+      'readonly',
+      s => s.getAll(),
+      () => Array.from(memMirror.values())
+    );
+  }
+
+  /**
+   * @param {string} uid
+   * @returns {Promise<*>}
+   */
+  function delMirror(uid) {
+    return withStore(
+      MIRROR(),
+      'readwrite',
+      s => s.delete(uid),
+      () => { memMirror.delete(uid); }
+    ).then(res => {
+      mirrorUids.delete(uid);
+      emitMirror();
+      return res;
+    });
+  }
+
+  /**
+   * Полная очистка хранилищ.
+   * @returns {Promise<void>}
+   */
+  function reset() {
+    return open().then(d => {
+      if (!d) {
+        memNotes.clear();
+        memMirror.clear();
+        return;
+      }
+
+      return new Promise((res, rej) => {
+        const t = d.transaction([NOTES(), MIRROR()], 'readwrite');
+        t.objectStore(NOTES()).clear();
+        t.objectStore(MIRROR()).clear();
+
+        t.oncomplete = () => res();
+        t.onerror = () => rej(t.error);
+      });
+    }).then(() => {
+      ownUids.clear();
+      mirrorUids.clear();
+      emitChange();
+      emitMirror();
+    });
+  }
+
+  return {
+    putNote,
+    getNote,
+    delNote,
+    allNotes,
+    hasOwn,
+
+    upsertMirror,
+    getMirror,
+    allMirror,
+    delMirror,
+
+    reset,
+
+    ready: open,
+  };
+}, ['Config', 'EventBus', 'Logger']);
 // ─── DATA/DB ─── END ────────────────────────────────────────────────────────
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1433,15 +1768,471 @@ DI.register('Vec', function () {
 
 // ─── AI/Embedder ─── START ──────────────────────────────────────────────────
 /**
- * Эмбеддер Granite R2: Worker, transformers.js, режимы, hash-fallback.
+ * Эмбеддер Granite R2: Web Worker + transformers.js (q8, CLS-pooling).
+ * Режимы: 'loading' | 'model' | 'demo'. Fallback — FNV-1a хеш.
  */
+DI.register('Embedder', function (Config, bus, Logger) {
+  /** @type {string} */
+  const workerCode = `
+let extractor = null;
+let ready = false;
+let files = new Map();
+
+self.onmessage = async function (e) {
+  const msg = e.data;
+  
+  if (msg.type === 'load') {
+    try {
+      const mod = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@latest');
+      mod.env.allowLocalModels = false;
+      mod.env.useBrowserCache = true;
+      
+      extractor = await mod.pipeline('feature-extraction', msg.model, {
+        dtype: 'q8',
+        progress_callback: function (p) {
+          if (p.status === 'progress') {
+            const fileName = p.file || p.name || 'unknown';
+            files.set(fileName, { 
+              loaded: p.loaded || 0, 
+              total: p.total || 0,
+              file: fileName
+            });
+            
+            let totalLoaded = 0, totalSize = 0;
+            files.forEach(f => { 
+              totalLoaded += f.loaded; 
+              if (f.total > 0) totalSize += f.total; 
+            });
+            
+            const pct = totalSize > 0 ? (totalLoaded / totalSize) * 100 : 0;
+            self.postMessage({ 
+              type: 'progress', 
+              pct,
+              loadedMB: (totalLoaded / 1024 / 1024).toFixed(1),
+              totalMB: totalSize > 0 ? (totalSize / 1024 / 1024).toFixed(1) : null,
+              model: msg.model
+            });
+          }
+        }
+      });
+      
+      ready = true;
+      self.postMessage({ type: 'ready' });
+    } catch (err) {
+      self.postMessage({ 
+        type: 'error', 
+        id: null, 
+        message: String(err && err.message || err) 
+      });
+    }
+    return;
+  }
+  
+  if (!ready) {
+    self.postMessage({ 
+      type: 'error', 
+      id: msg.id, 
+      message: 'model not loaded' 
+    });
+    return;
+  }
+  
+  if (msg.type === 'embed') {
+    try {
+      const out = await extractor(msg.text, { pooling: 'cls', normalize: true });
+      self.postMessage({ 
+        type: 'result', 
+        id: msg.id, 
+        vector: Array.from(out.data) 
+      });
+    } catch (err) {
+      self.postMessage({ 
+        type: 'error', 
+        id: msg.id, 
+        message: String(err && err.message || err) 
+      });
+    }
+  }
+};
+`;
+
+  /** @type {Worker|null} */
+  let worker = null;
+  /** @type {string|null} */
+  let workerUrl = null;
+  /** @type {'loading'|'model'|'demo'} */
+  let mode = 'loading';
+  let loadPromise = null;
+  let nextId = 0;
+  let lastPct = 0;
+  /** @type {Map<number, {resolve: Function, timer: number, text: string}>} */
+  const pending = new Map();
+  /** @type {Array<Function>} */
+  const progressFns = [];
+  /** @type {Map<string, Float32Array>} */
+  const cache = new Map();
+
+  function emitStatus() {
+    try {
+      bus.emit('ai:status', { mode, percent: lastPct });
+    } catch (_) {}
+  }
+
+  /**
+   * Fallback: детерминированный хеш-эмбеддинг (FNV-1a).
+   * @param {string} text
+   * @returns {Float32Array}
+   */
+  function hashEmbed(text) {
+    const DIM = Config.get('dim', 384);
+    const vec = new Float32Array(DIM);
+    const tokens = (text || '').toLowerCase().match(/[a-zа-яё0-9]+/gi) || [];
+
+    for (const tok of tokens) {
+      let h = 2166136261;
+      for (let i = 0; i < tok.length; i++) {
+        h ^= tok.charCodeAt(i);
+        h = Math.imul(h, 16777619);
+      }
+      vec[Math.abs(h) % DIM] += 1;
+
+      const h2 = Math.imul(h ^ 0x9e3779b9, 2654435761);
+      vec[Math.abs(h2) % DIM] += 0.5;
+    }
+
+    let norm = 0;
+    for (let i = 0; i < DIM; i++) norm += vec[i] * vec[i];
+    norm = Math.sqrt(norm) || 1;
+
+    for (let i = 0; i < DIM; i++) vec[i] /= norm;
+    return vec;
+  }
+
+  /**
+   * @param {string} key
+   * @returns {Float32Array|undefined}
+   */
+  function cacheGet(key) {
+    if (!cache.has(key)) return undefined;
+    const v = cache.get(key);
+    cache.delete(key);
+    cache.set(key, v);
+    return v;
+  }
+
+  /**
+   * @param {string} key
+   * @param {Float32Array} v
+   */
+  function cacheSet(key, v) {
+    if (cache.has(key)) {
+      cache.delete(key);
+    } else if (cache.size >= Config.get('aiCacheLimit', 300)) {
+      cache.delete(cache.keys().next().value);
+    }
+    cache.set(key, v);
+  }
+
+  /**
+   * Аварийная очистка: pending разрешаются хеш-векторами.
+   */
+  function cleanup() {
+    pending.forEach(p => {
+      clearTimeout(p.timer);
+      const v = hashEmbed(p.text);
+      cacheSet(p.text, v);
+      p.resolve(v);
+    });
+    pending.clear();
+
+    if (worker) {
+      try { worker.terminate(); } catch (_) {}
+      worker = null;
+    }
+
+    if (workerUrl) {
+      try { URL.revokeObjectURL(workerUrl); } catch (_) {}
+      workerUrl = null;
+    }
+  }
+
+  /**
+   * Загрузка модели: Worker → 'ready' | таймаут 120с | ошибка → demo.
+   * @returns {Promise<void>}
+   */
+  function doLoad() {
+    return new Promise(resolve => {
+      if (typeof Worker === 'undefined') {
+        mode = 'demo';
+        emitStatus();
+        Logger.warn('Embedder: Worker не поддерживается, demo mode');
+        return resolve();
+      }
+
+      try {
+        const blob = new Blob([workerCode], { type: 'application/javascript' });
+        workerUrl = URL.createObjectURL(blob);
+        worker = new Worker(workerUrl, { type: 'module' });
+      } catch (err) {
+        mode = 'demo';
+        emitStatus();
+        Logger.warn('Embedder: не создать Worker, demo mode', String(err));
+        return resolve();
+      }
+
+      const LOAD_TIMEOUT = 120000;
+      let resolved = false;
+
+      const loadTimer = setTimeout(() => {
+        if (resolved) return;
+        resolved = true;
+        Logger.warn('Embedder: таймаут загрузки модели (120с), demo mode');
+        cleanup();
+        mode = 'demo';
+        emitStatus();
+        resolve();
+      }, LOAD_TIMEOUT);
+
+      worker.onerror = err => {
+        if (resolved) return;
+        resolved = true;
+        clearTimeout(loadTimer);
+        Logger.warn('Embedder: ошибка Worker, demo mode', String(err && err.message || err));
+        cleanup();
+        mode = 'demo';
+        emitStatus();
+        resolve();
+      };
+
+      worker.onmessage = e => {
+        const msg = e.data;
+
+        if (msg.type === 'progress') {
+          lastPct = msg.pct;
+
+          for (const fn of progressFns) {
+            try { fn(msg); } catch (_) {}
+          }
+
+          try { bus.emit('ai:progress', msg); } catch (_) {}
+          try {
+            bus.emit('ai:status', {
+              mode: 'loading',
+              percent: msg.pct,
+              loadedMB: msg.loadedMB,
+              totalMB: msg.totalMB,
+              model: msg.model,
+            });
+          } catch (_) {}
+        }
+        else if (msg.type === 'ready') {
+          if (resolved) return;
+          resolved = true;
+          clearTimeout(loadTimer);
+          mode = 'model';
+          emitStatus();
+          Logger.info('Embedder: модель готова');
+          resolve();
+        }
+        else if (msg.type === 'error' && msg.id === null) {
+          if (resolved) return;
+          resolved = true;
+          clearTimeout(loadTimer);
+          Logger.warn('Embedder: ошибка загрузки модели, demo mode', msg.message);
+          cleanup();
+          mode = 'demo';
+          emitStatus();
+          resolve();
+        }
+        else if (msg.type === 'result') {
+          const p = pending.get(msg.id);
+          if (p) {
+            clearTimeout(p.timer);
+            pending.delete(msg.id);
+
+            const vec = Float32Array.from(msg.vector);
+            cacheSet(p.text, vec);
+            p.resolve(vec);
+          }
+        }
+        else if (msg.type === 'error' && msg.id != null) {
+          const p = pending.get(msg.id);
+          if (p) {
+            clearTimeout(p.timer);
+            pending.delete(msg.id);
+
+            Logger.warn('Embedder: ошибка embed, hash fallback', msg.message);
+            const v = hashEmbed(p.text);
+            cacheSet(p.text, v);
+            p.resolve(v);
+          }
+        }
+      };
+
+      worker.postMessage({
+        type: 'load',
+        model: Config.get('model', 'onnx-community/granite-embedding-97m-multilingual-r2-ONNX'),
+      });
+    });
+  }
+
+  return {
+    /**
+     * @param {Function} [onProgress]
+     * @returns {Promise<void>}
+     */
+    load(onProgress) {
+      if (typeof onProgress === 'function') {
+        progressFns.push(onProgress);
+      }
+
+      if (mode === 'model' || mode === 'demo') {
+        return Promise.resolve();
+      }
+
+      if (loadPromise) return loadPromise;
+
+      mode = 'loading';
+      emitStatus();
+      loadPromise = doLoad().then(() => {
+        loadPromise = null;
+      });
+
+      return loadPromise;
+    },
+
+    /**
+     * @param {string} text
+     * @returns {Promise<Float32Array|null>}
+     */
+    embed(text) {
+      const t = (text || '').trim();
+      if (!t) return Promise.resolve(null);
+
+      const cached = cacheGet(t);
+      if (cached) return Promise.resolve(cached);
+
+      if (mode === 'demo' || !worker) {
+        const v = hashEmbed(t);
+        cacheSet(t, v);
+        return Promise.resolve(v);
+      }
+
+      const id = nextId++;
+      return new Promise(resolve => {
+        const timer = setTimeout(() => {
+          if (pending.delete(id)) {
+            Logger.warn('Embedder: таймаут embed, hash fallback');
+            const v = hashEmbed(t);
+            cacheSet(t, v);
+            resolve(v);
+          }
+        }, Config.get('aiEmbedTimeout', 15000));
+
+        pending.set(id, { resolve, timer, text: t });
+        worker.postMessage({ type: 'embed', id, text: t });
+      });
+    },
+
+    /**
+     * @returns {boolean}
+     */
+    ready() {
+      return mode === 'model' || mode === 'demo';
+    },
+
+    /**
+     * @returns {string}
+     */
+    getMode() {
+      return mode;
+    },
+
+    /**
+     * @param {Function} fn
+     */
+    onProgress(fn) {
+      if (typeof fn === 'function') {
+        progressFns.push(fn);
+      }
+    },
+  };
+}, ['Config', 'EventBus', 'Logger']);
 // ─── AI/Embedder ─── END ────────────────────────────────────────────────────
 
 // ─── AI/Ranker ─── START ────────────────────────────────────────────────────
 /**
- * Ранжирование: cosineBatch, split, isSimilar.
+ * Ранжирование: пакетный косинус, пороги relevant/serendipity,
+ * проверка дубликатов по векторам.
  */
-// ─── AI/Ranker ─── END ─────────────────────────────────═════════════════════
+DI.register('Ranker', function (Vec, Config) {
+  /**
+   * @param {Float32Array|number[]} queryVector
+   * @param {Array<{id: string, vector: Array|Float32Array}>} items
+   * @param {AbortSignal} [signal]
+   * @returns {Promise<Array<{id: string, score: number}>>}
+   */
+  function cosineBatch(queryVector, items, signal) {
+    if (!queryVector || !items || !items.length) {
+      return Promise.resolve([]);
+    }
+
+    if (signal && signal.aborted) {
+      return Promise.reject(new Error('aborted'));
+    }
+
+    const out = [];
+    for (const it of items) {
+      if (signal && signal.aborted) {
+        return Promise.reject(new Error('aborted'));
+      }
+      out.push({ id: it.id, score: Vec.cosine(queryVector, it.vector) });
+    }
+
+    out.sort((a, b) => b.score - a.score);
+    return Promise.resolve(out);
+  }
+
+  /**
+   * @param {Array<{id: string, score: number}>} scored
+   * @returns {{relevant: Array, seren: Array}}
+   */
+  function split(scored) {
+    const threshold = Config.get('threshold', 0.81);
+    const serendipity = Config.get('serendipity', 0.07);
+
+    const lowerBound = threshold - serendipity;
+
+    const relevant = [];
+    const seren = [];
+
+    for (const s of scored) {
+      if (s.score < lowerBound) {
+        continue;
+      }
+
+      if (s.score >= threshold) {
+        relevant.push(s);
+      } else {
+        seren.push(s);
+      }
+    }
+
+    return { relevant, seren };
+  }
+
+  /**
+   * @param {Float32Array|number[]} a
+   * @param {Float32Array|number[]} b
+   * @returns {boolean}
+   */
+  function isSimilar(a, b) {
+    return Vec.cosine(a, b) >= Config.get('duplicateThreshold', 0.88);
+  }
+
+  return { cosineBatch, split, isSimilar };
+}, ['Vec', 'Config']);
+// ─── AI/Ranker ─── END ──────────────────────────────────────────────────────
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // СЛОЙ: NET
