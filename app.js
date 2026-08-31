@@ -25,7 +25,7 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 // ВЕРСИЯ ПРИЛОЖЕНИЯ
 // ═══════════════════════════════════════════════════════════════════════════════
-const APP_VERSION = '0.9.0';
+const APP_VERSION = '0.9.1';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CORE/DI — ПРЕАМБУЛА
@@ -4196,10 +4196,10 @@ DI.register('Context', function (Store, Embedder, Config, Utils, bus) {
 
 // ─── DOMAIN/Feed ─── START ──────────────────────────────────────────────────
 /**
- * Сборка лент из notes (свои) и mirror (чужие).
- * Хронология: свои public + чужие public. Ранжирование: по контексту.
- * Дедуп: uid. Исключение пина: по идентичности (И7).
- * Свои доминируют над mirror при совпадении uid.
+ * Сборка лент из notes (свои: все, public и private) и
+ * mirror (чужие: только public). Свои private участвуют в поиске
+ * (пин/ввод) — ядро продукта. Чужие private — только факт
+ * существования, не рендерятся.
  */
 DI.register('Feed', function (DB, Ranker, Store, bus, Logger) {
   /** @type {number} */
@@ -4226,20 +4226,22 @@ DI.register('Feed', function (DB, Ranker, Store, bus, Logger) {
       const pinUid = ctx.uid || null;
       const pinOwner = ctx.owner || null;
 
-      const publicNotes = notes
-        .filter(n => n && n.visibility === 'public' && n.text)
+      const ownNotes = notes
+        .filter(n => n && n.text)
         .map(n => ({ uid: n.uid, owner: null, text: n.text, vector: n.vector,
-                     parent: n.parent, createdAt: n.createdAt, updatedAt: n.updatedAt,
+                     parent: n.parent, visibility: n.visibility,
+                     createdAt: n.createdAt, updatedAt: n.updatedAt,
                      own: true }));
 
-      const publicMirror = mirror
+      const foreignPublic = mirror
         .filter(m => m && m.visibility === 'public' && m.text && !ownUids.has(m.uid))
         .map(m => ({ uid: m.uid, owner: m.owner, text: m.text, vector: m.vec,
-                     parent: m.parent, createdAt: m.version * 1000, updatedAt: m.version * 1000,
+                     parent: m.parent, visibility: 'public',
+                     createdAt: m.version * 1000, updatedAt: m.version * 1000,
                      own: false }));
 
       if (!ctx.source) {
-        const merged = [...publicNotes, ...publicMirror]
+        const merged = [...ownNotes, ...foreignPublic]
           .filter(n => !isPin(n, pinUid, pinOwner))
           .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
 
@@ -4253,7 +4255,7 @@ DI.register('Feed', function (DB, Ranker, Store, bus, Logger) {
 
       if (!ctx.vector) return;
 
-      const all = [...publicNotes, ...publicMirror]
+      const all = [...ownNotes, ...foreignPublic]
         .filter(n => !isPin(n, pinUid, pinOwner));
 
       const items = [];
@@ -5949,8 +5951,8 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
 
     const tag = document.createElement('span');
     if (n.own) {
-      tag.className = 'note-tag world';
-      tag.textContent = I18n.t('base.tag.shared');
+      tag.className = 'note-tag ' + (n.visibility === 'public' ? 'world' : 'priv');
+      tag.textContent = n.visibility === 'public' ? I18n.t('base.tag.shared') : I18n.t('base.tag.private');
     } else {
       tag.className = 'note-tag world';
       tag.textContent = '· ' + Utils.shortPk(n.owner || '');
