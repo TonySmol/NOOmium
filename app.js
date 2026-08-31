@@ -2240,31 +2240,717 @@ DI.register('Ranker', function (Vec, Config) {
 
 // ─── NET/Nostr ─── START ────────────────────────────────────────────────────
 /**
- * Транспорт: nostr-tools с CDN, ключ, SimplePool, publish (>=1 релей,
- * таймаут 30с), subscribe. setKey для смены аккаунта.
+ * Транспорт: nostr-tools с CDN, ключи, SimplePool, publish, subscribe.
  */
+DI.register('Nostr', function (Config, bus, Logger) {
+  const CDN = 'https://cdn.jsdelivr.net/npm/nostr-tools@2.7.2/+esm';
+  const SK_KEY = 'noomium:sk';
+
+  /** @type {Object|null} */
+  let nostr = null;
+  /** @type {Object|null} */
+  let pool = null;
+  /** @type {Uint8Array|null} */
+  let sk = null;
+  /** @type {string|null} */
+  let pk = null;
+  /** @type {Promise|null} */
+  let initPromise = null;
+
+  /**
+   * @returns {Uint8Array|null}
+   */
+  function loadKey() {
+    try {
+      const hex = localStorage.getItem(SK_KEY);
+      if (hex && /^[0-9a-f]{64}$/i.test(hex)) {
+        return new Uint8Array(hex.match(/.{1,2}/g).map(b => parseInt(b, 16)));
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  /**
+   * @param {Uint8Array} key
+   */
+  function saveKey(key) {
+    try {
+      localStorage.setItem(
+        SK_KEY,
+        Array.from(key).map(b => b.toString(16).padStart(2, '0')).join('')
+      );
+    } catch (_) {}
+  }
+
+  /**
+   * Инициализация: загрузка библиотеки, восстановление/генерация
+   * ключа, создание пула. Идемпотентна.
+   * @returns {Promise<string>} Публичный ключ.
+   */
+  function init() {
+    if (initPromise) return initPromise;
+
+    initPromise = import(CDN).then(mod => {
+      nostr = (typeof mod.generateSecretKey === 'function')
+        ? mod
+        : (mod.default && typeof mod.default.generateSecretKey === 'function' ? mod.default : mod);
+
+      if (typeof nostr.generateSecretKey !== 'function') {
+        throw new Error('nostr-tools: несовместимый модуль');
+      }
+
+      sk = loadKey();
+      if (!sk) {
+        sk = nostr.generateSecretKey();
+        saveKey(sk);
+      }
+
+      pk = nostr.getPublicKey(sk);
+      pool = new nostr.SimplePool();
+
+      Logger.info('Nostr: готов, pubkey ' + pk.slice(0, 8) + '…');
+      return pk;
+    }).catch(err => {
+      initPromise = null;
+      Logger.error('Nostr: не загрузить nostr-tools', String(err && err.message || err));
+      try { bus.emit('net:status', { status: 'failed' }); } catch (_) {}
+      throw err;
+    });
+
+    return initPromise;
+  }
+
+  /**
+   * @returns {Object|null}
+   */
+  function lib() {
+    return nostr;
+  }
+
+  /**
+   * @returns {Uint8Array|null}
+   */
+  function getSecretKey() {
+    return sk;
+  }
+
+  /**
+   * @param {Uint8Array} newSk
+   * @returns {string}
+   * @throws {Error}
+   */
+  function setKey(newSk) {
+    if (!nostr) throw new Error('Nostr not ready');
+    if (!(newSk instanceof Uint8Array) || newSk.length !== 32) {
+      throw new Error('invalid secret key');
+    }
+
+    sk = newSk;
+    pk = nostr.getPublicKey(sk);
+    saveKey(sk);
+    Logger.info('Nostr: ключ заменён, pubkey ' + pk.slice(0, 8) + '…');
+    return pk;
+  }
+
+  /**
+   * @param {Object} template
+   * @returns {Object}
+   * @throws {Error}
+   */
+  function sign(template) {
+    if (!nostr || !sk) throw new Error('Nostr not ready');
+    return nostr.finalizeEvent(template, sk);
+  }
+
+  /**
+   * Публикация на все релеи; успех при первом принявшем.
+   * @param {Object} template
+   * @returns {Promise<Object>}
+   */
+  function publish(template) {
+    let ev;
+    try {
+      ev = sign(template);
+    } catch (e) {
+      return Promise.reject(e);
+    }
+
+    if (!pool) return Promise.reject(new Error('Nostr not ready'));
+
+    const urls = relays();
+    if (!urls.length) return Promise.reject(new Error('no relays configured'));
+
+    const PUBLISH_TIMEOUT = 30000;
+
+    const publishPromise = new Promise((resolve, reject) => {
+      let settled = false;
+      let failures = 0;
+
+      urls.forEach(url => {
+        pool.ensureRelay(url)
+          .then(relay => relay.publish(ev))
+          .then(() => {
+            if (!settled) {
+              settled = true;
+              resolve(ev);
+            }
+          })
+          .catch(err => {
+            failures++;
+            Logger.warn('Nostr: релей ' + url + ' не принял', String(err && err.message || err));
+
+            if (!settled && failures === urls.length) {
+              settled = true;
+              reject(new Error('no relay accepted'));
+            }
+          });
+      });
+    });
+
+    const timeoutPromise = new Promise((_, reject) => {
+      setTimeout(() => reject(new Error('publish timeout')), PUBLISH_TIMEOUT);
+    });
+
+    return Promise.race([publishPromise, timeoutPromise]);
+  }
+
+  /**
+   * @param {Array<Object>} filters
+   * @param {Object} handlers - {onevent, onclose}
+   * @returns {Object|null}
+   */
+  function subscribe(filters, handlers) {
+    if (!pool) return null;
+    return pool.subscribeMany(relays(), filters, handlers);
+  }
+
+  /**
+   * @returns {Array<string>}
+   */
+  function relays() {
+    return Config.get('relays', []);
+  }
+
+  /**
+   * @returns {string|null}
+   */
+  function getPubkey() {
+    return pk;
+  }
+
+  /**
+   * @returns {boolean}
+   */
+  function isReady() {
+    return !!(nostr && sk && pool);
+  }
+
+  function close() {
+    if (pool && typeof pool.close === 'function') {
+      try { pool.close(relays()); } catch (_) {}
+    }
+  }
+
+  return {
+    init,
+    sign,
+    publish,
+    subscribe,
+    ensureRelay(url) {
+      if (!pool) return Promise.reject(new Error('Nostr not ready'));
+      return pool.ensureRelay(url);
+    },
+    getPubkey,
+    getSecretKey,
+    setKey,
+    lib,
+    isReady,
+    relays,
+    close,
+  };
+}, ['Config', 'EventBus', 'Logger']);
 // ─── NET/Nostr ─── END ──────────────────────────────────────────────────────
 
 // ─── NET/Vault ─── START ────────────────────────────────────────────────────
 /**
- * Шифрование канона: NIP-44 self-ECDH. seal/open — единственная точка
- * криптографии payload.
+ * Шифрование приватного канона: NIP-44 self-ECDH.
+ * Единственная точка криптографии payload.
  */
+DI.register('Vault', function (Nostr) {
+  /**
+   * @returns {Promise<Object>}
+   * @throws {Error}
+   */
+  async function lib() {
+    await Nostr.init();
+    const n = Nostr.lib();
+    if (!n) throw new Error('nostr-tools not loaded');
+    return n;
+  }
+
+  /**
+   * @param {string} plaintext - JSON payload.
+   * @returns {Promise<string>} Шифртекст.
+   * @throws {Error}
+   */
+  async function seal(plaintext) {
+    const n = await lib();
+    const nip44 = n.nip44 && n.nip44.v2;
+    if (!nip44 || !nip44.utils || typeof nip44.encrypt !== 'function') {
+      throw new Error('NIP-44 unavailable');
+    }
+
+    const sk = Nostr.getSecretKey();
+    const pk = Nostr.getPubkey();
+    if (!sk || !pk) throw new Error('no secret key');
+
+    const conversationKey = nip44.utils.getConversationKey(sk, pk);
+    return nip44.encrypt(plaintext, conversationKey);
+  }
+
+  /**
+   * @param {string} ciphertext
+   * @returns {Promise<string>} Открытый JSON payload.
+   * @throws {Error}
+   */
+  async function open(ciphertext) {
+    const n = await lib();
+    const nip44 = n.nip44 && n.nip44.v2;
+    if (!nip44 || !nip44.utils || typeof nip44.decrypt !== 'function') {
+      throw new Error('NIP-44 unavailable');
+    }
+
+    const sk = Nostr.getSecretKey();
+    const pk = Nostr.getPubkey();
+    if (!sk || !pk) throw new Error('no secret key');
+
+    const conversationKey = nip44.utils.getConversationKey(sk, pk);
+    return nip44.decrypt(ciphertext, conversationKey);
+  }
+
+  return { seal, open };
+}, ['Nostr']);
 // ─── NET/Vault ─── END ──────────────────────────────────────────────────────
 
 // ─── NET/Crypto ─── START ───────────────────────────────────────────────────
 /**
- * Криптография аккаунта: nsec/npub/ncryptsec форматы, NIP-49.
+ * Криптография аккаунта: форматы ключей (nsec/npub/ncryptsec), NIP-49.
  */
+DI.register('Crypto', function (Nostr, Logger) {
+  /**
+   * @returns {Promise<Object>}
+   * @throws {Error}
+   */
+  async function lib() {
+    await Nostr.init();
+    const n = Nostr.lib();
+    if (!n) throw new Error('nostr-tools not loaded');
+    return n;
+  }
+
+  /**
+   * @returns {Promise<boolean>}
+   */
+  async function hasNip49() {
+    try {
+      const n = await lib();
+      return !!(n.nip49 && typeof n.nip49.encrypt === 'function' && typeof n.nip49.decrypt === 'function');
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /**
+   * @param {*} input
+   * @returns {'nsec'|'ncryptsec'|'hex'|null}
+   */
+  function classifyKeyInput(input) {
+    const t = String(input || '').trim();
+    if (t.startsWith('ncryptsec1')) return 'ncryptsec';
+    if (t.startsWith('nsec1')) return 'nsec';
+    if (/^[0-9a-fA-F]{64}$/.test(t)) return 'hex';
+    return null;
+  }
+
+  /**
+   * @param {*} input
+   * @returns {Promise<Uint8Array|null>}
+   */
+  async function decodeSecret(input) {
+    const t = String(input || '').trim();
+    if (!t) return null;
+
+    if (/^[0-9a-fA-F]{64}$/.test(t)) {
+      return new Uint8Array(t.match(/.{2}/g).map(b => parseInt(b, 16)));
+    }
+
+    try {
+      const n = await lib();
+      if (t.startsWith('nsec1') && n.nip19 && typeof n.nip19.decode === 'function') {
+        const dec = n.nip19.decode(t);
+        if (dec && dec.type === 'nsec' && dec.data instanceof Uint8Array && dec.data.length === 32) {
+          return dec.data;
+        }
+      }
+    } catch (_) {}
+
+    return null;
+  }
+
+  /**
+   * @param {Uint8Array} sk
+   * @param {string} password
+   * @returns {Promise<string|null>}
+   */
+  async function encryptKey(sk, password) {
+    try {
+      const n = await lib();
+      if (!n.nip49 || typeof n.nip49.encrypt !== 'function') return null;
+      return n.nip49.encrypt(sk, String(password || ''));
+    } catch (e) {
+      Logger.warn('Crypto: encryptKey', String(e && e.message || e));
+      return null;
+    }
+  }
+
+  /**
+   * @param {string} ncryptsec
+   * @param {string} password
+   * @returns {Promise<Uint8Array|null>}
+   */
+  async function decryptKey(ncryptsec, password) {
+    try {
+      const n = await lib();
+      if (!n.nip49 || typeof n.nip49.decrypt !== 'function') return null;
+
+      const res = n.nip49.decrypt(String(ncryptsec || '').trim(), String(password || ''));
+
+      if (res instanceof Uint8Array) return res.length === 32 ? res : null;
+      if (res && res.secretKey instanceof Uint8Array && res.secretKey.length === 32) return res.secretKey;
+      if (res && res.data instanceof Uint8Array && res.data.length === 32) return res.data;
+
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /**
+   * @param {Uint8Array} sk
+   * @returns {Promise<string|null>}
+   */
+  async function encodeNsec(sk) {
+    try {
+      const n = await lib();
+      return n.nip19 ? n.nip19.nsecEncode(sk) : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /**
+   * @param {string} pk
+   * @returns {Promise<string|null>}
+   */
+  async function encodeNpub(pk) {
+    try {
+      const n = await lib();
+      return n.nip19 ? n.nip19.npubEncode(pk) : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  return {
+    hasNip49,
+    classifyKeyInput,
+    decodeSecret,
+    encryptKey,
+    decryptKey,
+    encodeNsec,
+    encodeNpub,
+  };
+}, ['Nostr', 'Logger']);
 // ─── NET/Crypto ─── END ─────────────────────────────────────────────────────
 
 // ─── NET/Protocol ─── START ─────────────────────────────────────────────────
 /**
- * Кодек событий: канон состояний (canonPrivate/canonPublic/canonDeleted,
- * decodeCanon — свои расшифровывает, чужие публичные читает, чужие
- * приватные дают only-fact), запрос (queryEvent/decodeQuery),
- * ответ-ссылка (answerEvent/decodeAnswer). syncVersion для монотонности.
+ * Кодек событий: канон состояний (kind 30078, replaceable, d = uid)
+ * и служебные события (запрос 21000, ответ-ссылка 21001).
+ *
+ * Канон — единственное сетевое выражение заметки. created_at =
+ * version заметки (генерируется Notes при мутации). Формы:
+ * - private: content = NIP-44(payload); мир видит факт существования;
+ * - public: content = открытый JSON; мир видит всё;
+ * - deleted: content = открытый JSON факта удаления.
+ *
+ * Декодирование: JSON парсится для всех (public/deleted);
+ * при неудаче и совпадении владельца — NIP-44 (свой private);
+ * иначе — only-fact запись {uid, owner, version, private}.
  */
+DI.register('Protocol', function (Config, Vec, Vault, Nostr) {
+  /** @type {number} */
+  const MAX_CONTENT = 65536;
+
+  /**
+   * @param {Array} tags
+   * @param {string} name
+   * @returns {Array|null}
+   */
+  function findTag(tags, name) {
+    if (!Array.isArray(tags)) return null;
+    for (const t of tags) {
+      if (Array.isArray(t) && t[0] === name) return t;
+    }
+    return null;
+  }
+
+  /**
+   * Канон приватной версии.
+   * @param {Object} note - {uid, text, vector, parent, version}
+   * @returns {Promise<Object>} Шаблон события.
+   * @throws {Error} NIP-44 недоступен.
+   */
+  async function canonPrivate(note) {
+    const payload = {
+      v: 1,
+      visibility: 'private',
+      text: note.text || '',
+      vec: note.vector ? Vec.toB64(note.vector) : null,
+      parent: note.parent || null,
+      ts: note.updatedAt || note.version,
+    };
+
+    const content = await Vault.seal(JSON.stringify(payload));
+
+    return {
+      kind: Config.get('kCanon', 30078),
+      created_at: note.version,
+      tags: [
+        ['d', note.uid],
+        ['client', 'noomium'],
+        ['t', Config.get('room', 'noomium-main')],
+      ],
+      content,
+    };
+  }
+
+  /**
+   * Канон публичной версии.
+   * @param {Object} note - {uid, text, vector, parent, version}
+   * @returns {Promise<Object>} Шаблон события.
+   */
+  async function canonPublic(note) {
+    const payload = {
+      v: 1,
+      visibility: 'public',
+      text: note.text || '',
+      vec: note.vector ? Vec.toB64(note.vector) : null,
+      parent: note.parent || null,
+      ts: note.updatedAt || note.version,
+    };
+
+    return {
+      kind: Config.get('kCanon', 30078),
+      created_at: note.version,
+      tags: [
+        ['d', note.uid],
+        ['client', 'noomium'],
+        ['t', Config.get('room', 'noomium-main')],
+      ],
+      content: JSON.stringify(payload),
+    };
+  }
+
+  /**
+   * Канон удаления.
+   * @param {string} uid - Идентификатор заметки.
+   * @param {number} version - Версия удаления (последняя + 1).
+   * @returns {Promise<Object>} Шаблон события.
+   */
+  async function canonDeleted(uid, version) {
+    return {
+      kind: Config.get('kCanon', 30078),
+      created_at: version,
+      tags: [
+        ['d', uid],
+        ['client', 'noomium'],
+        ['t', Config.get('room', 'noomium-main')],
+      ],
+      content: JSON.stringify({ v: 1, visibility: 'deleted', ts: Date.now() }),
+    };
+  }
+
+  /**
+   * Декодирование канона.
+   * @param {Object} ev - Nostr-событие kind 30078.
+   * @returns {Promise<Object|null>} Запись:
+   *   {uid, owner, version, visibility, text?, vec?, parent?};
+   *   public/deleted — полные; свой private — расшифрованный полный;
+   *   чужой private — only-fact.
+   */
+  async function decodeCanon(ev) {
+    if (!ev || ev.kind !== Config.get('kCanon', 30078)) return null;
+
+    const dTag = findTag(ev.tags, 'd');
+    if (!dTag || typeof dTag[1] !== 'string' || !dTag[1]) return null;
+    if (typeof ev.content !== 'string' || !ev.content) return null;
+    if (ev.content.length > MAX_CONTENT) return null;
+    if (!ev.created_at) return null;
+
+    const uid = dTag[1];
+    const owner = ev.pubkey;
+    const version = ev.created_at;
+
+    let data = null;
+    try {
+      data = JSON.parse(ev.content);
+    } catch (_) {
+      data = null;
+    }
+
+    if (!data || typeof data !== 'object') {
+      if (owner === Nostr.getPubkey()) {
+        try {
+          data = JSON.parse(await Vault.open(ev.content));
+        } catch (_) {
+          return null;
+        }
+      } else {
+        return { uid, owner, version, visibility: 'private' };
+      }
+    }
+
+    if (!data || typeof data !== 'object') return null;
+
+    const visibility = data.visibility === 'public' ? 'public'
+      : data.visibility === 'deleted' ? 'deleted'
+      : 'private';
+
+    if (visibility === 'private' && owner !== Nostr.getPubkey()) {
+      return { uid, owner, version, visibility: 'private' };
+    }
+
+    if (visibility === 'deleted') {
+      return { uid, owner, version, visibility, deleted: true };
+    }
+
+    if (typeof data.text !== 'string') return null;
+    if (data.text.length > Config.get('maxNoteTextLength', 10000)) return null;
+
+    let vec = null;
+    if (typeof data.vec === 'string') {
+      const v = Vec.fromB64(data.vec);
+      if (v) vec = Array.from(v);
+    }
+
+    let parent = null;
+    if (data.parent && typeof data.parent === 'object' && typeof data.parent.uid === 'string' && data.parent.uid) {
+      parent = { uid: data.parent.uid, owner: data.parent.owner || null };
+    }
+
+    return { uid, owner, version, visibility, text: data.text, vec, parent };
+  }
+
+  /**
+   * @param {Float32Array|Array<number>} vector
+   * @param {number} maxResponses
+   * @param {number} window
+   * @returns {Object}
+   */
+  function queryEvent(vector, maxResponses, window) {
+    return {
+      kind: Config.get('kQuery', 21000),
+      created_at: Math.floor(Date.now() / 1000),
+      tags: [['t', Config.get('room', 'noomium-main')]],
+      content: JSON.stringify({ vector: Array.from(vector), maxResponses, window }),
+    };
+  }
+
+  /**
+   * @param {Object} ev
+   * @returns {Object|null} {vector, maxResponses, window, owner, queryId}
+   */
+  function decodeQuery(ev) {
+    if (!ev || ev.kind !== Config.get('kQuery', 21000)) return null;
+
+    let data;
+    try {
+      data = JSON.parse(ev.content);
+    } catch (_) {
+      return null;
+    }
+
+    if (!data || !Array.isArray(data.vector) || !data.vector.length) return null;
+
+    for (const x of data.vector) {
+      if (typeof x !== 'number' || !isFinite(x)) return null;
+    }
+
+    return {
+      vector: data.vector,
+      maxResponses: typeof data.maxResponses === 'number' ? data.maxResponses : Config.get('maxResponses', 8),
+      window: typeof data.window === 'number' ? data.window : Config.get('responseWindow', 6000),
+      owner: ev.pubkey,
+      queryId: ev.id,
+    };
+  }
+
+  /**
+   * Ответ-ссылка: указывает на заметку, не копирует её.
+   * @param {Object} note - Своя публичная заметка.
+   * @param {number} score
+   * @param {string} queryId
+   * @returns {Object}
+   */
+  function answerEvent(note, score, queryId) {
+    return {
+      kind: Config.get('kAnswer', 21001),
+      created_at: Math.floor(Date.now() / 1000),
+      tags: [
+        ['t', Config.get('room', 'noomium-main')],
+        ['e', queryId],
+        ['uid', note.uid],
+      ],
+      content: JSON.stringify({ score }),
+    };
+  }
+
+  /**
+   * @param {Object} ev
+   * @returns {Object|null} {queryId, uid, owner, score}
+   */
+  function decodeAnswer(ev) {
+    if (!ev || ev.kind !== Config.get('kAnswer', 21001)) return null;
+
+    const eTag = findTag(ev.tags, 'e');
+    const uidTag = findTag(ev.tags, 'uid');
+    if (!eTag || !uidTag || !uidTag[1]) return null;
+
+    let data = null;
+    try {
+      data = JSON.parse(ev.content);
+    } catch (_) {}
+
+    return {
+      queryId: eTag[1],
+      uid: uidTag[1],
+      owner: ev.pubkey,
+      score: data && typeof data.score === 'number' ? data.score : 0,
+    };
+  }
+
+  return {
+    canonPrivate,
+    canonPublic,
+    canonDeleted,
+    decodeCanon,
+    queryEvent,
+    decodeQuery,
+    answerEvent,
+    decodeAnswer,
+  };
+}, ['Config', 'Vec', 'Vault', 'Nostr']);
 // ─── NET/Protocol ─── END ───────────────────────────────────────────────────
 
 // ─── NET/NetService ─── START ───────────────────────────────────────────────
