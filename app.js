@@ -38,7 +38,7 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 // ВЕРСИЯ ПРИЛОЖЕНИЯ
 // ═══════════════════════════════════════════════════════════════════════════════
-const APP_VERSION = '0.8.2.3';
+const APP_VERSION = '0.8.3';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CORE/DI — ПРЕАМБУЛА
@@ -2921,30 +2921,33 @@ DI.register('Nostr', function (Config, bus, Logger) {
 
 // ─── NET/Protocol ─── START ─────────────────────────────────────────────────
 /**
- * Сериализация/десериализация Nostr-событий NOOmium.
+ * Кодек Nostr-событий NOOmium.
  *
- * МОДЕЛЬ СВЯЗЕЙ v0.8.1 (фикс резолва чужих дочек):
- * Локальная запись/канон: parentPk = null означает «родитель мой».
- * Публичная проекция: pk родителя пишется ВСЕГДА явно — для «моего»
- * родителя подставляется pubkey автора при упаковке (noteEvent).
- * Читатель резолвит пару (parentUid, parentPk) единым путём:
- * кэш чужих по (srcUid, srcPk), при pk === собственному — своя база
- * по uid. Без pk (старые события) — только своя база (v0.7-путь).
+ * v0.8.3: answerEvent несёт полную проекцию заметки — теги uid и parent.
+ * Ответ на запрос (kind 21001) и обычная публикация (kind 1) создают
+ * записи одинаковой полноты: у обеих есть srcUid, srcPk, parentUid,
+ * parentPk. Приём нормализуется единым путём в NetService.
  *
- * Виды событий:
- * - kind 1:     Публичная проекция (текст + вектор + parent + uid)
- * - kind 30078: Приватный канон (NIP-78, replaceable, d-tag = uid)
- * - kind 21000: Запрос, kind 21001: Ответ, kind 5: Удаление
+ * События:
+ * - kind 1:     Публичная проекция заметки.
+ * - kind 30078: Приватный канон (NIP-78, replaceable, d-tag = uid).
+ * - kind 21000: Запрос (вектор + параметры).
+ * - kind 21001: Ответ = полная проекция заметки + скор.
+ * - kind 5:     Удаление публичных проекций.
+ *
+ * Модель связей: родитель = (parentUid, parentPk). pk в публичном
+ * теге всегда явный (для «своего» родителя подставляется pubkey
+ * автора при упаковке). eventId в связях не участвует.
  */
 DI.register('Protocol', function (Config, Vec, Crypto, Nostr) {
-  /** Максимальная длина шифртекста 30078. */
+  /** @type {number} */
   const MAX_PRIVATE_CONTENT = 65536;
 
-  /** Монотонный счётчик created_at для replaceable-событий. */
+  /** @type {number} */
   let lastPrivateTs = 0;
 
   /**
-   * Следующий строго возрастающий timestamp (секунды).
+   * Строго возрастающий timestamp (секунды) для replaceable-событий.
    * @returns {number}
    */
   function nextPrivateTs() {
@@ -2968,13 +2971,8 @@ DI.register('Protocol', function (Config, Vec, Crypto, Nostr) {
     return null;
   }
 
-  // ─── Публичная проекция (kind 1) ──────────────────────────────────────────
-
   /**
    * Событие публичной проекции заметки.
-   * v0.8.1: тег parent = [parentUid, parentPk-ЯВНО]. Если локально
-   * parentPk = null («родитель мой») — подставляется pubkey автора.
-   * Читатель всегда получает однозначную пару для резолва.
    * @param {Object} note - Заметка (id = uid).
    * @param {string} room - Имя комнаты (тег t).
    * @returns {Object} Шаблон события (без подписи).
@@ -2998,7 +2996,7 @@ DI.register('Protocol', function (Config, Vec, Crypto, Nostr) {
   /**
    * Декодирование чужой публичной заметки (kind 1).
    * @param {Object} ev - Nostr-событие.
-   * @returns {Object|null} Заметка-кандидат для сетевого кэша.
+   * @returns {Object|null} Запись для кэша.
    */
   function decodeNote(ev) {
     if (!ev || ev.kind !== Config.get('kNote', 1)) return null;
@@ -3024,11 +3022,8 @@ DI.register('Protocol', function (Config, Vec, Crypto, Nostr) {
     };
   }
 
-  // ─── Приватный канон (kind 30078, NIP-78) ────────────────────────────────
-
   /**
    * Событие приватного канона заметки. Полная версия (upsert).
-   * Локальная семантика parentPk (null = «мой») сохраняется в каноне.
    * @param {Object} note - Локальная заметка (id = uid).
    * @returns {Promise<Object>} Шаблон события с зашифрованным content.
    * @throws {Error} При недоступности NIP-44.
@@ -3134,8 +3129,6 @@ DI.register('Protocol', function (Config, Vec, Crypto, Nostr) {
     };
   }
 
-  // ─── Запрос / ответ / удаление ────────────────────────────────────────────
-
   /**
    * Событие запроса (kind 21000).
    * @param {Float32Array|Array<number>} vector - Вектор запроса.
@@ -3183,7 +3176,9 @@ DI.register('Protocol', function (Config, Vec, Crypto, Nostr) {
   }
 
   /**
-   * Событие ответа (kind 21001).
+   * Событие ответа (kind 21001). v0.8.3: полная проекция заметки —
+   * теги uid и parent, вектор в content. Ответ и kind 1-публикация
+   * создают записи одинаковой полноты.
    * @param {Object} note - Локальная заметка.
    * @param {number} score - Скор сходства.
    * @param {string} queryId - ID запроса.
@@ -3191,10 +3186,19 @@ DI.register('Protocol', function (Config, Vec, Crypto, Nostr) {
    * @returns {Object} Шаблон события.
    */
   function answerEvent(note, score, queryId, room) {
+    const tags = [['t', room], ['e', queryId], ['uid', note.id]];
+    if (note.parentUid) {
+      const parentPk = note.parentPk || Nostr.getPubkey() || '';
+      tags.push(['parent', note.parentUid, parentPk]);
+    }
+    if (note.eventId) {
+      tags.push(['ev', note.eventId]);
+    }
+
     return {
       kind: Config.get('kAnswer', 21001),
       created_at: Math.floor(Date.now() / 1000),
-      tags: [['t', room], ['e', queryId]],
+      tags,
       content: JSON.stringify({
         noteId: note.id,
         text: note.text,
@@ -3205,7 +3209,10 @@ DI.register('Protocol', function (Config, Vec, Crypto, Nostr) {
   }
 
   /**
-   * Декодирование ответа (kind 21001).
+   * Декодирование ответа (kind 21001). v0.8.3: вычитывает uid/parent
+   * теги — запись полноты kind 1. Ответы без uid-тега (старый формат)
+   * возвращаются с srcUid = null: NetService кладёт их в кэш,
+   * но Feed не рендерит (неполная запись).
    * @param {Object} ev - Nostr-событие.
    * @returns {Object|null}
    */
@@ -3214,6 +3221,10 @@ DI.register('Protocol', function (Config, Vec, Crypto, Nostr) {
 
     const eTag = findTag(ev.tags, 'e');
     if (!eTag) return null;
+
+    const uidTag = findTag(ev.tags, 'uid');
+    const pTag = findTag(ev.tags, 'parent');
+    const evTag = findTag(ev.tags, 'ev');
 
     let data;
     try {
@@ -3236,11 +3247,16 @@ DI.register('Protocol', function (Config, Vec, Crypto, Nostr) {
     return {
       id: ev.id,
       queryId: eTag[1],
-      noteId: data.noteId || ev.id,
+      noteId: uidTag ? uidTag[1] : (data.noteId || ev.id),
       text: data.text,
       vector,
       score: typeof data.score === 'number' ? data.score : 0,
       authorPubkey: ev.pubkey,
+      srcUid: uidTag ? uidTag[1] : null,
+      srcPk: ev.pubkey,
+      parentUid: pTag ? pTag[1] : null,
+      parentPk: pTag ? (pTag[2] || null) : null,
+      eventId: evTag ? evTag[1] : null,
       createdAt: (ev.created_at || 0) * 1000,
     };
   }
@@ -3303,17 +3319,18 @@ DI.register('Protocol', function (Config, Vec, Crypto, Nostr) {
 /**
  * Оркестрация Nostr-сети: подписки, публикация, обработка входящих.
  *
+ * v0.8.3: единая точка приёма чужого контента — upsertCacheEntry.
+ * Каналы kind 1 и kind 21001 нормализуются в записи одинаковой
+ * полноты и проходят один путь: идемпотентный upsert по
+ * (srcUid, srcPk) + чистка старых eventId-версий источника.
+ * Дубли физически невозможны: вторая запись того же источника
+ * обновляет первую. Неполные записи (answer без uid-тега,
+ * старый формат) — в кэш с incomplete: true, Feed не рендерит.
+ *
  * Три канала:
  * 1. Комнатная подписка (kind 1/21000/21001/5 по тегу t).
- * 2. Подписка на себя (kind 30078) — живой синк.
+ * 2. Подписка на себя (kind 30078) — живой синк между устройствами.
  * 3. Исходящая публикация: канон (30078) + проекции (kind 1).
- *
- * v0.8.2-ф3 (баг «мама не возвращается»): приём чужой заметки при
- * срабатывании contentDuplicate проверяет кэш — если заметки с этим id
- * НЕТ в кэше, это не дубликат, а ВОЗВРАЩЕНИЕ источника после
- * отзыв-цикла: кладём. Устойчиво к порядку доставки (kind 5 может
- * прийти позже нового события — раньше это теряло заметку навсегда).
- * Плюс чистка contentSeen автора при kind 5 (страховка).
  */
 DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Config, Logger, bus) {
   let started = false;
@@ -3334,17 +3351,17 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   let reconnectAttempts = 0;
   let busUnsubs = [];
 
-  /** @type {Set<string>} seen для комнатной подписки. */
+  /** @type {Set<string>} */
   const seen = new Set();
-  /** @type {Set<string>} seen для подписки на себя. */
+  /** @type {Set<string>} */
   const selfSeen = new Set();
-  /** @type {Map<string, boolean>} дедупликация контента. */
+  /** @type {Map<string, boolean>} */
   const contentSeen = new Map();
-  /** @type {Map<string, number>} активные пиры. */
+  /** @type {Map<string, number>} */
   const peers = new Map();
-  /** @type {Map<string, number>} время последнего запроса от пира. */
+  /** @type {Map<string, number>} */
   const peerQueryTimes = new Map();
-  /** @type {Map<string, {tokens:number, ts:number}>} token bucket'ы. */
+  /** @type {Map<string, {tokens:number, ts:number}>} */
   const peerNoteBudgets = new Map();
 
   let currentWindow = Config.get('subWindow', 300);
@@ -3354,7 +3371,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   const OUTBOX_KEY = 'noomium:outbox';
 
   /**
-   * Загрузка outbox (четыре очереди).
+   * Загрузка outbox из localStorage.
    * @returns {{announce: string[], del: string[], priv: string[], privdel: string[]}}
    */
   function loadOutbox() {
@@ -3374,7 +3391,9 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     return { announce: [], del: [], priv: [], privdel: [] };
   }
 
-  /** Сохранить outbox. */
+  /**
+   * Сохранить outbox.
+   */
   function saveOutbox() {
     try {
       localStorage.setItem(OUTBOX_KEY, JSON.stringify(outbox));
@@ -3390,12 +3409,14 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   const kDelete = () => Config.get('kDelete', 5);
   const room = () => Config.get('room', 'noomium-main');
 
+  /**
+   * @param {string} s
+   */
   function setStatus(s) {
     try { bus.emit('net:status', { status: s }); } catch (_) {}
   }
 
   /**
-   * Фаза синка: 'off' | 'active' | 'idle'.
    * @param {string} phase
    */
   function emitSync(phase) {
@@ -3414,19 +3435,92 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     try { bus.emit('net:history', { loading: loading, window: windowSec }); } catch (_) {}
   }
 
-  /** @returns {boolean} */
+  /**
+   * @returns {boolean}
+   */
   function isOffline() {
     return typeof navigator !== 'undefined' && navigator.onLine === false;
   }
 
-  /** @returns {boolean} */
+  /**
+   * @returns {boolean}
+   */
   function canPublish() {
     return Nostr.isReady() && !isOffline();
   }
 
+  // ─── Единый приём чужого контента ─────────────────────────────────────────
+
+  /**
+   * Идемпотентный upsert записи в сетевой кэш.
+   * Ключ идентичности — (srcUid, srcPk): запись того же источника
+   * обновляется (свежий createdAt выигрывает), не дублируется.
+   * Одновременно удаляются старые eventId-версии того же источника.
+   * Неполные записи (без srcUid) кладутся с incomplete: true —
+   * Feed их не рендерит (Требование 1: неполные невидимы), но кэш
+   * знает об их существовании для вытеснения при полной версии.
+   * @param {Object} record - Нормализованная запись
+   *   {id, srcUid, srcPk, authorPubkey, parentUid, parentPk,
+   *   text, vector, createdAt, score?, eventId?}.
+   * @returns {Promise<void>}
+   */
+  async function upsertCacheEntry(record) {
+    try {
+      const cached = await DB.cacheAll();
+
+      if (record.srcUid && record.srcPk) {
+        const same = cached.find(c =>
+          c && c.srcUid === record.srcUid && c.srcPk === record.srcPk
+        );
+
+        if (same) {
+          if (same.createdAt && record.createdAt && same.createdAt >= record.createdAt) {
+            return;
+          }
+
+          const staleIds = cached
+            .filter(c => c && c.srcUid === record.srcUid && c.srcPk === record.srcPk && c.id !== record.id)
+            .map(c => c.id);
+
+          for (const sid of staleIds) {
+            await DB.cacheDel(sid).catch(() => {});
+          }
+
+          await DB.cachePut(record);
+          notifyPeers();
+          return;
+        }
+
+        const staleIds2 = cached
+          .filter(c => c && c.srcUid === record.srcUid && c.srcPk === record.srcPk && c.id !== record.id)
+          .map(c => c.id);
+
+        for (const sid of staleIds2) {
+          await DB.cacheDel(sid).catch(() => {});
+        }
+
+        await DB.cachePut(record);
+        notifyPeers();
+        return;
+      }
+
+      const existing = await DB.cacheGet(record.id);
+      if (existing && existing.createdAt && record.createdAt && existing.createdAt > record.createdAt) {
+        return;
+      }
+
+      await DB.cachePut(record);
+      notifyPeers();
+    } catch (e) {
+      Logger.warn('NetService: upsertCacheEntry', String(e && e.message || e));
+    }
+  }
+
   // ─── Outbox: очереди ──────────────────────────────────────────────────────
 
-  /** @param {string} id */
+  /**
+   * @param {string} id
+   */
   function queueAnnounce(id) {
     if (!id) return;
     if (outbox.announce.indexOf(id) === -1) {
@@ -3436,7 +3530,9 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     scheduleFlush();
   }
 
-  /** @param {string} id */
+  /**
+   * @param {string} id
+   */
   function unqueueAnnounce(id) {
     if (!id) return;
     const i = outbox.announce.indexOf(id);
@@ -3446,7 +3542,9 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     }
   }
 
-  /** @param {string} id */
+  /**
+   * @param {string} id
+   */
   function queuePrivate(id) {
     if (!id) return;
     if (outbox.priv.indexOf(id) === -1) {
@@ -3456,7 +3554,9 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     scheduleFlush();
   }
 
-  /** @param {string} id */
+  /**
+   * @param {string} id
+   */
   function unqueuePrivate(id) {
     if (!id) return;
     const i = outbox.priv.indexOf(id);
@@ -3466,7 +3566,9 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     }
   }
 
-  /** @param {string} id */
+  /**
+   * @param {string} id
+   */
   function queuePrivDel(id) {
     if (!id) return;
     if (outbox.privdel.indexOf(id) === -1) {
@@ -3476,7 +3578,9 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     scheduleFlush();
   }
 
-  /** @param {string} id */
+  /**
+   * @param {string} id
+   */
   function unqueuePrivDel(id) {
     if (!id) return;
     const i = outbox.privdel.indexOf(id);
@@ -3486,7 +3590,9 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     }
   }
 
-  /** @param {string} id */
+  /**
+   * @param {string} id
+   */
   function queueDelete(id) {
     if (!id) return;
     if (outbox.del.indexOf(id) === -1) {
@@ -3496,7 +3602,9 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     scheduleFlush();
   }
 
-  /** @param {string} id */
+  /**
+   * @param {string} id
+   */
   function unqueueDelete(id) {
     if (!id) return;
     const i = outbox.del.indexOf(id);
@@ -3507,7 +3615,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   }
 
   /**
-   * Отложить сброс outbox.
    * @param {number} [delay]
    */
   function scheduleFlush(delay) {
@@ -3531,7 +3638,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     flushing = true;
 
     try {
-      // Фаза 1: приватный канон — последовательно.
       if (Config.get('syncEnabled', true)) {
         for (const uid of outbox.priv.slice()) {
           const note = await DB.get(uid).catch(() => null);
@@ -3547,13 +3653,10 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
             note.canonTs = now;
             if (!note.syncTs) note.syncTs = now;
             DB.put(note).catch(() => {});
-          } catch (_) {
-            // В очереди для повторной попытки.
-          }
+          } catch (_) {}
         }
       }
 
-      // Фаза 2: публичные проекции — параллельно.
       const announceIds = outbox.announce.slice();
       const tasks = announceIds.map(async noteId => {
         const note = await DB.get(noteId).catch(() => null);
@@ -3574,13 +3677,10 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
               publishPrivate(cur);
             }
           }
-        } catch (_) {
-          // В очереди.
-        }
+        } catch (_) {}
       });
       await Promise.allSettled(tasks);
 
-      // Фаза 3: kind 5 — пачкой.
       if (outbox.del.length) {
         const ev = Protocol.deleteEvent(outbox.del.slice(), room());
         if (ev) {
@@ -3588,22 +3688,17 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
             await Nostr.publish(ev);
             outbox.del = [];
             saveOutbox();
-          } catch (_) {
-            // В очереди.
-          }
+          } catch (_) {}
         }
       }
 
-      // Фаза 4: tombstone'ы — последовательно.
       if (Config.get('syncEnabled', true)) {
         for (const uid of outbox.privdel.slice()) {
           try {
             const tpl = await Protocol.privateTombstone(uid);
             await Nostr.publish(tpl);
             unqueuePrivDel(uid);
-          } catch (_) {
-            // В очереди.
-          }
+          } catch (_) {}
         }
       }
     } catch (_) {} finally {
@@ -3637,8 +3732,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   // ─── Приватный канон: публикация ──────────────────────────────────────────
 
   /**
-   * Опубликовать канон заметки. При успехе ставит canonTs.
-   * @param {Object} note - Локальная заметка.
+   * @param {Object} note
    * @returns {Promise<void>}
    */
   async function publishPrivate(note) {
@@ -3665,8 +3759,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   }
 
   /**
-   * Опубликовать tombstone канона.
-   * @param {string} uid - Идентификатор заметки.
+   * @param {string} uid
    * @returns {Promise<void>}
    */
   async function tombstoneNote(uid) {
@@ -3689,7 +3782,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   }
 
   /**
-   * Одноразовый backsweep: публикация канона для всех локальных заметок.
    * @returns {Promise<void>}
    */
   async function runBacksweep() {
@@ -3732,8 +3824,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   // ─── Приватный канон: приём ───────────────────────────────────────────────
 
   /**
-   * Применить входящий канон (LWW по syncTs, tombstone = удаление).
-   * @param {Object} d - Результат Protocol.decodePrivate.
+   * @param {Object} d
    * @returns {Promise<void>}
    */
   async function applyIncomingPrivate(d) {
@@ -3742,7 +3833,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     try {
       const cur = await DB.get(d.id);
 
-      // Tombstone — удаление
       if (d.deleted) {
         if (!cur) return;
         if (!cur.syncTs || d.syncTs > cur.syncTs) {
@@ -3752,7 +3842,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
         return;
       }
 
-      // Полная версия
       if (!cur) {
         await DB.put({
           id: d.id,
@@ -3796,7 +3885,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
 
   // ─── Подписка на себя ─────────────────────────────────────────────────────
 
-  /** Подписка на собственный приватный канон (живой синк + restore). */
   function subscribeSelf() {
     const pk = Nostr.getPubkey();
     if (!pk) return;
@@ -3875,7 +3963,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     });
   }
 
-  /** Обрезка seen. */
   function trimSeen() {
     const max = Config.get('seenMaxSize', 1000);
     if (seen.size <= max) return;
@@ -3889,7 +3976,8 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   }
 
   /**
-   * Дедупликация контента от одного автора.
+   * Дедупликация контента — подсказка «возможно возврат», не приговор.
+   * Окончательное решение принимает вызывающий (по наличию в кэше).
    * @param {string} pubkey
    * @param {string} text
    * @returns {boolean}
@@ -3939,7 +4027,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     return false;
   }
 
-  /** Перестройка центроидов префильтра. */
   function rebuildCentroids() {
     DB.all().then(notes => {
       const vecs = notes.filter(n => n.shared && n.vector).map(n => n.vector);
@@ -3974,7 +4061,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   // ─── Входящие события (комната) ───────────────────────────────────────────
 
   /**
-   * @param {boolean} hard - true при реальном событии (сброс реконнектов).
+   * @param {boolean} hard
    */
   function markConnected(hard) {
     if (!started) return;
@@ -3988,7 +4075,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     flushOutbox();
   }
 
-  /** Обработчик событий комнатной подписки. */
   function onEvent(ev) {
     if (!ev) return;
 
@@ -4023,10 +4109,9 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   }
 
   /**
-   * Приём чужой публичной заметки.
-   * v0.8.2-ф3: contentDuplicate больше не приговор — если заметки нет
-   * в кэше, это ВОЗВРАЩЕНИЕ источника (цикл отзыв→возврат, kind 5
-   * мог прийти позже нового события). Кладём.
+   * Приём kind 1. Нормализация и единый upsert.
+   * Дубль-контент при отсутствии в кэше = возврат источника —
+   * принимаем (гонки порядка доставки нейтрализованы).
    * @param {Object} ev
    * @returns {boolean}
    */
@@ -4039,47 +4124,71 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
       return false;
     }
 
-    // Эхо своей проекции: по id события или по моему uid в теге.
     if (DB.hasLocal(note.id)) return true;
     if (note.srcUid && DB.hasLocal(note.srcUid)) return true;
 
     peers.set(note.authorPubkey, Date.now());
 
     const dup = isContentDuplicate(note.authorPubkey, note.text);
-
-    if (dup && !DB.hasCache(note.id)) {
-      // v0.8.2-ф3: контент «видели», но в кэше его нет — источник
-      // вернулся. Продолжаем приём, кэш ниже решит окончательно.
-      Logger.debug('NetService: возврат источника после дубля', note.id.slice(0, 8));
-    } else if (dup) {
-      // Настоящий дубликат: контент видели И заметка уже в кэше.
+    if (dup && !note.srcUid) {
+      return true;
+    }
+    if (dup && DB.hasCache(note.id)) {
       return true;
     }
 
-    DB.cacheAll().then(cached => {
-      // Чистка старых версий того же источника (переиздание).
-      if (note.srcUid && note.srcPk) {
-        const stale = cached.filter(c =>
-          c && c.srcUid === note.srcUid && c.srcPk === note.srcPk && c.id !== note.id
-        );
-        if (stale.length) {
-          Promise.all(stale.map(c => DB.cacheDel(c.id).catch(() => {})))
-            .then(() => DB.cachePut(note))
-            .then(() => notifyPeers())
-            .catch(() => {});
-          return;
-        }
-      }
+    upsertCacheEntry({
+      id: note.id,
+      text: note.text,
+      vector: note.vector,
+      shared: true,
+      authorPubkey: note.authorPubkey,
+      srcUid: note.srcUid,
+      srcPk: note.srcPk,
+      parentUid: note.parentUid,
+      parentPk: note.parentPk,
+      createdAt: note.createdAt,
+    });
 
-      DB.cacheGet(note.id).then(existing => {
-        if (existing && existing.createdAt && note.createdAt && existing.createdAt > note.createdAt) {
-          return;
-        }
+    return true;
+  }
 
-        DB.cachePut(note);
-        notifyPeers();
-      }).catch(() => {});
-    }).catch(() => {});
+  /**
+   * Приём kind 21001. v0.8.3: нормализация в запись полноты kind 1
+   * и единый upsert. Ответ с uid-тегом = полноправная запись со
+   * связью; без тега — incomplete (кэш знает, лента не рендерит).
+   * @param {Object} ev
+   * @returns {boolean}
+   */
+  function handleIncomingAnswer(ev) {
+    const a = Protocol.decodeAnswer(ev);
+
+    if (!a) return true;
+
+    if (a.queryId !== activeQueryId) {
+      return true;
+    }
+
+    if (DB.hasLocal(a.id)) return true;
+    if (a.srcUid && DB.hasLocal(a.srcUid)) return true;
+
+    peers.set(a.authorPubkey, Date.now());
+
+    upsertCacheEntry({
+      id: a.id,
+      text: a.text,
+      vector: a.vector,
+      shared: true,
+      authorPubkey: a.authorPubkey,
+      srcUid: a.srcUid,
+      srcPk: a.srcPk,
+      parentUid: a.parentUid,
+      parentPk: a.parentPk,
+      createdAt: a.createdAt,
+      score: a.score,
+      eventId: a.eventId,
+      incomplete: !a.srcUid,
+    });
 
     return true;
   }
@@ -4137,40 +4246,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
    * @param {Object} ev
    * @returns {boolean}
    */
-  function handleIncomingAnswer(ev) {
-    const a = Protocol.decodeAnswer(ev);
-
-    if (!a) return true;
-
-    if (a.queryId !== activeQueryId) {
-      return true;
-    }
-
-    if (isContentDuplicate(a.authorPubkey, a.text)) {
-      return true;
-    }
-
-    peers.set(a.authorPubkey, Date.now());
-
-    DB.cachePut({
-      id: a.id,
-      text: a.text,
-      vector: a.vector,
-      shared: true,
-      authorPubkey: a.authorPubkey,
-      createdAt: a.createdAt,
-      score: a.score,
-    });
-
-    notifyPeers();
-
-    return true;
-  }
-
-  /**
-   * @param {Object} ev
-   * @returns {boolean}
-   */
   function handleIncomingDelete(ev) {
     const del = Protocol.decodeDelete(ev);
 
@@ -4180,8 +4255,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
       if (eventId) DB.cacheDel(eventId);
     });
 
-    // v0.8.2: чистка «виденного контента» автора — при последующем
-    // возврате источника приём не задушится дедупликацией.
     if (del.authorPubkey) {
       const prefix = del.authorPubkey + '::';
       for (const key of Array.from(contentSeen.keys())) {
@@ -4197,7 +4270,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   // ─── Исходящие операции ───────────────────────────────────────────────────
 
   /**
-   * Анонс публичной проекции (kind 1).
    * @param {Object} note
    * @returns {Promise<void>}
    */
@@ -4235,8 +4307,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   }
 
   /**
-   * Запрос удаления публичной проекции (kind 5).
-   * @param {Object} note - Заметка (нужны id и eventId).
+   * @param {Object} note
    * @returns {Promise<void>}
    */
   async function forgetNote(note) {
@@ -4304,7 +4375,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
 
   // ─── Подписка на комнату ──────────────────────────────────────────────────
 
-  /** Подписка на комнату с экспоненциальным реконнектом. */
   function subscribeToRoom() {
     const since = Math.floor(Date.now() / 1000) - currentWindow;
     const filters = [{
@@ -4360,7 +4430,9 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     }
   }
 
-  /** Расширение окна истории («Загрузить ещё»). */
+  /**
+   * Расширение окна истории.
+   */
   function loadHistory() {
     if (!started || historyLoading) return;
 
@@ -4386,7 +4458,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     }
   }
 
-  /** Heartbeat: чистка пиров и лимитеров. */
   function startHeartbeat() {
     if (hbTimer) clearInterval(hbTimer);
 
@@ -4457,8 +4528,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
           if (note.id) unqueueAnnounce(note.id);
 
           if (!note.shared && note.eventId) {
-            // Сброс eventId для повторной публикации проекции.
-            // Дети не трогаются — их ссылки (parentUid) стабильны.
             const oldEventId = note.eventId;
 
             DB.get(note.id).then(cur => {
@@ -4488,7 +4557,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
 
         busUnsubs.push(bus.on('db:change', () => rebuildCentroids()));
 
-        // Смена ключа: очереди и лимитеры принадлежат старому аккаунту.
         busUnsubs.push(bus.on('account:changed', () => {
           outbox = { announce: [], del: [], priv: [], privdel: [] };
           saveOutbox();
@@ -4566,7 +4634,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   }
 
   /**
-   * @param {boolean} full - Полная остановка с очисткой лимитеров.
+   * @param {boolean} full
    */
   function stop(full) {
     started = false;
@@ -4625,8 +4693,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   }
 
   /**
-   * Публичный wipe: tombstone'ы и kind 5 в персистентный outbox,
-   * доставка с бюджетом 15 секунд.
    * @returns {Promise<void>}
    */
   async function publishWipeAll() {
@@ -4987,30 +5053,28 @@ DI.register('Context', function (Store, Embedder, Config, Utils, bus) {
 /**
  * Формирование ленты.
  *
+ * v0.8.3:
+ * - Дедупликация кэша против своих по ТРЁМ ключам: uid, eventId,
+ *   srcUid. Кэш-запись, чей srcUid совпадает с uid моей заметки —
+ *   это моё собственное переиздание, вернувшееся эхом: исключается
+ *   (любой канал происхождения).
+ * - Неполные записи (answer без uid-тега, incomplete: true) не
+ *   рендерятся: пользователь не видит «призраков» без связей.
+ *
  * Два режима:
- * 1. Без контекста (source === null):
- *    Все заметки (локальные + сетевые) в хронологическом порядке.
+ * 1. Без контекста: локальные + кэш в хронологическом порядке.
+ * 2. С контекстом: ранжирование по сходству с вектором контекста.
  *
- * 2. С контекстом (pin / drift / input):
- *    Ранжирование по косинусному сходству с вектором контекста.
- *    Разделение на relevant (>= threshold) и serendipity (ниже порога,
- *    но в пределах окна озарений).
- *
- * Обновление триггерится:
- * - Изменением контекста (подписка на Store)
- * - Изменением локальной БД (db:change) — включая заметки, применённые
- *   из приватного канона (sync)
- * - Изменением сетевого кэша (db:cache)
+ * Триггеры: context (Store), db:change, db:cache. seq-guard от гонок.
  */
 DI.register('Feed', function (DB, Ranker, Store, bus, Logger) {
-  /** Счётчик поколений для защиты от гонок. */
+  /** @type {number} */
   let seq = 0;
   /** @type {Array<Function>} */
   let unsubs = [];
 
   /**
-   * Пересборка ленты. Если за время асинхронной работы пришёл новый вызов,
-   * результат устаревшего отбрасывается (seq-guard).
+   * Пересборка ленты. Результат устаревшего вызова отбрасывается.
    * @returns {Promise<void>}
    */
   function refresh() {
@@ -5021,20 +5085,19 @@ DI.register('Feed', function (DB, Ranker, Store, bus, Logger) {
       if (my !== seq) return;
 
       if (!ctx.source) {
-        // Режим 1: без контекста — хронологический поток
-
-        // Дедупликация: исключаем из cached заметки, уже существующие
-        // локально (по id или eventId). Вторая линия обороны после
-        // DB.hasLocal в NetService.
         const localIds = new Set();
         local.forEach(n => {
-          if (n && n.id) localIds.add(n.id);
-          if (n && n.eventId) localIds.add(n.eventId);
+          if (!n) return;
+          if (n.id) localIds.add(n.id);
+          if (n.eventId) localIds.add(n.eventId);
         });
 
         const filteredCached = cached.filter(n => {
           if (!n || !n.id) return false;
-          return !localIds.has(n.id);
+          if (n.incomplete) return false;
+          if (localIds.has(n.id)) return false;
+          if (n.srcUid && localIds.has(n.srcUid)) return false;
+          return true;
         });
 
         const merged = [
@@ -5052,7 +5115,6 @@ DI.register('Feed', function (DB, Ranker, Store, bus, Logger) {
 
       if (!ctx.vector) return;
 
-      // Режим 2: ранжирование по сходству
       const items = [];
       const dataMap = new Map();
 
@@ -5064,10 +5126,10 @@ DI.register('Feed', function (DB, Ranker, Store, bus, Logger) {
       }
 
       for (const n of cached) {
-        if (n && n.vector) {
-          items.push({ id: n.id, vector: n.vector });
-          dataMap.set(n.id, Object.assign({}, n, { own: false }));
-        }
+        if (!n || !n.vector || n.incomplete) continue;
+        if (n.srcUid && dataMap.has(n.srcUid)) continue;
+        items.push({ id: n.id, vector: n.vector });
+        dataMap.set(n.id, Object.assign({}, n, { own: false }));
       }
 
       return Ranker.cosineBatch(ctx.vector, items).then(scored => {
@@ -5107,7 +5169,9 @@ DI.register('Feed', function (DB, Ranker, Store, bus, Logger) {
     refresh();
   }
 
-  /** Отписка от всех триггеров. */
+  /**
+   * Отписка от всех триггеров.
+   */
   function destroy() {
     unsubs.forEach(u => {
       try { u(); } catch (_) {}
