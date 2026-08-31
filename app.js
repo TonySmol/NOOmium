@@ -38,7 +38,7 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 // ВЕРСИЯ ПРИЛОЖЕНИЯ
 // ═══════════════════════════════════════════════════════════════════════════════
-const APP_VERSION = '0.8.4a';
+const APP_VERSION = '0.8.4b';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CORE/DI — ПРЕАМБУЛА
@@ -1536,17 +1536,14 @@ DI.register('Vec', function () {
  * Слой хранения: IndexedDB с fallback в память.
  * Два хранилища: notes (свои), cache (чужие).
  *
- * v0.8.4: единая функция идентичности noteKey(n) — ключ заметки
- * независимо от канала доставки и версии события:
- * - своя → 'uid:' + id;
- * - чужая → 'src:' + srcUid + ':' + srcPk;
- * один ответ на вопрос «та же ли заметка» для всех потребителей
- * (Feed-дедуп, фильтр пина, upsert).
+ * v0.8.4: noteKey(n) — единый ключ идентичности заметки.
+ * Persist-кладбище удалённых (localStorage): приём проверяет
+ * «мертва ли запись» — воскрешение старых событий невозможно,
+ * честный возврат (событие новее удаления) проходит.
  *
- * Persist-кладбище удалённых чужих eventId/srcUid с timestamp
- * (localStorage, кольцевой лимит): приём любой записи проверяет
- * кладбище — воскрешение удалённых/скрытых источников невозможно
- * by design (старое событие < удаления → отброс).
+ * v0.8.4-fix: bury принимает авторский timestamp (время события
+ * delete по часам автора, а не локальное время получения).
+ * Граница равенства трактуется в пользу жизни.
  */
 DI.register('DB', function (Config, bus, Logger) {
   let db = null;
@@ -1584,9 +1581,8 @@ DI.register('DB', function (Config, bus, Logger) {
   }
 
   /**
-   * Ключ идентичности заметки. Единственный механизм ответа
-   * на «та же ли заметка» для всех потребителей.
-   * @param {Object} n - Запись (своя из notes или чужая из cache).
+   * Ключ идентичности заметки.
+   * @param {Object} n - Запись (своя или чужая).
    * @returns {string|null}
    */
   function noteKey(n) {
@@ -1601,8 +1597,7 @@ DI.register('DB', function (Config, bus, Logger) {
   }
 
   /**
-   * Загрузка кладбища из localStorage.
-   * @returns {Object} {eventId: ts, key: ts}
+   * @returns {Object}
    */
   function loadGraveyard() {
     try {
@@ -1616,7 +1611,7 @@ DI.register('DB', function (Config, bus, Logger) {
   }
 
   /**
-   * Сохранение кладбища (с кольцевым лимитом).
+   * Сохранение кладбища с кольцевым лимитом.
    */
   function saveGraveyard() {
     try {
@@ -1634,41 +1629,42 @@ DI.register('DB', function (Config, bus, Logger) {
   let graveyard = loadGraveyard();
 
   /**
-   * Похоронить: чужой eventId и/или ключ источника с timestamp.
-   * @param {string} [eventId] - ID удалённого события.
-   * @param {string} [key] - Ключ источника (noteKey).
+   * Похоронить: eventId и/или ключ источника.
+   * ts — авторское время удаления (ms); по умолчанию локальное.
+   * @param {string} [eventId]
+   * @param {string} [key]
+   * @param {number} [ts]
    */
-  function bury(eventId, key) {
-    const ts = Date.now();
-    if (eventId) graveyard['ev:' + eventId] = ts;
-    if (key) graveyard[key] = ts;
+  function bury(eventId, key, ts) {
+    const t = (typeof ts === 'number' && ts > 0) ? ts : Date.now();
+    if (eventId) graveyard['ev:' + eventId] = t;
+    if (key) graveyard[key] = t;
     saveGraveyard();
   }
 
   /**
-   * Проверка: мертва ли запись (воскрешение старого события).
-   * Запись жива, если её ключ/eventId не в кладбище, ИЛИ её событие
-   * новее момента удаления (честный возврат переизданием).
-   * @param {Object} record - Кэш-запись или {id, key}.
-   * @param {number} eventTs - Timestamp события (ms).
-   * @returns {boolean} true — мертва, отбросить.
+   * Мертва ли запись. Событие строго старее удаления — мертва;
+   * равенство или новее — жива (честный возврат).
+   * @param {Object} record
+   * @param {number} [eventTs]
+   * @returns {boolean}
    */
   function isBuried(record, eventTs) {
     if (!record) return false;
 
-    const key = record.buriedKey || noteKey(record);
+    const key = noteKey(record);
 
     if (record.id) {
       const evTs = graveyard['ev:' + record.id];
       if (evTs !== undefined) {
-        if (!eventTs || eventTs <= evTs) return true;
+        if (!eventTs || eventTs < evTs) return true;
       }
     }
 
     if (key) {
       const keyTs = graveyard[key];
       if (keyTs !== undefined) {
-        if (!eventTs || eventTs <= keyTs) return true;
+        if (!eventTs || eventTs < keyTs) return true;
       }
     }
 
@@ -1676,7 +1672,7 @@ DI.register('DB', function (Config, bus, Logger) {
   }
 
   /**
-   * Открытие БД + построение индексов.
+   * Открытие БД + индексы.
    * @returns {Promise<IDBDatabase|null>}
    */
   function open() {
@@ -1735,7 +1731,7 @@ DI.register('DB', function (Config, bus, Logger) {
   }
 
   /**
-   * Полная перестройка индексов из БД.
+   * Перестройка индексов.
    * @returns {Promise<void>}
    */
   function buildIndexes() {
@@ -1969,26 +1965,10 @@ DI.register('DB', function (Config, bus, Logger) {
       return !!id && cacheIds.has(id);
     },
 
-    /**
-     * Ключ идентичности заметки.
-     * @param {Object} n
-     * @returns {string|null}
-     */
     noteKey,
 
-    /**
-     * Похоронить удалённое.
-     * @param {string} [eventId]
-     * @param {string} [key]
-     */
     bury,
 
-    /**
-     * Проверка на воскрешение.
-     * @param {Object} record
-     * @param {number} [eventTs]
-     * @returns {boolean}
-     */
     isBuried,
   };
 }, ['Config', 'EventBus', 'Logger']);
@@ -3405,12 +3385,9 @@ DI.register('Protocol', function (Config, Vec, Crypto, Nostr) {
 /**
  * Оркестрация Nostr-сети.
  *
- * v0.8.4:
- * - Приём чужих заметок (kind 1 и 21001) проверяет кладбище ДО
- *   upsert: старые события удалённых источников отбрасываются,
- *   честный возврат (событие новее удаления) принимается.
- * - handleIncomingDelete хоронит eventId + ключ источника.
- * - upsertCacheEntry идемпотентен по noteKey (srcUid+srcPk).
+ * v0.8.4-fix: захоронение по авторскому времени события удаления
+ * (ev.created_at) — быстрые циклы скрыть-открыть не попадают
+ * в окно релейных задержек. Приём проверяет кладбище до upsert.
  */
 DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Config, Logger, bus) {
   let started = false;
@@ -3464,6 +3441,9 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     return { announce: [], del: [], priv: [], privdel: [] };
   }
 
+  /**
+   * Сохранить outbox.
+   */
   function saveOutbox() {
     try {
       localStorage.setItem(OUTBOX_KEY, JSON.stringify(outbox));
@@ -3479,10 +3459,16 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   const kDelete = () => Config.get('kDelete', 5);
   const room = () => Config.get('room', 'noomium-main');
 
+  /**
+   * @param {string} s
+   */
   function setStatus(s) {
     try { bus.emit('net:status', { status: s }); } catch (_) {}
   }
 
+  /**
+   * @param {string} phase
+   */
   function emitSync(phase) {
     try { bus.emit('sync:status', { phase }); } catch (_) {}
   }
@@ -3491,20 +3477,30 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     try { bus.emit('net:peers', { count: peers.size }); } catch (_) {}
   }
 
+  /**
+   * @param {boolean} loading
+   * @param {number} [windowSec]
+   */
   function emitHistory(loading, windowSec) {
     try { bus.emit('net:history', { loading: loading, window: windowSec }); } catch (_) {}
   }
 
+  /**
+   * @returns {boolean}
+   */
   function isOffline() {
     return typeof navigator !== 'undefined' && navigator.onLine === false;
   }
 
+  /**
+   * @returns {boolean}
+   */
   function canPublish() {
     return Nostr.isReady() && !isOffline();
   }
 
   /**
-   * Идемпотентный upsert записи в кэш по noteKey (srcUid+srcPk).
+   * Идемпотентный upsert записи в кэш по (srcUid, srcPk).
    * @param {Object} record
    * @returns {Promise<void>}
    */
@@ -3905,6 +3901,9 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     }
   }
 
+  /**
+   * Подписка на собственный приватный канон.
+   */
   function subscribeSelf() {
     const pk = Nostr.getPubkey();
     if (!pk) return;
@@ -3949,6 +3948,9 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     );
   }
 
+  /**
+   * Слушатели online/offline.
+   */
   function ensureOnlineListener() {
     if (onlineListenerAdded) return;
     onlineListenerAdded = true;
@@ -3981,6 +3983,9 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     });
   }
 
+  /**
+   * Обрезка seen.
+   */
   function trimSeen() {
     const max = Config.get('seenMaxSize', 1000);
     if (seen.size <= max) return;
@@ -4042,6 +4047,9 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     return false;
   }
 
+  /**
+   * Перестройка центроидов.
+   */
   function rebuildCentroids() {
     DB.all().then(notes => {
       const vecs = notes.filter(n => n.shared && n.vector).map(n => n.vector);
@@ -4088,6 +4096,10 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     flushOutbox();
   }
 
+  /**
+   * Обработчик событий комнатной подписки.
+   * @param {Object} ev
+   */
   function onEvent(ev) {
     if (!ev) return;
 
@@ -4137,7 +4149,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     if (DB.hasLocal(note.id)) return true;
     if (note.srcUid && DB.hasLocal(note.srcUid)) return true;
 
-    if (DB.isBuried({ id: note.id, srcUid: note.srcUid, srcPk: note.srcPk, authorPubkey: note.authorPubkey }, note.createdAt)) {
+    if (DB.isBuried(note, note.createdAt)) {
       return true;
     }
 
@@ -4183,7 +4195,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     if (DB.hasLocal(a.id)) return true;
     if (a.srcUid && DB.hasLocal(a.srcUid)) return true;
 
-    if (DB.isBuried({ id: a.id, srcUid: a.srcUid, srcPk: a.srcPk, authorPubkey: a.authorPubkey }, a.createdAt)) {
+    if (DB.isBuried(a, a.createdAt)) {
       return true;
     }
 
@@ -4266,12 +4278,12 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
 
     if (!del) return true;
 
-    const eventTs = (ev.created_at || 0) * 1000;
+    const authorTs = (ev.created_at || 0) * 1000;
 
     del.eventIds.forEach(eventId => {
       if (eventId) {
         DB.cacheDel(eventId).catch(() => {});
-        DB.bury(eventId, null);
+        DB.bury(eventId, null, authorTs);
       }
     });
 
@@ -4280,7 +4292,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
         const victims = cached.filter(c => c && c.eventId && del.eventIds.indexOf(c.eventId) > -1);
         victims.forEach(v => {
           const key = DB.noteKey(v);
-          if (key) DB.bury(null, key);
+          if (key) DB.bury(null, key, authorTs);
         });
       }).catch(() => {});
 
@@ -4357,6 +4369,9 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     }
   }
 
+  /**
+   * Отправка запроса при изменении контекста.
+   */
   function maybeSendQuery() {
     const ctx = Store.get('context');
 
@@ -4396,6 +4411,9 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
       });
   }
 
+  /**
+   * Подписка на комнату с экспоненциальным реконнектом.
+   */
   function subscribeToRoom() {
     const since = Math.floor(Date.now() / 1000) - currentWindow;
     const filters = [{
@@ -4451,6 +4469,9 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     }
   }
 
+  /**
+   * Расширение окна истории.
+   */
   function loadHistory() {
     if (!started || historyLoading) return;
 
@@ -4476,6 +4497,9 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     }
   }
 
+  /**
+   * Heartbeat.
+   */
   function startHeartbeat() {
     if (hbTimer) clearInterval(hbTimer);
 
@@ -4504,6 +4528,10 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     }, Config.get('heartbeat', 30000));
   }
 
+  /**
+   * Старт.
+   * @returns {Promise<void>}
+   */
   function start() {
     if (started) return Promise.resolve();
     if (startPromise) return startPromise;
@@ -4630,6 +4658,9 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     return startPromise;
   }
 
+  /**
+   * Полное переподключение без потери состояния.
+   */
   function resync() {
     if (!Nostr.isReady()) {
       start();
@@ -4646,6 +4677,9 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     flushOutbox();
   }
 
+  /**
+   * @param {boolean} full
+   */
   function stop(full) {
     started = false;
     hasReceivedEvent = false;
