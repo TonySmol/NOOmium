@@ -38,7 +38,7 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 // ВЕРСИЯ ПРИЛОЖЕНИЯ
 // ═══════════════════════════════════════════════════════════════════════════════
-const APP_VERSION = '0.8.1';
+const APP_VERSION = '0.8.2';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CORE/DI — ПРЕАМБУЛА
@@ -4186,7 +4186,14 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
       if (eventId) DB.cacheDel(eventId);
     });
 
-    if (del.authorPubkey) peers.set(del.authorPubkey, Date.now());
+
+    if (del.authorPubkey) {
+      const prefix = del.authorPubkey + '::';
+      for (const key of Array.from(contentSeen.keys())) {
+        if (key.startsWith(prefix)) contentSeen.delete(key);
+      }
+      peers.set(del.authorPubkey, Date.now());
+    }
     notifyPeers();
 
     return true;
