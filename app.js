@@ -25,7 +25,7 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 // ВЕРСИЯ ПРИЛОЖЕНИЯ
 // ═══════════════════════════════════════════════════════════════════════════════
-const APP_VERSION = '0.9.5';
+const APP_VERSION = '0.9.6';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CORE/DI — ПРЕАМБУЛА
@@ -2699,15 +2699,9 @@ DI.register('Crypto', function (Nostr, Logger) {
  * Кодек событий: канон состояний (kind 30078, replaceable, d = uid)
  * и служебные события (запрос 21000, ответ-ссылка 21001).
  *
- * Канон — единственное сетевое выражение заметки. created_at =
- * version заметки (генерируется Notes при мутации). Формы:
- * - private: content = NIP-44(payload); мир видит факт существования;
- * - public: content = открытый JSON; мир видит всё;
- * - deleted: content = открытый JSON факта удаления.
- *
- * Декодирование: JSON парсится для всех (public/deleted);
- * при неудаче и совпадении владельца — NIP-44 (свой private);
- * иначе — only-fact запись {uid, owner, version, private}.
+ * created_at канона = секунда публикации (не создания заметки):
+ * гарантирует попадание в скользящие since-окна подписок и
+ * монотонность при переизданиях (время публикации строго растёт).
  */
 DI.register('Protocol', function (Config, Vec, Vault, Nostr) {
   /** @type {number} */
@@ -2727,18 +2721,27 @@ DI.register('Protocol', function (Config, Vec, Vault, Nostr) {
   }
 
   /**
+   * Свежая монотонная секунда публикации канона.
+   * @returns {number}
+   */
+  function nowSec() {
+    return Math.floor(Date.now() / 1000);
+  }
+
+  /**
    * Канон приватной версии.
-   * @param {Object} note - {uid, text, vector, parent, version}
-   * @returns {Promise<Object>} Шаблон события.
-   * @throws {Error} NIP-44 недоступен.
+   * @param {Object} note
+   * @returns {Promise<Object>}
+   * @throws {Error}
    */
   async function canonPrivate(note) {
     const payload = {
-      v: 1,
+      v: 2,
       visibility: 'private',
       text: note.text || '',
       vec: note.vector ? Vec.toB64(note.vector) : null,
       parent: note.parent || null,
+      noteVersion: note.version,
       ts: note.updatedAt || note.version,
     };
 
@@ -2746,7 +2749,7 @@ DI.register('Protocol', function (Config, Vec, Vault, Nostr) {
 
     return {
       kind: Config.get('kCanon', 30078),
-      created_at: note.version,
+      created_at: nowSec(),
       tags: [
         ['d', note.uid],
         ['client', 'noomium'],
@@ -2758,22 +2761,23 @@ DI.register('Protocol', function (Config, Vec, Vault, Nostr) {
 
   /**
    * Канон публичной версии.
-   * @param {Object} note - {uid, text, vector, parent, version}
-   * @returns {Promise<Object>} Шаблон события.
+   * @param {Object} note
+   * @returns {Promise<Object>}
    */
   async function canonPublic(note) {
     const payload = {
-      v: 1,
+      v: 2,
       visibility: 'public',
       text: note.text || '',
       vec: note.vector ? Vec.toB64(note.vector) : null,
       parent: note.parent || null,
+      noteVersion: note.version,
       ts: note.updatedAt || note.version,
     };
 
     return {
       kind: Config.get('kCanon', 30078),
-      created_at: note.version,
+      created_at: nowSec(),
       tags: [
         ['d', note.uid],
         ['client', 'noomium'],
@@ -2785,30 +2789,26 @@ DI.register('Protocol', function (Config, Vec, Vault, Nostr) {
 
   /**
    * Канон удаления.
-   * @param {string} uid - Идентификатор заметки.
-   * @param {number} version - Версия удаления (последняя + 1).
-   * @returns {Promise<Object>} Шаблон события.
+   * @param {string} uid
+   * @returns {Promise<Object>}
    */
-  async function canonDeleted(uid, version) {
+  async function canonDeleted(uid) {
     return {
       kind: Config.get('kCanon', 30078),
-      created_at: version,
+      created_at: nowSec(),
       tags: [
         ['d', uid],
         ['client', 'noomium'],
         ['t', Config.get('room', 'noomium-main')],
       ],
-      content: JSON.stringify({ v: 1, visibility: 'deleted', ts: Date.now() }),
+      content: JSON.stringify({ v: 2, visibility: 'deleted', ts: Date.now() }),
     };
   }
 
   /**
-   * Декодирование канона.
-   * @param {Object} ev - Nostr-событие kind 30078.
-   * @returns {Promise<Object|null>} Запись:
-   *   {uid, owner, version, visibility, text?, vec?, parent?};
-   *   public/deleted — полные; свой private — расшифрованный полный;
-   *   чужой private — only-fact.
+   * Декодирование канона. version = created_at (секунда публикации).
+   * @param {Object} ev
+   * @returns {Promise<Object|null>}
    */
   async function decodeCanon(ev) {
     if (!ev || ev.kind !== Config.get('kCanon', 30078)) return null;
@@ -2890,7 +2890,7 @@ DI.register('Protocol', function (Config, Vec, Vault, Nostr) {
 
   /**
    * @param {Object} ev
-   * @returns {Object|null} {vector, maxResponses, window, owner, queryId}
+   * @returns {Object|null}
    */
   function decodeQuery(ev) {
     if (!ev || ev.kind !== Config.get('kQuery', 21000)) return null;
@@ -2918,8 +2918,7 @@ DI.register('Protocol', function (Config, Vec, Vault, Nostr) {
   }
 
   /**
-   * Ответ-ссылка: указывает на заметку, не копирует её.
-   * @param {Object} note - Своя публичная заметка.
+   * @param {Object} note
    * @param {number} score
    * @param {string} queryId
    * @returns {Object}
@@ -2939,7 +2938,7 @@ DI.register('Protocol', function (Config, Vec, Vault, Nostr) {
 
   /**
    * @param {Object} ev
-   * @returns {Object|null} {queryId, uid, owner, score}
+   * @returns {Object|null}
    */
   function decodeAnswer(ev) {
     if (!ev || ev.kind !== Config.get('kAnswer', 21001)) return null;
@@ -2976,9 +2975,10 @@ DI.register('Protocol', function (Config, Vec, Vault, Nostr) {
 
 // ─── NET/NetService ─── START ───────────────────────────────────────────────
 /**
- * Движение: подписка на комнату и на себя, публикация канонов
- * (очередь uids/deleted в localStorage), ответы-ссылки на запросы,
- * запросы при контексте, расширение окна истории, реконнект.
+ * Движение: подписка на комнату (каноны — без since: replaceable
+ * отдаёт последнюю версию каждого канона комнаты; запросы/ответы —
+ * со скользящим окном), подписка на себя, публикация канонов
+ * через очередь, ответы-ссылки, запросы при контексте, история.
  */
 DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Config, Logger, bus) {
   let started = false;
@@ -3011,7 +3011,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   const QUEUE_KEY = 'noomium:queue';
 
   /**
-   * @returns {{uids: string[], deleted: Array<{uid: string, version: number}>}}
+   * @returns {{uids: string[], deleted: Array<{uid: string}>}}
    */
   function loadQueue() {
     try {
@@ -3020,7 +3020,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
         const q = JSON.parse(raw);
         return {
           uids: Array.isArray(q.uids) ? q.uids.filter(Boolean) : [],
-          deleted: Array.isArray(q.deleted) ? q.deleted.filter(d => d && d.uid && typeof d.version === 'number') : [],
+          deleted: Array.isArray(q.deleted) ? q.deleted.filter(Boolean) : [],
         };
       }
     } catch (_) {}
@@ -3086,21 +3086,17 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
 
   /**
    * @param {string} uid
-   * @param {number} version
    */
-  function queueDeleted(uid, version) {
-    if (!uid || !version) return;
+  function queueDeleted(uid) {
+    if (!uid) return;
 
     const i = queue.uids.indexOf(uid);
     if (i > -1) queue.uids.splice(i, 1);
 
-    const existing = queue.deleted.find(d => d.uid === uid);
-    if (existing) {
-      if (version > existing.version) existing.version = version;
-    } else {
-      queue.deleted.push({ uid, version });
+    if (queue.deleted.indexOf(uid) === -1) {
+      queue.deleted.push(uid);
+      saveQueue();
     }
-    saveQueue();
     scheduleFlush();
   }
 
@@ -3152,11 +3148,11 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
           } catch (_) {}
         }
 
-        for (const d of queue.deleted.slice()) {
+        for (const uid of queue.deleted.slice()) {
           try {
-            const tpl = await Protocol.canonDeleted(d.uid, d.version);
+            const tpl = await Protocol.canonDeleted(uid);
             await Nostr.publish(tpl);
-            const i = queue.deleted.indexOf(d);
+            const i = queue.deleted.indexOf(uid);
             if (i > -1) {
               queue.deleted.splice(i, 1);
               saveQueue();
@@ -3354,15 +3350,16 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   }
 
   /**
-   * Подписка на комнату.
+   * Подписка на комнату: каноны без since (replaceable-семантика:
+   * релей хранит последнюю версию каждого канона по d-tag — окно
+   * не нужно и отсекает старые публикации); запросы и ответы —
+   * со скользящим окном, как раньше.
    */
   function subscribeToRoom() {
-    const since = Math.floor(Date.now() / 1000) - currentWindow;
-    const filters = [{
-      kinds: [kCanon(), kQuery(), kAnswer()],
-      '#t': [room()],
-      since,
-    }];
+    const filters = [
+      { kinds: [kCanon()], '#t': [room()] },
+      { kinds: [kQuery(), kAnswer()], '#t': [room()], since: Math.floor(Date.now() / 1000) - currentWindow },
+    ];
 
     const myEpoch = ++subEpoch;
 
@@ -3450,14 +3447,11 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
       try { fetchSubscription.close(); } catch (_) {}
     }
 
-    let done = false;
-
     fetchSubscription = Nostr.subscribe(
       [{ authors: [p.owner], kinds: [kCanon()], '#d': [p.uid] }],
       {
         onevent: ev => {
           if (!ev || !ev.id) return;
-          done = true;
           try { bus.emit('net:canon', ev); } catch (_) {}
           if (fetchSubscription && typeof fetchSubscription.close === 'function') {
             try { fetchSubscription.close(); } catch (_) {}
@@ -3465,7 +3459,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
           }
         },
         onclose: () => {
-          if (done) return;
           setTimeout(() => {
             if (fetchSubscription) {
               try { fetchSubscription.close(); } catch (_) {}
@@ -3530,7 +3523,8 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   }
 
   /**
-   * Расширение окна истории.
+   * Расширение окна (для запросов/ответов; каноны окном не
+   * ограничены — подписка полная).
    */
   function loadHistory() {
     if (!started || historyLoading) return;
@@ -3598,7 +3592,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
         }));
 
         busUnsubs.push(bus.on('note:deleted', p => {
-          if (p && p.uid && p.version) queueDeleted(p.uid, p.version);
+          if (p && p.uid) queueDeleted(p.uid);
         }));
 
         busUnsubs.push(bus.on('db:change', () => rebuildCentroids()));
@@ -3753,14 +3747,10 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     try {
       const notes = await DB.allNotes();
 
-      const maxV = notes.reduce((m, n) => Math.max(m, n.version || 0), Math.floor(Date.now() / 1000));
-      let v = maxV;
-
       for (const n of notes) {
         if (!n || !n.uid) continue;
-        v = v + 1;
         try {
-          const tpl = await Protocol.canonDeleted(n.uid, v);
+          const tpl = await Protocol.canonDeleted(n.uid);
           await Nostr.publish(tpl);
         } catch (_) {}
       }
@@ -3778,9 +3768,11 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
 // ─── DOMAIN/Notes ─── START ─────────────────────────────────────────────────
 /**
  * Переходы состояний своих заметок. Единственная точка записи в
- * notes. Каждая мутация = новая version + note:* событие;
- * публикацию канона дергает NetService через шину.
- * init слушает notes:imported (versionCounter после импорта).
+ * notes. Каждая мутация = новая version (noteVersion) + note:*;
+ * публикацию дергает NetService через шину.
+ * applyOwnCanonical сравнивает по noteVersion из payload —
+ * created_at канона (секунда публикации) не является истиной
+ * своей заметки.
  */
 DI.register('Notes', function (DB, Embedder, bus, Logger, Utils) {
   /** @type {number} */
@@ -3795,8 +3787,7 @@ DI.register('Notes', function (DB, Embedder, bus, Logger, Utils) {
   }
 
   /**
-   * Восстановление монотонности: max(версии в notes, сейчас);
-   * подписка на notes:imported.
+   * Восстановление монотонности + подписка на notes:imported.
    * @returns {Promise<void>}
    */
   async function init() {
@@ -3893,10 +3884,8 @@ DI.register('Notes', function (DB, Embedder, bus, Logger, Utils) {
     const note = await DB.getNote(uid);
     if (!note) return null;
 
-    const version = nextVersion();
-
     await DB.delNote(uid);
-    emit('note:deleted', { uid, version, visibility: note.visibility });
+    emit('note:deleted', { uid });
     return note;
   }
 
@@ -3926,6 +3915,8 @@ DI.register('Notes', function (DB, Embedder, bus, Logger, Utils) {
   }
 
   /**
+   * Применение канона с другого устройства: LWW по noteVersion
+   * (payload), не по created_at публикации.
    * @param {Object} canonical
    * @returns {Promise<boolean>}
    */
@@ -3935,8 +3926,11 @@ DI.register('Notes', function (DB, Embedder, bus, Logger, Utils) {
     const cur = await DB.getNote(canonical.uid);
     if (!cur) return false;
 
-    if (canonical.version < cur.version) return false;
-    if (canonical.version === cur.version) return false;
+    const incoming = typeof canonical.noteVersion === 'number'
+      ? canonical.noteVersion
+      : canonical.version;
+
+    if (incoming <= cur.version) return false;
 
     if (typeof canonical.text === 'string') cur.text = canonical.text;
     if (canonical.vec) cur.vector = canonical.vec;
@@ -3944,7 +3938,7 @@ DI.register('Notes', function (DB, Embedder, bus, Logger, Utils) {
       cur.visibility = canonical.visibility;
     }
     if (canonical.parent) cur.parent = canonical.parent;
-    cur.version = canonical.version;
+    cur.version = incoming;
     cur.updatedAt = Date.now();
 
     await DB.putNote(cur);
@@ -3968,7 +3962,9 @@ DI.register('Notes', function (DB, Embedder, bus, Logger, Utils) {
       vector: canonical.vec || null,
       visibility: canonical.visibility || 'private',
       parent: canonical.parent || null,
-      version: canonical.version,
+      version: typeof canonical.noteVersion === 'number'
+        ? canonical.noteVersion
+        : (canonical.version || nextVersion()),
       createdAt: (canonical.version * 1000) || Date.now(),
       updatedAt: Date.now(),
     });
