@@ -25,7 +25,7 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 // ВЕРСИЯ ПРИЛОЖЕНИЯ
 // ═══════════════════════════════════════════════════════════════════════════════
-const APP_VERSION = '0.9.4';
+const APP_VERSION = '0.9.5';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CORE/DI — ПРЕАМБУЛА
@@ -3991,21 +3991,17 @@ DI.register('Notes', function (DB, Embedder, bus, Logger, Utils) {
 
 // ─── DOMAIN/Mirror ─── START ────────────────────────────────────────────────
 /**
- * Интерпретация входящих канонов: свои — к notes (синк/restore),
- * чужие — к mirror. Единственная точка записи в mirror.
- * Свои записи в mirror невозможны (И2): защита от окон удаления
- * и ретро-доставки. При старте вычищает исторические дубли
- * (owner = свой pk) из mirror.
- * fetched-множество сбрасывается при resync: ответ, потерянный
- * до старта сети, подтянется повторно.
+ * Интерпретация входящих канонов: свои — к notes, чужие — к mirror.
+ * Deleted-эхо применяется только при строго большей версии —
+ * старые deleted-события из истории релеев не могут удалять
+ * восстановленные заметки (LWW для удалений).
  */
 DI.register('Mirror', function (DB, Protocol, Notes, bus, Nostr, Logger) {
   /** @type {Set<string>} */
   const fetched = new Set();
 
   /**
-   * Вычистка из mirror записей своего владельца (исторические
-   * дубли, созданные до маршрутизации по владельцу).
+   * Вычистка исторических mirror-дублей своего владельца.
    * @returns {Promise<void>}
    */
   async function purgeSelf() {
@@ -4027,7 +4023,7 @@ DI.register('Mirror', function (DB, Protocol, Notes, bus, Nostr, Logger) {
   }
 
   /**
-   * Инициализация: подписки, стартовая чистка.
+   * Инициализация.
    */
   function init() {
     bus.on('net:canon', ev => {
@@ -4046,9 +4042,9 @@ DI.register('Mirror', function (DB, Protocol, Notes, bus, Nostr, Logger) {
   }
 
   /**
-   * Применить входящее событие канона. Маршрутизация по
-   * владельцу (И2): свой — notes (update/restore/delete-эхо),
-   * чужой — mirror.
+   * Применить входящее событие канона. Маршрутизация по владельцу.
+   * Все ветки для своих — строго по version (LWW): старые
+   * события (в т.ч. deleted) не затирают и не удаляют новое.
    * @param {Object} ev - Nostr-событие kind 30078.
    * @returns {Promise<void>}
    */
@@ -4058,42 +4054,44 @@ DI.register('Mirror', function (DB, Protocol, Notes, bus, Nostr, Logger) {
       if (!canonical || !canonical.uid || !canonical.owner) return;
 
       const myPk = Nostr.getPubkey();
+      if (!myPk || canonical.owner !== myPk) {
+        await DB.upsertMirror(canonical);
+        return;
+      }
 
-      if (myPk && canonical.owner === myPk) {
-        if (canonical.deleted) {
-          const cur = await DB.getNote(canonical.uid);
-          if (cur) {
-            await DB.delNote(canonical.uid);
-            Logger.info('Mirror: удаление по эху ' + canonical.uid.slice(0, 6));
-          }
-          return;
-        }
+      const cur = await DB.getNote(canonical.uid);
 
-        const cur = await DB.getNote(canonical.uid);
+      if (cur && canonical.version <= cur.version) {
+        return;
+      }
 
+      if (canonical.deleted) {
         if (cur) {
-          const applied = await Notes.applyOwnCanonical(canonical);
-          if (applied) {
-            Logger.info('Mirror: синк ' + canonical.uid.slice(0, 6) + ' v' + canonical.version);
-          }
-          return;
-        }
-
-        const restored = await Notes.restoreFromCanonical(canonical);
-        if (restored) {
-          Logger.info('Mirror: restore ' + canonical.uid.slice(0, 6) + ' v' + canonical.version);
+          await DB.delNote(canonical.uid);
+          Logger.info('Mirror: удаление по эху (v' + canonical.version + ') ' + canonical.uid.slice(0, 6));
         }
         return;
       }
 
-      await DB.upsertMirror(canonical);
+      if (cur) {
+        const applied = await Notes.applyOwnCanonical(canonical);
+        if (applied) {
+          Logger.info('Mirror: синк ' + canonical.uid.slice(0, 6) + ' v' + canonical.version);
+        }
+        return;
+      }
+
+      const restored = await Notes.restoreFromCanonical(canonical);
+      if (restored) {
+        Logger.info('Mirror: restore ' + canonical.uid.slice(0, 6) + ' v' + canonical.version);
+      }
     } catch (e) {
       Logger.warn('Mirror: applyCanon', String(e && e.message || e));
     }
   }
 
   /**
-   * Подтяжка заметки по ответу-ссылке.
+   * Подтяжка по ответу-ссылке.
    * @param {string} uid
    * @param {string} owner
    */
