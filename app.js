@@ -4784,86 +4784,1108 @@ DI.register('Feed', function (DB, Ranker, Store, bus, Logger, Utils, Config) {
 
 // ─── DOMAIN/Provenance ─── START ────────────────────────────────────────────
 /**
- * Генеалогия: children/descendants (BFS)/ancestors (цепочка, кэш 5с)/
- * hasResolvableParent/loadAll. Цикл-защита. clearCache на db:*.
+ * Генеалогия по parent {uid, owner} через notes + mirror.
+ * mirror-записи своих uid и deleted исключаются (дубли/мусор).
+ * Цикл-защита: seen до рекурсии/спуска.
+ *
+ * ИЗМЕНЕНИЕ v1.0 (безопасное): descendants — BFS по предпостроенному
+ * индексу parent→children вместо полного скана базы на каждый уровень
+ * (O(N) вместо O(уровни×N)); семантика идентична, включая циклы и
+ * ромбы. ancestors — кэш ограничен 100 записями (раньше рос
+ * неограниченно за длинную сессию).
  */
 DI.register('Provenance', function (DB, bus, Nostr) {
-  // TODO: реализация (как в v0.9.9)
+  /** @type {Map<string, {chain: Array, timestamp: number}>} */
+  const cache = new Map();
+  const CACHE_TTL = 5000;
+  const CACHE_MAX = 100;
+
+  /**
+   * Все заметки: свои (notes, полные) + чужой живой mirror.
+   * @returns {Promise<Array<Object>>}
+   */
+  function loadAll() {
+    return Promise.all([DB.allNotes(), DB.allMirror()]).then(([notes, mirror]) => {
+      const out = notes.map(n => ({
+        uid: n.uid, owner: null, text: n.text, visibility: n.visibility,
+        parent: n.parent, isOwn: true,
+      }));
+
+      mirror.forEach(m => {
+        if (!m || m.visibility === 'deleted') return;
+        if (DB.hasOwn(m.uid)) return;
+        out.push({
+          uid: m.uid, owner: m.owner, text: m.text, visibility: m.visibility,
+          parent: m.parent, isOwn: false,
+        });
+      });
+
+      return out;
+    });
+  }
+
+  /**
+   * @param {Array<Object>} all
+   * @returns {Map<string, Object>}
+   */
+  function buildIndex(all) {
+    const byUid = new Map();
+    all.forEach(n => {
+      if (n && n.uid) byUid.set(n.uid, n);
+    });
+    return byUid;
+  }
+
+  /**
+   * @param {Object} note
+   * @param {Map<string, Object>} idx
+   * @returns {Object|null}
+   */
+  function resolveParent(note, idx) {
+    if (!note || !note.parent || !note.parent.uid) return null;
+    return idx.get(note.parent.uid) || null;
+  }
+
+  /**
+   * Прямые дети заметки.
+   * @param {string} uid
+   * @returns {Promise<Array<Object>>}
+   */
+  function children(uid) {
+    if (!uid) return Promise.resolve([]);
+
+    return loadAll().then(all => {
+      return all.filter(n => n.parent && n.parent.uid === uid);
+    });
+  }
+
+  /**
+   * Все потомки (BFS по индексу parent→children, защита от циклов).
+   * @param {string} uid
+   * @returns {Promise<Array<Object>>}
+   */
+  function descendants(uid) {
+    if (!uid) return Promise.resolve([]);
+
+    return loadAll().then(all => {
+      // Индекс: родитель → его дети (один проход по базе).
+      const byParent = new Map();
+      for (const n of all) {
+        if (n.parent && n.parent.uid) {
+          if (!byParent.has(n.parent.uid)) byParent.set(n.parent.uid, []);
+          byParent.get(n.parent.uid).push(n);
+        }
+      }
+
+      const out = [];
+      const seenIds = new Set([uid]);
+      let frontier = [uid];
+
+      while (frontier.length) {
+        const next = [];
+
+        for (const p of frontier) {
+          const kids = byParent.get(p) || [];
+          for (const k of kids) {
+            if (!seenIds.has(k.uid)) {
+              seenIds.add(k.uid);
+              out.push(k);
+              next.push(k.uid);
+            }
+          }
+        }
+
+        frontier = next;
+      }
+
+      return out;
+    });
+  }
+
+  /**
+   * Цепочка предков от заметки до корня.
+   * @param {string} uid
+   * @returns {Promise<Array<Object>>}
+   */
+  async function ancestors(uid) {
+    if (!uid) return [];
+
+    const cached = cache.get(uid);
+    if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
+      return cached.chain;
+    }
+
+    const all = await loadAll();
+    const idx = buildIndex(all);
+
+    let current = idx.get(uid) || null;
+    const chain = [];
+    const seen = new Set([uid]);
+
+    while (current && current.parent && current.parent.uid) {
+      const parent = resolveParent(current, idx);
+      if (!parent) break;
+      if (seen.has(parent.uid)) break;
+
+      seen.add(parent.uid);
+      chain.push(parent);
+      current = parent;
+    }
+
+    if (cache.size >= CACHE_MAX) cache.clear();
+    cache.set(uid, { chain, timestamp: Date.now() });
+    return chain;
+  }
+
+  /**
+   * @param {Object} note
+   * @returns {Promise<boolean>}
+   */
+  function hasResolvableParent(note) {
+    if (!note || !note.parent || !note.parent.uid) {
+      return Promise.resolve(false);
+    }
+
+    return loadAll().then(all => {
+      const idx = buildIndex(all);
+      return !!resolveParent(note, idx);
+    });
+  }
+
+  /**
+   * Очистка кэша.
+   */
+  function clearCache() {
+    cache.clear();
+  }
+
+  bus.on('db:change', clearCache);
+  bus.on('db:mirror', clearCache);
+
+  return { children, descendants, ancestors, hasResolvableParent, loadAll, clearCache };
 }, ['DB', 'EventBus', 'Nostr']);
 // ─── DOMAIN/Provenance ─── END ──────────────────────────────────────────────
 
 // ─── DOMAIN/Influence ─── START ─────────────────────────────────────────────
 /**
- * Резонанс: Map<parentUid, Set<авторов>> ('self' + чужие owner).
- * rebuild + updateForNote; resonance(uid). emit influence:updated.
- * ИЗМЕНЕНИЕ v1.0: db:* — через debounce 120мс (как Feed).
+ * Резонанс: уникальные авторы потомков по ключу uid родителя.
+ * Свои дети — 'self'; чужие — owner. mirror-дубли своих uid
+ * и неизвестные авторы не считаются.
+ *
+ * ИЗМЕНЕНИЕ v1.0: db:change/db:mirror — через debounce 120мс
+ * (как Feed): пакетный сетевой синк не устраивает шторм rebuild'ов.
+ * Точечные note:created/updated — без дебаунса (мгновенный отклик
+ * на собственные действия). note:deleted — прямой rebuild.
  */
 DI.register('Influence', function (DB, bus, Logger, Utils, Config) {
-  // TODO: реализация
+  /** @type {Map<string, Set<string>>} */
+  const map = new Map();
+  /** @type {number} */
+  let seq = 0;
+
+  /**
+   * @param {Object} n
+   * @returns {string|null}
+   */
+  function parentKey(n) {
+    if (!n || !n.parent || !n.parent.uid) return null;
+    return n.parent.uid;
+  }
+
+  /**
+   * @returns {Promise<void>}
+   */
+  function rebuild() {
+    const my = ++seq;
+
+    return Promise.all([DB.allNotes(), DB.allMirror()]).then(([notes, mirror]) => {
+      if (my !== seq) return;
+
+      const m = new Map();
+
+      const add = (key, author) => {
+        if (!key || !author) return;
+        if (!m.has(key)) m.set(key, new Set());
+        m.get(key).add(author);
+      };
+
+      notes.forEach(n => {
+        if (!n) return;
+        add(parentKey(n), 'self');
+      });
+
+      mirror.forEach(mm => {
+        if (!mm || mm.visibility !== 'public') return;
+        if (DB.hasOwn(mm.uid)) return;
+        add(parentKey(mm), mm.owner || null);
+      });
+
+      map.clear();
+      m.forEach((v, k) => map.set(k, v));
+
+      try { bus.emit('influence:updated'); } catch (_) {}
+    }).catch(e => Logger.warn('Influence: ошибка rebuild', String(e && e.message || e)));
+  }
+
+  /**
+   * Точечное обновление для своей заметки (мгновенный отклик).
+   * @param {Object} note
+   */
+  function updateForNote(note) {
+    const key = parentKey(note);
+    if (!key) return;
+
+    if (!map.has(key)) map.set(key, new Set());
+    map.get(key).add('self');
+
+    try { bus.emit('influence:updated'); } catch (_) {}
+  }
+
+  /**
+   * @param {string} uid
+   * @returns {number}
+   */
+  function resonance(uid) {
+    if (!uid) return 0;
+    const s = map.get(uid);
+    return s ? s.size : 0;
+  }
+
+  /**
+   * Инициализация.
+   */
+  function init() {
+    const debouncedRebuild = Utils.debounce(rebuild, 120);
+
+    bus.on('note:created', updateForNote);
+    bus.on('note:updated', updateForNote);
+    bus.on('note:deleted', () => rebuild());
+    bus.on('db:change', debouncedRebuild);
+    bus.on('db:mirror', debouncedRebuild);
+
+    rebuild();
+  }
+
+  return { init, resonance, rebuild };
 }, ['DB', 'EventBus', 'Logger', 'Utils', 'Config']);
 // ─── DOMAIN/Influence ─── END ───────────────────────────────────────────────
 
 // ─── DOMAIN/Account ─── START ───────────────────────────────────────────────
 /**
- * Аккаунт: ключи (npub/nsec/ncryptsec, NIP-49), enterKey (замена с
- * DB.reset + account:changed + рестарт NetService), экспорт/импорт
- * архива v3 (sanitize, LWW по version), setSyncEnabled.
- * Импортированные заметки: publishedVersion=0 (переиздадутся один раз).
+ * Аккаунт: показ/ввод ключа (nsec/npub/ncryptsec, NIP-49),
+ * вход с заменой ключа, JSON-архив v3 (заметки + настройки).
+ *
+ * ИЗМЕНЕНИЯ v1.0:
+ * - importArchive: импортированные заметки получают publishedVersion=0
+ *   — переиздаются один раз (для переноса между аккаунтами и
+ *   восстановления); повторная републикация той же версии исключена
+ *   логикой очереди NetService.
+ * - Событие-призрак config:imported удалено (слушателей не было);
+ *   настройки из архива применяются через Config.set и подхватываются
+ *   живыми читателями (Ranker читает пороги при каждом split, тема/
+ *   язык — при открытии меню).
+ * Остальное — поведение v0.9.9: enterKey (замена ключа + DB.reset +
+ * рестарт NetService через 500мс; гонки с импортом нет: старт
+ * переочередит всё неопубликованное, note:created-хендлеры ловят
+ * остальное), экспорт v3, whitelist-конфиг, setSyncEnabled.
  */
 DI.register('Account', function (Config, Nostr, Crypto, DB, bus, Logger) {
-  // TODO: реализация
+  /** @type {Array<string>} */
+  const CONFIG_WHITELIST = [
+    'threshold',
+    'serendipity',
+    'duplicateThreshold',
+    'similarityDisplay',
+    'lang',
+    'theme',
+  ];
+
+  /**
+   * @returns {Promise<Object>} {pubkey, keyExported, syncEnabled}
+   */
+  async function getAccountInfo() {
+    await Nostr.init();
+    return {
+      pubkey: Nostr.getPubkey(),
+      keyExported: Config.get('keyExported', false),
+      syncEnabled: Config.get('syncEnabled', true),
+    };
+  }
+
+  /**
+   * @returns {Promise<string|null>}
+   */
+  async function getNpub() {
+    const pk = Nostr.getPubkey();
+    if (!pk) return null;
+    return Crypto.encodeNpub(pk);
+  }
+
+  /**
+   * @returns {Promise<boolean>}
+   */
+  async function canWrapKey() {
+    try {
+      return await Crypto.hasNip49();
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /**
+   * Экспорт ключа: NIP-49 (с паролем или без), fallback nsec.
+   * @param {string} [password]
+   * @returns {Promise<string|null>}
+   */
+  async function getWrappedKey(password) {
+    const sk = Nostr.getSecretKey();
+    if (!sk) return null;
+
+    const wrapped = await Crypto.encryptKey(sk, String(password || ''));
+    if (wrapped) {
+      Config.set('keyExported', true);
+      return wrapped;
+    }
+
+    const nsec = await Crypto.encodeNsec(sk);
+    if (nsec) {
+      Logger.warn('Account: NIP-49 недоступен, ключ в формате nsec');
+      Config.set('keyExported', true);
+      return nsec;
+    }
+
+    return null;
+  }
+
+  /**
+   * @param {string} input
+   * @param {string} [password]
+   * @returns {Promise<{ok: boolean, error?: string, pubkey?: string}>}
+   */
+  async function enterKey(input, password) {
+    const type = Crypto.classifyKeyInput(input);
+    if (!type) return { ok: false, error: 'bad' };
+
+    let sk = null;
+    try {
+      if (type === 'ncryptsec') {
+        sk = await Crypto.decryptKey(String(input || '').trim(), String(password || ''));
+      } else {
+        sk = await Crypto.decodeSecret(input);
+      }
+    } catch (e) {
+      Logger.warn('Account: enterKey decode', String(e && e.message || e));
+    }
+
+    if (!sk) return { ok: false, error: 'bad' };
+
+    try {
+      await Nostr.init();
+      const pk = Nostr.setKey(sk);
+
+      // Замена аккаунта: локальные данные (notes + mirror) стираются.
+      await DB.reset();
+
+      Config.set('keyExported', false);
+
+      try { bus.emit('account:changed', { pubkey: pk }); } catch (_) {}
+
+      // Рестарт сети: stop снимает подписки/очередь; старт через 500мс
+      // переочередит всё неопубликованное нового аккаунта. Заметки,
+      // импортируемые сразу после enterKey, попадают в очередь либо
+      // снапшотом старта, либо хендлером note:created (он регистрируется
+      // ДО снапшота) — гонки нет.
+      try {
+        const NetService = DI.resolve('NetService');
+        NetService.stop(false);
+        setTimeout(() => { NetService.start(); }, 500);
+      } catch (_) {}
+
+      Logger.info('Account: ключ заменён, pubkey ' + pk.slice(0, 8) + '…');
+      return { ok: true, pubkey: pk };
+    } catch (e) {
+      Logger.error('Account: enterKey', String(e && e.message || e));
+      return { ok: false, error: 'failed' };
+    }
+  }
+
+  /**
+   * Валидация заметки из внешнего источника (архив).
+   * @param {Object} n
+   * @returns {Object|null}
+   */
+  function sanitizeNote(n) {
+    if (!n || typeof n.uid !== 'string' || typeof n.text !== 'string') return null;
+    if (n.text.length > Config.get('maxNoteTextLength', 10000)) return null;
+
+    let vector = null;
+    if (Array.isArray(n.vector)) {
+      vector = n.vector.filter(x => typeof x === 'number' && isFinite(x));
+    }
+
+    let parent = null;
+    if (n.parent && typeof n.parent === 'object' && typeof n.parent.uid === 'string' && n.parent.uid) {
+      parent = { uid: n.parent.uid, owner: n.parent.owner || null };
+    }
+
+    return {
+      uid: n.uid,
+      text: n.text,
+      vector,
+      visibility: n.visibility === 'public' ? 'public' : 'private',
+      parent,
+      version: typeof n.version === 'number' && n.version > 0 ? n.version : Math.floor(Date.now() / 1000),
+      createdAt: typeof n.createdAt === 'number' ? n.createdAt : Date.now(),
+      updatedAt: typeof n.updatedAt === 'number' ? n.updatedAt : Date.now(),
+    };
+  }
+
+  /**
+   * @param {boolean} [includeKey]
+   * @param {string} [keyPassword]
+   * @returns {Promise<{json: string, filename: string}|null>}
+   */
+  async function exportArchive(includeKey, keyPassword) {
+    try {
+      await Nostr.init();
+
+      const notes = await DB.allNotes();
+      const archive = {
+        version: 3,
+        app: 'noomium',
+        createdAt: Date.now(),
+        pubkey: Nostr.getPubkey(),
+        ncryptsec: null,
+        notes: notes.map(sanitizeNote).filter(Boolean),
+        config: {},
+      };
+
+      CONFIG_WHITELIST.forEach(k => {
+        archive.config[k] = Config.get(k);
+      });
+
+      if (includeKey) {
+        archive.ncryptsec = await getWrappedKey(keyPassword);
+        if (!archive.ncryptsec) {
+          return null;
+        }
+      }
+
+      const d = new Date();
+      const pad = n => String(n).padStart(2, '0');
+      const filename = 'noomium-backup-'
+        + d.getFullYear() + pad(d.getMonth() + 1) + pad(d.getDate())
+        + '-' + pad(d.getHours()) + pad(d.getMinutes())
+        + '.json';
+
+      return { json: JSON.stringify(archive, null, 2), filename };
+    } catch (e) {
+      Logger.error('Account: exportArchive', String(e && e.message || e));
+      return null;
+    }
+  }
+
+  /**
+   * @param {string} text
+   * @returns {{ok: boolean, error?: string, archive?: Object}}
+   */
+  function parseArchive(text) {
+    let data;
+    try {
+      data = JSON.parse(String(text || ''));
+    } catch (_) {
+      return { ok: false, error: 'bad' };
+    }
+
+    if (!data || typeof data !== 'object' || data.app !== 'noomium') {
+      return { ok: false, error: 'bad' };
+    }
+    if (!Array.isArray(data.notes)) {
+      return { ok: false, error: 'bad' };
+    }
+
+    const notes = [];
+    for (const raw of data.notes) {
+      const note = sanitizeNote(raw);
+      if (note) notes.push(note);
+    }
+
+    const config = {};
+    if (data.config && typeof data.config === 'object') {
+      CONFIG_WHITELIST.forEach(k => {
+        if (k in data.config) config[k] = data.config[k];
+      });
+    }
+
+    return {
+      ok: true,
+      archive: {
+        version: typeof data.version === 'number' ? data.version : 3,
+        pubkey: typeof data.pubkey === 'string' ? data.pubkey : null,
+        ncryptsec: (typeof data.ncryptsec === 'string' && data.ncryptsec) ? data.ncryptsec : null,
+        notes,
+        config,
+        noteCount: notes.length,
+      },
+    };
+  }
+
+  /**
+   * Импорт: LWW по version (совпадающие uid обновляются).
+   * publishedVersion=0 — заметки переиздаются один раз.
+   * @param {Object} archive
+   * @returns {Promise<number>}
+   */
+  async function importArchive(archive) {
+    if (!archive || !Array.isArray(archive.notes)) return 0;
+
+    let applied = 0;
+    let maxVersion = 0;
+
+    for (const note of archive.notes) {
+      try {
+        const cur = await DB.getNote(note.uid);
+        if (cur && cur.version >= note.version) continue;
+
+        const record = {
+          uid: note.uid,
+          text: note.text,
+          vector: note.vector,
+          visibility: note.visibility,
+          parent: note.parent,
+          version: note.version,
+          publishedVersion: 0,
+          createdAt: note.createdAt,
+          updatedAt: note.updatedAt,
+        };
+
+        await DB.putNote(record);
+
+        try { bus.emit('note:created', record); } catch (_) {}
+
+        if (note.version > maxVersion) maxVersion = note.version;
+        applied++;
+      } catch (e) {
+        Logger.warn('Account: import note ' + note.uid, String(e && e.message || e));
+      }
+    }
+
+    if (maxVersion > 0) {
+      try { bus.emit('notes:imported', { maxVersion }); } catch (_) {}
+    }
+
+    const cfg = archive.config || {};
+    CONFIG_WHITELIST.forEach(k => {
+      if (k in cfg) {
+        Config.set(k, cfg[k]);
+      }
+    });
+
+    Logger.info('Account: импортировано заметок — ' + applied);
+    return applied;
+  }
+
+  /**
+   * @param {boolean} enabled
+   */
+  function setSyncEnabled(enabled) {
+    const v = enabled === true;
+    Config.set('syncEnabled', v);
+    try { bus.emit('sync:toggle', { enabled: v }); } catch (_) {}
+  }
+
+  return {
+    getAccountInfo,
+    getNpub,
+    canWrapKey,
+    getWrappedKey,
+    enterKey,
+    exportArchive,
+    parseArchive,
+    importArchive,
+    setSyncEnabled,
+  };
 }, ['Config', 'Nostr', 'Crypto', 'DB', 'EventBus', 'Logger']);
-// ─── DOMAIN/Account ─── END ─────────────────────────════════════════════════
+// ─── DOMAIN/Account ─── END ─────────────────────────────────────────────────
 
 // ═══ СЛОЙ: UI ═════════════════════════════════════════════════════════════════
 
 // ─── UI/Modal ─── START ─────────────────────────────────────────────────────
 /**
- * open({title, body:string|Element, buttons}) — textContent-only,
- * Escape, клик по overlay, возврат фокуса, автофокус.
- * confirm(title, text, onOk, okText) — Cancel + подтверждение.
- * ИЗМЕНЕНИЕ v1.0: кнопка OK — primary ИЛИ danger (не оба сразу);
- * confirm по умолчанию primary (розовой бывает только явная деструкция
- * через okDanger-флаг).
- * При buttons=[] — #modal-f скрывается целиком (нет пустой полосы).
+ * Универсальные модалки: open/close/confirm, Escape, клик по overlay,
+ * возврат фокуса, автофокус.
+ *
+ * ИЗМЕНЕНИЯ v1.0 против v0.9.9:
+ * - confirm: подтверждение — primary по умолчанию (янтарная);
+ *   розовая (danger) — только для явной деструкции. В v0.9.9 у ОК
+ *   стояли оба класса — розовый всегда перекрывал primary.
+ * - Пустой список кнопок → #modal-f скрывается целиком (нет пустой
+ *   полосы с бордером).
+ * - Контент — только textContent/appendChild (Закон 1).
  */
 DI.register('Modal', function (I18n) {
-  // TODO: реализация
+  let overlay, modal, titleEl, bodyEl, footEl, closeBtn;
+  let escHandler = null;
+  let lastFocus = null;
+
+  /**
+   * Ленивая привязка к DOM.
+   */
+  function bind() {
+    if (overlay) return;
+
+    overlay = document.getElementById('overlay');
+    modal = document.getElementById('modal');
+    titleEl = document.getElementById('modal-t');
+    bodyEl = document.getElementById('modal-b');
+    footEl = document.getElementById('modal-f');
+    closeBtn = document.getElementById('modal-x');
+
+    if (closeBtn) closeBtn.addEventListener('click', close);
+    if (overlay) overlay.addEventListener('click', e => {
+      if (e.target === overlay) close();
+    });
+  }
+
+  /**
+   * @param {Object} opts - {title, body (string|Element),
+   *   buttons: [{text, primary?, danger?, onClick}]}
+   */
+  function open(opts) {
+    bind();
+    if (!overlay) return;
+
+    opts = opts || {};
+    lastFocus = document.activeElement;
+
+    if (titleEl) titleEl.textContent = opts.title || '';
+
+    if (bodyEl) {
+      bodyEl.innerHTML = '';
+
+      if (opts.body) {
+        if (typeof opts.body === 'string') {
+          bodyEl.textContent = opts.body;
+        } else {
+          bodyEl.appendChild(opts.body);
+        }
+      }
+    }
+
+    if (footEl) {
+      footEl.innerHTML = '';
+      // Пустой футер — скрываем целиком (нет пустой полосы).
+      footEl.classList.toggle('hidden', !(opts.buttons && opts.buttons.length));
+
+      (opts.buttons || []).forEach(b => {
+        const btn = document.createElement('button');
+        btn.className = 'mbtn' + (b.primary ? ' primary' : '') + (b.danger ? ' danger' : '');
+        btn.textContent = b.text || 'OK';
+        btn.addEventListener('click', () => {
+          if (b.onClick) b.onClick();
+        });
+        footEl.appendChild(btn);
+      });
+    }
+
+    overlay.classList.add('on');
+
+    if (escHandler) document.removeEventListener('keydown', escHandler);
+    escHandler = e => {
+      if (e.key === 'Escape') close();
+    };
+    document.addEventListener('keydown', escHandler);
+
+    setTimeout(() => {
+      if (!modal) return;
+      const focusable = modal.querySelectorAll('button, input, textarea, [tabindex]:not([tabindex="-1"])');
+      if (focusable.length) focusable[0].focus();
+    }, 50);
+  }
+
+  /**
+   * Закрыть.
+   */
+  function close() {
+    if (!overlay) return;
+
+    overlay.classList.remove('on');
+
+    if (escHandler) {
+      document.removeEventListener('keydown', escHandler);
+      escHandler = null;
+    }
+
+    if (lastFocus && lastFocus.focus) {
+      try { lastFocus.focus(); } catch (_) {}
+    }
+  }
+
+  /**
+   * @param {string} title
+   * @param {string} text
+   * @param {Function} onOk
+   * @param {string} [okText]
+   * @param {Object} [opts] - {danger: boolean} - розовая кнопка ОК.
+   */
+  function confirm(title, text, onOk, okText, opts) {
+    const o = opts || {};
+    open({
+      title,
+      body: text,
+      buttons: [
+        { text: I18n.t('btn.cancel'), onClick: close },
+        {
+          text: okText || 'OK',
+          primary: !o.danger,
+          danger: !!o.danger,
+          onClick: () => {
+            close();
+            if (onOk) onOk();
+          },
+        },
+      ],
+    });
+  }
+
+  return { open, close, confirm };
 }, ['I18n']);
-// └ Modal.confirm(title, text, onOk, okText, opts={danger:true|false})
 // ─── UI/Modal ─── END ───────────────────────────────────────────────────────
 
 // ─── UI/Toast ─── START ─────────────────────────────────────────────────────
 /**
- * show(type, msg, ms?) — 4 типа, лимит 3, авто-fade, haptic через
- * TelegramAdapter (DI.resolve в try — как в v0.9.9).
- * Контейнер #toasts — FIXED снизу (см. style.css патч H-01).
+ * Тосты: 4 типа, лимит, автоудаление, haptic.
+ * Контейнер #toasts — FIXED снизу, z-index 1300 (см. style.css):
+ * видны поверх модалки и noteview (H-01).
  */
 DI.register('Toast', function (Config) {
-  // TODO: реализация
+  /** @type {Object<string, string>} */
+  const ICONS = { ok: '✓', err: '✕', warn: '!', info: '◆' };
+
+  /** @type {HTMLElement|null} */
+  let container = null;
+
+  /**
+   * @param {'ok'|'err'|'warn'|'info'} type
+   */
+  function haptic(type) {
+    try {
+      const tg = DI.resolve('TelegramAdapter');
+      if (tg && tg.isTelegram()) {
+        if (type === 'ok') tg.hapticFeedback('success');
+        else if (type === 'err') tg.hapticFeedback('error');
+        else tg.hapticFeedback('light');
+      }
+    } catch (_) {} // адаптер недоступен до BOOT-фазы — не важно
+  }
+
+  /**
+   * @param {'ok'|'err'|'warn'|'info'} type
+   * @param {string} msg
+   * @param {number} [ms]
+   */
+  function show(type, msg, ms) {
+    if (!container) container = document.getElementById('toasts');
+    if (!container) return;
+
+    const cls = ICONS[type] ? type : 'info';
+    haptic(type);
+
+    const el = document.createElement('div');
+    el.className = 'toast ' + cls;
+
+    const ic = document.createElement('span');
+    ic.className = 't-ic';
+    ic.textContent = ICONS[cls];
+
+    const m = document.createElement('span');
+    m.textContent = String(msg || '');
+
+    el.appendChild(ic);
+    el.appendChild(m);
+    container.appendChild(el);
+
+    const limit = Config.get('toastMaxVisible', 3);
+    while (container.children.length > limit) {
+      container.removeChild(container.firstChild);
+    }
+
+    setTimeout(() => {
+      el.style.transition = 'opacity .25s, transform .25s';
+      el.style.opacity = '0';
+      el.style.transform = 'translateY(6px)';
+
+      setTimeout(() => {
+        try { el.remove(); } catch (_) {}
+      }, 260);
+    }, ms || Config.get('toastDefaultDuration', 2200));
+  }
+
+  return { show };
 }, ['Config']);
 // ─── UI/Toast ─── END ───────────────────────────────────────────────────────
 
 // ─── UI/Progress ─── START ──────────────────────────────────────────────────
 /**
- * Оверлей загрузки модели: показ с задержкой 500мс, скрытие по
- * ai:status model. НОВОЕ v1.0: кнопка «Продолжить без ИИ» (скрытие
- * оверлея вручную; модель докачается в фоне) — модель не блокирует
- * интерфейс, заметки сохраняются без вектора до ai:ready.
+ * Оверлей загрузки модели: показ с задержкой 500мс (быстрый кэш-старт
+ * не мелькает), скрытие по ai:status model.
+ *
+ * v1.0: кнопка «Продолжить без ИИ» — оверлей перестаёт быть
+ * блокировкой. Модель качается в фоне; если докачается — штатный
+ * ai:ready → backfill. Заметки, созданные до готовности, сохраняются
+ * без вектора (null) и доэмбедживаются автоматически.
+ * stalled (120с без прогресса / ошибка воркера) — оверлей уходит сам.
  */
 DI.register('Progress', function (bus, I18n) {
-  // TODO: реализация
+  let overlay, fill, pctEl, infoEl, skipBtn;
+  let showTimer = null;
+  let forcedSkip = false;
+  const SHOW_DELAY = 500;
+
+  /**
+   * Привязка к DOM + кнопка «Продолжить без ИИ».
+   */
+  function bind() {
+    if (overlay) return;
+
+    overlay = document.getElementById('progress');
+    fill = document.getElementById('prog-fill');
+    pctEl = document.getElementById('prog-pct');
+    infoEl = document.getElementById('prog-info');
+
+    const c = overlay ? overlay.querySelector('.prog-c') : null;
+    if (c && !c.querySelector('.prog-skip')) {
+      skipBtn = document.createElement('button');
+      skipBtn.className = 'prog-skip';
+      skipBtn.type = 'button';
+      skipBtn.textContent = I18n.t('progress.skip');
+      skipBtn.addEventListener('click', skip);
+      c.appendChild(skipBtn);
+    }
+  }
+
+  /**
+   * Показ (если юзер ещё не пропустил).
+   */
+  function show() {
+    if (forcedSkip) return;
+    if (overlay) overlay.classList.add('on');
+  }
+
+  /**
+   * Скрытие.
+   */
+  function hide() {
+    if (overlay) overlay.classList.remove('on');
+  }
+
+  /**
+   * Ручной пропуск: интерфейс свободен, модель докачивается в фоне.
+   */
+  function skip() {
+    forcedSkip = true;
+    if (showTimer) {
+      clearTimeout(showTimer);
+      showTimer = null;
+    }
+    hide();
+  }
+
+  /**
+   * @param {Object} data - {pct|percent, loadedMB, totalMB, model}
+   */
+  function update(data) {
+    if (!data) return;
+
+    const p = Math.max(0, Math.min(100, Math.round(data.pct || data.percent || 0)));
+
+    if (fill) {
+      fill.style.width = p + '%';
+    }
+
+    if (pctEl) {
+      let text = p + '%';
+
+      if (data.loadedMB) {
+        text = data.loadedMB + ' MB';
+        if (data.totalMB) text += ' / ' + data.totalMB + ' MB';
+      }
+
+      pctEl.textContent = text;
+    }
+
+    if (infoEl && data.model) {
+      infoEl.textContent = data.model;
+    }
+  }
+
+  /**
+   * Инициализация.
+   */
+  function init() {
+    bind();
+
+    bus.on('ai:progress', e => update(e));
+
+    bus.on('ai:status', e => {
+      if (!e) return;
+
+      if (e.mode === 'loading') {
+        if (e.stalled) {
+          // Загрузка сорвалась — оверлей не нужен, интерфейс свободен.
+          skip();
+          return;
+        }
+
+        update(e);
+
+        if (!showTimer && overlay && !overlay.classList.contains('on') && !forcedSkip) {
+          showTimer = setTimeout(() => {
+            show();
+            showTimer = null;
+          }, SHOW_DELAY);
+        }
+      } else {
+        // model
+        if (showTimer) {
+          clearTimeout(showTimer);
+          showTimer = null;
+        }
+        forcedSkip = true;
+        hide();
+      }
+    });
+
+    bus.on('i18n:change', () => {
+      if (skipBtn) skipBtn.textContent = I18n.t('progress.skip');
+    });
+  }
+
+  return { init, show, hide, update };
 }, ['EventBus', 'I18n']);
 // ─── UI/Progress ─── END ────────────────────────────────────────────────────
 
 // ─── UI/HeaderStatus ─── START ──────────────────────────────────────────────
 /**
- * Индикаторы сеть/ИИ (dot ok/warn/err/load), офлайн-бар, клик по
- * статусу сети → рестарт NetService. НОВОЕ v1.0: ai-статус
- * 'loading'+stalled → «ии нет» (dot warn); title-подсказка на клике.
+ * Индикаторы шапки: сеть/ИИ, офлайн-бар, клик по статусу сети —
+ * переподключение.
+ *
+ * ИЗМЕНЕНИЕ v1.0: ai-статус stalled → 'ии нет' (dot warn) —
+ * вместо вечно-пульсирующего «модель» при сорвавшейся загрузке.
  */
 DI.register('HeaderStatus', function (bus, I18n, Embedder) {
-  // TODO: реализация
+  let netDot, netTxt, aiDot, aiTxt, offlineBar;
+  let unsubs = [];
+  let currentNetStatus = 'disconnected';
+  let currentAiState = { mode: 'loading', percent: 0, stalled: false };
+
+  /**
+   * Привязка к DOM.
+   */
+  function bind() {
+    netDot = document.getElementById('st-net-dot');
+    netTxt = document.getElementById('st-net-txt');
+    aiDot = document.getElementById('st-ai-dot');
+    aiTxt = document.getElementById('st-ai-txt');
+    offlineBar = document.getElementById('offline-bar');
+  }
+
+  /**
+   * @param {string} mode - 'loading'|'model'
+   * @param {number} [percent]
+   * @param {boolean} [stalled]
+   */
+  function setAI(mode, percent, stalled) {
+    currentAiState = { mode, percent: percent || 0, stalled: !!stalled };
+
+    if (!aiDot || !aiTxt) return;
+
+    if (mode === 'model') {
+      aiDot.className = 'dot ok';
+      aiTxt.textContent = I18n.t('st.ai.ready');
+    } else if (stalled) {
+      aiDot.className = 'dot warn';
+      aiTxt.textContent = I18n.t('st.ai.off');
+    } else {
+      aiDot.className = 'dot load';
+      aiTxt.textContent = I18n.t('st.ai.loading') + (currentAiState.percent ? ' ' + Math.round(currentAiState.percent) + '%' : '');
+    }
+  }
+
+  /**
+   * @param {string} status
+   */
+  function setNet(status) {
+    currentNetStatus = status;
+
+    if (!netDot || !netTxt) return;
+
+    const map = {
+      connected: ['ok', 'st.net.online'],
+      connecting: ['load', 'st.net.connecting'],
+      reconnecting: ['warn', 'st.net.reconnecting'],
+      failed: ['err', 'st.net.failed'],
+      disconnected: ['', 'st.net'],
+    };
+
+    const [cls, key] = map[status] || ['', 'st.net'];
+    netDot.className = 'dot' + (cls ? ' ' + cls : '');
+    netTxt.textContent = I18n.t(key);
+
+    if (offlineBar) {
+      const offline = status === 'failed' && typeof navigator !== 'undefined' && navigator.onLine === false;
+      offlineBar.classList.toggle('on', offline);
+    }
+  }
+
+  /**
+   * Инициализация.
+   */
+  function init() {
+    bind();
+
+    if (netTxt) {
+      netTxt.style.cursor = 'pointer';
+      netTxt.addEventListener('click', () => {
+        try {
+          const NetService = DI.resolve('NetService');
+          if (NetService) {
+            NetService.stop(false);
+            setTimeout(() => NetService.start(), 500);
+          }
+        } catch (_) {}
+      });
+    }
+
+    window.addEventListener('offline', () => setNet('failed'));
+    window.addEventListener('online', () => {
+      if (offlineBar) offlineBar.classList.remove('on');
+    });
+
+    unsubs.push(bus.on('ai:status', e => setAI(e.mode, e.percent, e.stalled)));
+    unsubs.push(bus.on('net:status', e => setNet(e.status)));
+
+    unsubs.push(bus.on('i18n:change', () => {
+      setAI(currentAiState.mode, currentAiState.percent, currentAiState.stalled);
+      setNet(currentNetStatus);
+    }));
+
+    const init = Embedder.getState();
+    setAI(init.mode, init.percent, init.stalled);
+    setNet('disconnected');
+  }
+
+  /**
+   * Отписка.
+   */
+  function destroy() {
+    unsubs.forEach(u => {
+      try { u(); } catch (_) {}
+    });
+    unsubs = [];
+  }
+
+  return { init, destroy };
 }, ['EventBus', 'I18n', 'Embedder']);
 // ─── UI/HeaderStatus ─── END ────────────────────────────────────────────────
 
@@ -4881,40 +5903,789 @@ DI.register('Onboarding', function (Config, Modal, I18n, Embedder) {
 
 // ─── UI/Composer ─── START ──────────────────────────────────────────────────
 /**
- * Лимиты (soft/hard/max), тумблер видимости, Ctrl+Enter, VisualViewport.
+ * Ввод: лимиты (soft 1200 / hard 2000 / max 2500), тумблер видимости,
+ * Ctrl+Enter, VisualViewport-клавиатура, отправка через Notes.create.
+ * Родитель = пин {uid, owner} (И1). После отправки пин НЕ снимается
+ * («мама» для серии заметок); контекст возвращается в 'pin'.
  *
- * ИЗМЕНЕНИЯ v1.0:
- * - Notes.create REJECT → catch: тост 'toast.save.fail', текст ОСТАЁТСЯ
- *   в textarea, кнопка восстанавливается. (B-02)
- * - .then(note) — note гарантированно не null (контракт Notes).
- * - При mode='loading' и непустом тексте: hint 'ai.pending' (warn),
- *   отправка НЕ блокируется (заметка сохранится, backfill догонит).
+ * КОНТРАКТ v1.0:
+ * - Notes.create REJECT → тост 'toast.save.fail', текст ОСТАЁТСЯ в
+ *   textarea, кнопка восстанавливается (Закон 2, B-02).
+ * - mode='loading' (не stalled) и текст непуст → hint 'ai.pending':
+ *   отправка НЕ блокируется — заметка сохранится без вектора,
+ *   backfill доэмбеддит после ai:ready.
+ * - Double-click защита: sending-флаг + disabled.
  */
 DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils, Config, Embedder) {
-  // TODO: реализация
+  let ta, cnt, sendBtn, toggle, footEl;
+  let sending = false;
+  let unsubs = [];
+  let vvCleanup = null;
+  let iconTimer = null;
+
+  const SEND_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></svg>';
+
+  const SEND_SPINNER = '<span class="btn-spinner"></span>';
+
+  /**
+   * Вставить иконку отправки, если кнопка пуста.
+   */
+  function ensureSendIcon() {
+    if (!sendBtn || sending) return;
+    if (!sendBtn.querySelector('svg, .btn-spinner')) {
+      sendBtn.innerHTML = SEND_ICON;
+    }
+  }
+
+  /**
+   * Счётчик и лимиты. Приоритет подсказок: max > hard > soft >
+   * ai.pending (модель учится, текст непуст).
+   */
+  function updateCounter() {
+    if (!cnt || !ta) return;
+
+    const len = ta.value.length;
+    const max = Config.get('maxPostLength', 2500);
+    const soft = Config.get('softLimit', 1200);
+    const hard = Config.get('hardLimit', 2000);
+
+    cnt.textContent = Utils.word('symbols', len, I18n.getLang());
+
+    let color = 'var(--text-3)';
+    let hint = null;
+    let hintLevel = null;
+
+    if (len >= max) {
+      color = 'var(--rose)';
+      hint = I18n.t('ed.limit.max', { max });
+      hintLevel = 'err';
+    } else if (len >= hard) {
+      color = 'var(--rose)';
+      hint = I18n.t('ed.limit.hard');
+      hintLevel = 'err';
+    } else if (len >= soft) {
+      color = 'var(--amber)';
+      hint = I18n.t('ed.limit.soft');
+      hintLevel = 'warn';
+    } else if (len > 0) {
+      const st = Embedder.getState();
+      if (st.mode === 'loading' && !st.stalled) {
+        hint = I18n.t('ai.pending');
+        hintLevel = 'warn';
+      }
+    }
+
+    cnt.style.color = color;
+    updateHint(hint, hintLevel);
+
+    if (sendBtn) {
+      sendBtn.disabled = len >= max || sending;
+    }
+  }
+
+  /**
+   * @param {string|null} text
+   * @param {'warn'|'err'|null} [level]
+   */
+  function updateHint(text, level) {
+    let hintEl = document.getElementById('ed-hint');
+
+    if (!text) {
+      if (hintEl) hintEl.remove();
+      return;
+    }
+
+    if (!hintEl) {
+      hintEl = document.createElement('div');
+      hintEl.id = 'ed-hint';
+      if (footEl && footEl.parentNode) {
+        footEl.parentNode.insertBefore(hintEl, footEl.nextSibling);
+      }
+    }
+
+    hintEl.textContent = text;
+    hintEl.className = level === 'err' ? 'err' : 'warn';
+  }
+
+  /**
+   * @param {string} mode - 'private' | 'world'
+   */
+  function reflectMode(mode) {
+    if (!toggle) return;
+    toggle.setAttribute('data-mode', mode);
+    toggle.querySelectorAll('.mt-opt').forEach(o =>
+      o.classList.toggle('on', o.getAttribute('data-v') === mode)
+    );
+  }
+
+  /**
+   * @param {boolean} on
+   */
+  function setSendingUI(on) {
+    if (!sendBtn) return;
+    sendBtn.disabled = on;
+    sendBtn.classList.toggle('sending', on);
+    sendBtn.innerHTML = on ? SEND_SPINNER : SEND_ICON;
+  }
+
+  /**
+   * Отправка: Notes.create(text, visibility, parent).
+   */
+  function send() {
+    if (sending) return;
+
+    const text = ta.value.trim();
+    if (!text) {
+      Toast.show('warn', I18n.t('toast.empty'));
+      return;
+    }
+
+    const max = Config.get('maxPostLength', 2500);
+    if (text.length > max) {
+      Toast.show('err', I18n.t('ed.limit.max', { max }));
+      return;
+    }
+
+    const sendMode = Store.get('sendMode');
+    const visibility = sendMode === 'world' ? 'public' : 'private';
+
+    sending = true;
+    setSendingUI(true);
+
+    const finish = () => {
+      sending = false;
+      setSendingUI(false);
+      ta.value = '';
+      ta.style.height = 'auto';
+      Context.setInput('');
+      updateCounter();
+    };
+
+    const pin = Context.getPin();
+    const parent = pin ? { uid: pin.uid, owner: pin.owner || null } : null;
+
+    Notes.create(text, visibility, parent)
+      .then(note => {
+        Toast.show('ok', I18n.t(visibility === 'public' ? 'toast.saved.public' : 'toast.saved.private')
+          + (note && note.parent ? ' · ' + I18n.t('inf.linked') : ''));
+        finish();
+      })
+      .catch(() => {
+        // Закон 2: текст пользователя неприкосновенен — остаётся
+        // в textarea, кнопка восстанавливается. Причину Notes уже
+        // записал в лог.
+        Toast.show('err', I18n.t('toast.save.fail'));
+        sending = false;
+        setSendingUI(false);
+      });
+  }
+
+  /**
+   * VisualViewport-обработка клавиатуры.
+   */
+  function setupKeyboardHandler() {
+    if (!window.visualViewport) return;
+
+    const vv = window.visualViewport;
+
+    const onResize = () => {
+      const app = document.getElementById('app');
+      if (!app) return;
+
+      const keyboardHeight = window.innerHeight - vv.height;
+
+      if (keyboardHeight > 100) {
+        app.style.height = vv.height + 'px';
+        app.style.maxHeight = vv.height + 'px';
+      } else {
+        app.style.height = '';
+        app.style.maxHeight = '';
+      }
+    };
+
+    vv.addEventListener('resize', onResize);
+    vv.addEventListener('scroll', onResize);
+
+    vvCleanup = () => {
+      vv.removeEventListener('resize', onResize);
+      vv.removeEventListener('scroll', onResize);
+    };
+  }
+
+  /**
+   * Инициализация.
+   */
+  function init() {
+    ta = document.getElementById('ed-ta');
+    cnt = document.getElementById('ed-cnt');
+    sendBtn = document.getElementById('btn-send');
+    toggle = document.getElementById('mode-toggle');
+    footEl = document.getElementById('ed-foot');
+
+    if (!ta) return;
+
+    ensureSendIcon();
+
+    if (iconTimer) clearTimeout(iconTimer);
+    iconTimer = setTimeout(ensureSendIcon, 300);
+
+    ta.setAttribute('maxlength', Config.get('maxPostLength', 2500));
+
+    ta.addEventListener('input', () => {
+      ta.style.height = 'auto';
+      ta.style.height = Math.min(ta.scrollHeight, 120) + 'px';
+
+      updateCounter();
+      Context.setInput(ta.value);
+    });
+
+    setupKeyboardHandler();
+
+    ta.addEventListener('keydown', e => {
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        send();
+      }
+    });
+
+    if (sendBtn) sendBtn.addEventListener('click', send);
+
+    if (toggle) {
+      toggle.addEventListener('click', e => {
+        const opt = e.target.closest('.mt-opt');
+        if (opt && opt.getAttribute('data-v')) {
+          Store.setState({ sendMode: opt.getAttribute('data-v') });
+        }
+      });
+    }
+
+    unsubs.push(Store.subscribe(s => s.sendMode, reflectMode));
+
+    // Состояние модели меняется → пересчитать подсказку ai.pending.
+    unsubs.push(bus.on('ai:status', () => updateCounter()));
+
+    unsubs.push(bus.on('i18n:change', () => {
+      updateCounter();
+      reflectMode(Store.get('sendMode'));
+    }));
+
+    reflectMode(Store.get('sendMode'));
+    updateCounter();
+  }
+
+  /**
+   * Отписка.
+   */
+  function destroy() {
+    unsubs.forEach(u => {
+      try { u(); } catch (_) {}
+    });
+    unsubs = [];
+
+    if (iconTimer) {
+      clearTimeout(iconTimer);
+      iconTimer = null;
+    }
+
+    if (vvCleanup) {
+      try { vvCleanup(); } catch (_) {}
+      vvCleanup = null;
+    }
+  }
+
+  return { init, destroy, send };
 }, ['Context', 'Notes', 'Store', 'I18n', 'EventBus', 'Toast', 'Utils', 'Config', 'Embedder']);
 // ─── UI/Composer ─── END ────────────────────────────────────────────────────
 
 // ─── UI/FeedView ─── START ──────────────────────────────────────────────────
 /**
  * Рендер ленты: хронология / пин-дрейф / ввод; карточки, связи,
- * резонанс, история (кнопка btn-history).
+ * резонанс, история (#btn-history).
  *
- * ИЗМЕНЕНИЯ v1.0:
- * - Анимация входа только для НОВЫХ карточек (diff по uid): повторный
- *   рендер не мигает. (M-02)
- * - Тикер 30с: обновляет только текст .note-date (dataset.ts), без
- *   пересборки. (твой баг «время не тикает»)
- * - isTyping && ctx.vector===null → показываем ПРЕЖНЮЮ ленту (state.feed
- *   или последние lists), пустое состояние НЕ показываем. (H-05)
- * - Кнопка ↳: слушатель вешается СРАЗУ с флагом parentOk; резолв
- *   hasResolvableParent поднимает флаг / вешает orphan. Быстрый клик до
- *   резолва — ничего (без всплытия в пин). (M-08)
- * - Клик по карточке без вектора — toast 'toast.pin.novector' (warn).
+ * ИЗМЕНЕНИЯ v1.0 против v0.9.9:
+ * - Анимация входа только НОВЫМ карточкам (diff по uid): повторный
+ *   рендер не мигает (M-02). Стагger считает только новые.
+ * - Тикер 30с: обновляет текст .note-date (dataset.ts), без
+ *   пересборки ленты — «н минут назад» живёт.
+ * - isTyping && ctx.vector===null → прежняя лента (state.feed),
+ *   пустого состояния-вспышки нет (H-05). Сегменты в этом окне
+ *   скрыты (вектор ещё не готов — счётчики были бы ложными).
+ * - Кнопка ↳: слушатель вешается СРАЗУ с флагом parentOk; быстрый
+ *   клик до резолва — тихо, без всплытия в пин (M-08).
+ * - Клик по карточке без вектора → warn-тост (честный отказ пина).
+ * Контент — только textContent/createElement (Закон 1; innerHTML —
+ * исключительно статические sig-bar полоски).
  */
-DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Influence, Provenance, Modal, NetService) {
-  // TODO: реализация
-}, ['Store', 'Context', 'I18n', 'Utils', 'Config', 'EventBus', 'Influence', 'Provenance', 'Modal', 'NetService']);
+DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Influence, Provenance, Modal, NetService, Toast) {
+  let feedEl, emptyEl, emptyT, segBar, ctxBanner, ctxSrc, ctxTxt, ctxX;
+  let cLocal, cWorld, cSeren, histBtn;
+  let segBtns = [];
+  let unsubs = [];
+  let rafPending = false;
+  let tickerTimer = null;
+
+  /**
+   * Привязка к DOM.
+   */
+  function bind() {
+    feedEl = document.getElementById('feed');
+    emptyEl = document.getElementById('feed-empty');
+    emptyT = document.getElementById('feed-empty-t');
+    segBar = document.getElementById('seg');
+    ctxBanner = document.getElementById('ctx-banner');
+    ctxSrc = document.getElementById('ctx-src');
+    ctxTxt = document.getElementById('ctx-txt');
+    ctxX = document.getElementById('ctx-x');
+    cLocal = document.getElementById('c-local');
+    cWorld = document.getElementById('c-world');
+    cSeren = document.getElementById('c-seren');
+    histBtn = document.getElementById('btn-history');
+    segBtns = Array.from(document.querySelectorAll('.seg-b'));
+  }
+
+  /**
+   * Коалесценция рендеров.
+   */
+  function scheduleRender() {
+    if (rafPending) return;
+    rafPending = true;
+    requestAnimationFrame(() => {
+      rafPending = false;
+      render();
+    });
+  }
+
+  /**
+   * @param {Object} n
+   * @returns {boolean}
+   */
+  function isPinnedCard(n) {
+    const ctx = Store.get('context');
+    return ctx.source === 'pin' && ctx.uid === n.uid;
+  }
+
+  /**
+   * @param {Object} n
+   */
+  function onNoteClick(n) {
+    const ctx = Store.get('context');
+
+    // Повторный клик по закреплённой — снять пин.
+    if ((ctx.source === 'pin' || ctx.source === 'drift') && ctx.uid === n.uid) {
+      Context.clearPin();
+      return;
+    }
+
+    if (n.vector) {
+      Context.setPin(n);
+    } else {
+      // Без вектора (модель не готова / fact-only) — честный отказ.
+      Toast.show('warn', I18n.t('toast.pin.novector'));
+    }
+  }
+
+  /**
+   * @param {Array<Object>} childrenList
+   */
+  function renderChildrenModal(childrenList) {
+    const truncate = Config.get('truncateTextLength', 140);
+    const body = document.createElement('div');
+    body.style.cssText = 'display:flex;flex-direction:column;gap:8px;';
+
+    if (!childrenList.length) {
+      const empty = document.createElement('div');
+      empty.style.cssText = 'color:var(--text-3);font-size:13px;text-align:center;padding:12px;';
+      empty.textContent = I18n.t('inf.nochildren');
+      body.appendChild(empty);
+    } else {
+      childrenList.forEach(c => {
+        const item = document.createElement('button');
+        item.className = 'nv-act';
+        item.style.cssText = 'text-align:left;justify-content:flex-start;white-space:normal;height:auto;min-height:40px;width:100%;';
+        item.textContent = (c.text || '').slice(0, truncate);
+
+        item.addEventListener('click', () => {
+          Modal.close();
+          try { bus.emit('note:open', { uid: c.uid }); } catch (_) {}
+        });
+
+        body.appendChild(item);
+      });
+    }
+
+    Modal.open({
+      title: I18n.t('inf.children') + (childrenList.length ? ' · ' + childrenList.length : ''),
+      body: body,
+      buttons: [{ text: I18n.t('btn.close'), onClick: () => Modal.close() }],
+    });
+  }
+
+  /**
+   * @param {Object} note
+   */
+  function showChildren(note) {
+    Provenance.children(note.uid).then(childrenList => {
+      renderChildrenModal(childrenList);
+    }).catch(() => {});
+  }
+
+  /**
+   * @param {Object} note
+   * @param {Array<Object>} chain
+   */
+  function renderAncestorsModal(note, chain) {
+    const truncate = Config.get('truncateTextLength', 140);
+    const body = document.createElement('div');
+    body.style.cssText = 'display:flex;flex-direction:column;gap:8px;';
+
+    if (!chain.length) {
+      const empty = document.createElement('div');
+      empty.style.cssText = 'color:var(--text-3);font-size:13px;text-align:center;padding:12px;';
+      empty.textContent = I18n.t('inf.noancestors');
+      body.appendChild(empty);
+    } else {
+      chain.forEach((c, i) => {
+        const item = document.createElement('button');
+        item.className = 'nv-act';
+        item.style.cssText = 'text-align:left;justify-content:flex-start;white-space:normal;height:auto;min-height:40px;width:100%;';
+        item.style.paddingLeft = (16 + i * 14) + 'px';
+        item.textContent = '↳ ' + (c.text || '').slice(0, truncate);
+
+        item.addEventListener('click', () => {
+          Modal.close();
+          try { bus.emit('note:open', { uid: c.uid }); } catch (_) {}
+        });
+
+        body.appendChild(item);
+      });
+    }
+
+    Modal.open({
+      title: I18n.t('inf.lineage') + (chain.length ? ' · ' + chain.length : ''),
+      body: body,
+      buttons: [{ text: I18n.t('btn.close'), onClick: () => Modal.close() }],
+    });
+  }
+
+  /**
+   * @param {Object} note
+   */
+  function showAncestors(note) {
+    Provenance.ancestors(note.uid).then(chain => {
+      renderAncestorsModal(note, chain);
+    }).catch(() => {});
+  }
+
+  /**
+   * @returns {HTMLSpanElement}
+   */
+  function createSep() {
+    const sep = document.createElement('span');
+    sep.className = 'note-meta-sep';
+    return sep;
+  }
+
+  /**
+   * @param {Object} n
+   * @param {boolean} isRanked
+   * @param {number} i - индекс среди НОВЫХ карточек (для stagger).
+   * @returns {HTMLDivElement}
+   */
+  function card(n, isRanked, i) {
+    const el = document.createElement('div');
+    el.className = 'note' + (isPinnedCard(n) ? ' pinned' : '');
+    el.style.animationDelay = Math.min(i * 25, 300) + 'ms';
+    el.dataset.uid = n.uid;
+
+    const txt = document.createElement('div');
+    txt.className = 'note-txt';
+    txt.textContent = n.text || '';
+    el.appendChild(txt);
+
+    const meta = document.createElement('div');
+    meta.className = 'note-meta';
+
+    const tag = document.createElement('span');
+    if (n.own) {
+      tag.className = 'note-tag ' + (n.visibility === 'public' ? 'world' : 'priv');
+      tag.textContent = n.visibility === 'public' ? I18n.t('base.tag.shared') : I18n.t('base.tag.private');
+    } else {
+      tag.className = 'note-tag world';
+      tag.textContent = '· ' + Utils.shortPk(n.owner || '');
+    }
+    meta.appendChild(tag);
+
+    const hasNav = !!(n.parent && n.parent.uid);
+    const res = Influence.resonance(n.uid);
+    const hasResonance = res > 0;
+
+    if (hasNav || hasResonance) {
+      meta.appendChild(createSep());
+
+      if (hasNav) {
+        const link = document.createElement('button');
+        link.className = 'note-parent';
+        link.textContent = '↳';
+        link.title = I18n.t('inf.lineage');
+        link.setAttribute('aria-label', I18n.t('inf.openparent'));
+
+        // Слушатель сразу; резолв поднимает флаг или вешает orphan.
+        // Быстрый клик до резолва — тихо (M-08: без всплытия в пин).
+        let parentOk = false;
+        link.addEventListener('click', e => {
+          e.stopPropagation();
+          if (parentOk) showAncestors(n);
+        });
+
+        Provenance.hasResolvableParent(n).then(ok => {
+          parentOk = ok;
+          if (!ok) {
+            link.classList.add('orphan');
+            link.title = I18n.t('inf.orphan.hint');
+          }
+        }).catch(() => {
+          link.classList.add('orphan');
+          link.title = I18n.t('inf.orphan.hint');
+        });
+
+        meta.appendChild(link);
+      }
+
+      if (hasResonance) {
+        const r = document.createElement('button');
+        r.className = 'note-sim';
+        r.textContent = '◆' + res;
+        r.title = I18n.t('inf.resonance');
+        r.setAttribute('aria-label', I18n.t('inf.resonance'));
+
+        r.addEventListener('click', e => {
+          e.stopPropagation();
+          showChildren(n);
+        });
+
+        meta.appendChild(r);
+      }
+    }
+
+    meta.appendChild(createSep());
+
+    if (isRanked && typeof n.score === 'number') {
+      const threshold = Config.get('threshold', 0.81);
+      const serendipity = Config.get('serendipity', 0.07);
+      const serenMid = threshold - serendipity / 2;
+      const displayMode = Config.get('similarityDisplay', 'signal');
+      const pct = Math.round(n.score * 100);
+
+      const sim = document.createElement('span');
+      sim.className = 'note-sim-info';
+
+      if (displayMode === 'percent') {
+        sim.textContent = pct + '%';
+        sim.title = I18n.t('sim.score');
+      } else {
+        if (n.score >= threshold) {
+          sim.innerHTML = '<span class="sig-bar sig-full"></span><span class="sig-bar sig-full"></span><span class="sig-bar sig-full"></span>';
+          sim.title = I18n.t('sim.level.high') + ' (' + pct + '%)';
+        } else if (n.score >= serenMid) {
+          sim.innerHTML = '<span class="sig-bar sig-full"></span><span class="sig-bar sig-full"></span><span class="sig-bar sig-empty"></span>';
+          sim.title = I18n.t('sim.level.mid') + ' (' + pct + '%)';
+        } else {
+          sim.innerHTML = '<span class="sig-bar sig-full"></span><span class="sig-bar sig-empty"></span><span class="sig-bar sig-empty"></span>';
+          sim.title = I18n.t('sim.level.low') + ' (' + pct + '%)';
+        }
+        const label = document.createElement('span');
+        label.className = 'sig-label';
+        label.textContent = n.score >= threshold
+          ? I18n.t('sim.level.high')
+          : (n.score >= serenMid ? I18n.t('sim.level.mid') : I18n.t('sim.level.low'));
+        sim.appendChild(label);
+      }
+
+      meta.appendChild(sim);
+    }
+
+    const date = document.createElement('span');
+    date.className = 'note-date';
+    date.dataset.ts = String(n.updatedAt || n.createdAt || 0);
+    date.textContent = Utils.fmtRelativeTime(n.updatedAt || n.createdAt, I18n.getLang(), I18n.t);
+    meta.appendChild(date);
+
+    if (n.own) {
+      const openBtn = document.createElement('button');
+      openBtn.className = 'na';
+      openBtn.textContent = '✎';
+      openBtn.title = I18n.t('btn.open');
+      openBtn.setAttribute('aria-label', I18n.t('btn.open'));
+
+      openBtn.addEventListener('click', e => {
+        e.stopPropagation();
+        try { bus.emit('note:open', { uid: n.uid }); } catch (_) {}
+      });
+
+      meta.appendChild(openBtn);
+    }
+
+    el.appendChild(meta);
+    el.addEventListener('click', () => onNoteClick(n));
+    return el;
+  }
+
+  /**
+   * Тикер дат: раз в 30с обновляет только текст, без пересборки.
+   */
+  function startTicker() {
+    if (tickerTimer) clearInterval(tickerTimer);
+
+    tickerTimer = setInterval(() => {
+      if (document.hidden || !feedEl) return;
+      const lang = I18n.getLang();
+      feedEl.querySelectorAll('.note-date').forEach(el => {
+        const ts = Number(el.dataset.ts) || 0;
+        if (ts) el.textContent = Utils.fmtRelativeTime(ts, lang, I18n.t);
+      });
+    }, 30000);
+  }
+
+  /**
+   * Полный рендер.
+   */
+  function render() {
+    if (!feedEl) return;
+
+    const state = Store.getState();
+    const ctx = state.context;
+    const isPinnedMode = ctx.source === 'pin';
+    const isTyping = ctx.source === 'input';
+    const isDrift = ctx.source === 'drift';
+    const isRanked = isPinnedMode || isTyping || isDrift;
+    const hasVector = !!ctx.vector;
+
+    // Сегменты — только в режиме ввода с готовым вектором
+    // (до готовности счётчики были бы нулевыми/ложными).
+    segBar.classList.toggle('on', isTyping && hasVector);
+    ctxBanner.classList.toggle('on', isPinnedMode || isDrift);
+
+    if (isPinnedMode || isDrift) {
+      ctxSrc.textContent = isDrift ? I18n.t('ctx.drift') : I18n.t('ctx.pinned');
+      ctxTxt.textContent = isDrift ? (ctx.pinText || ctx.text) : ctx.text;
+    }
+
+    segBtns.forEach(b => {
+      b.classList.toggle('on', b.getAttribute('data-k') === state.seg);
+    });
+
+    cLocal.textContent = state.lists.local.length;
+    cWorld.textContent = state.lists.world.length;
+    cSeren.textContent = state.lists.seren.length;
+
+    let notes;
+
+    if (isPinnedMode || isDrift) {
+      notes = [...state.lists.local, ...state.lists.world, ...state.lists.seren]
+        .sort((a, b) => (b.score || 0) - (a.score || 0));
+    } else if (isTyping && hasVector) {
+      notes = state.lists[state.seg] || [];
+    } else {
+      // Хронология — ИЛИ ввод до готовности вектора: прежняя лента
+      // (H-05: без пустой вспышки на окно debounce+embed).
+      notes = state.feed;
+    }
+
+    // Diff по uid: анимация входа только новым карточкам.
+    const prevUids = new Set();
+    for (const el of feedEl.children) {
+      if (el.dataset && el.dataset.uid) prevUids.add(el.dataset.uid);
+    }
+
+    feedEl.innerHTML = '';
+
+    if (!notes.length) {
+      emptyEl.classList.add('on');
+
+      emptyT.textContent = (isPinnedMode || isDrift)
+        ? I18n.t('empty.world.t')
+        : (isTyping && hasVector ? I18n.t('empty.' + state.seg + '.t') : I18n.t('empty.local.t'));
+    } else {
+      emptyEl.classList.remove('on');
+
+      let newIdx = 0;
+      const frag = document.createDocumentFragment();
+      notes.forEach(n => {
+        const c = card(n, isRanked, newIdx);
+        if (prevUids.has(n.uid)) {
+          c.style.animation = 'none'; // уже была на экране — без мигания
+        } else {
+          newIdx++;
+        }
+        frag.appendChild(c);
+      });
+      feedEl.appendChild(frag);
+    }
+  }
+
+  /**
+   * Инициализация.
+   */
+  function init() {
+    bind();
+    if (!feedEl) return;
+
+    unsubs.push(Store.subscribe(s => s.context, scheduleRender, Store.shallowEqual));
+    unsubs.push(Store.subscribe(s => s.lists, scheduleRender));
+    unsubs.push(Store.subscribe(s => s.feed, scheduleRender));
+    unsubs.push(Store.subscribe(s => s.seg, scheduleRender));
+    unsubs.push(bus.on('i18n:change', scheduleRender));
+    unsubs.push(bus.on('db:change', scheduleRender));
+    unsubs.push(bus.on('db:mirror', scheduleRender));
+    unsubs.push(bus.on('influence:updated', scheduleRender));
+
+    if (histBtn) {
+      histBtn.addEventListener('click', () => NetService.loadHistory());
+
+      unsubs.push(bus.on('net:history', e => {
+        if (!histBtn) return;
+
+        if (e && e.loading) {
+          histBtn.disabled = true;
+          histBtn.textContent = I18n.t('net.loading');
+        } else {
+          histBtn.disabled = false;
+          histBtn.textContent = I18n.t('net.loadmore');
+        }
+      }));
+    }
+
+    segBtns.forEach(b => {
+      b.addEventListener('click', () => {
+        Store.setState({ seg: b.getAttribute('data-k') });
+      });
+    });
+
+    if (ctxX) {
+      ctxX.addEventListener('click', () => Context.clearPin());
+    }
+
+    render();
+    startTicker();
+  }
+
+  /**
+   * Отписка.
+   */
+  function destroy() {
+    unsubs.forEach(u => {
+      try { u(); } catch (_) {}
+    });
+    unsubs = [];
+
+    if (tickerTimer) {
+      clearInterval(tickerTimer);
+      tickerTimer = null;
+    }
+  }
+
+  return { init, destroy, render };
+}, ['Store', 'Context', 'I18n', 'Utils', 'Config', 'EventBus', 'Influence', 'Provenance', 'Modal', 'NetService', 'Toast']);
 // ─── UI/FeedView ─── END ────────────────────────────────────────────────────
 
 // ─── UI/NoteView ─── START ──────────────────────────────────────────────────
