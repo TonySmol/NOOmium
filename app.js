@@ -1,36 +1,79 @@
-// ═══════════════════════════════════════════════════════════════════════════════
-// NOOmium — app.js
+// ═════════════════════════════════════════════════════════════════════════════
+// NOOmium — app.js v1.0.0 «Чистый лист»
 // Соцсеть смыслов: мысли ищутся по значению, а не по словам.
 //
-// МОДЕЛЬ v0.9.0 «Состояния вместо событий»:
-// - Заметка = (uid, owner). Единственная идентичность (И1).
-// - Истина заметки — у владельца: notes у себя, канон в сети (И2).
-// - Канон: kind 30078, replaceable, d = uid. ВСЕ переходы
-//   (создать/скрыть/показать/удалить/править) = новые версии одного
-//   события. Публичная версия — открытый JSON; приватная — NIP-44;
-//   удалённая — открытый факт (И4, И5).
-// - Зеркало читателя сходится: upsert строго по version, обработка
-//   версий в любом порядке даёт один результат (И3).
+// МОДЕЛЬ v1 (унаследована от v0.9):
+// - Заметка = (uid, owner). Истина — у владельца. Канон kind 30078, d = uid.
+// - Все переходы = новые версии одного события. version = noteVersion
+//   (монотонный счётчик владельца, живёт в payload канона).
+// - created_at канона = секунда публикации (свежесть для since-окон).
+// - Зеркало сходится upsert'ом по noteVersion payload; created_at — fallback.
+// - Удалённый канон — открытый факт, несёт noteVersion на момент удаления.
 // - Ответ на запрос (21001) — ссылка (uid, owner), не копия.
-// - kind 5 не используется. eventId отсутствует как понятие.
-// - Офлайн: операции владельца мгновенны локально, сеть догоняет (И6).
-// - Одна запись в зеркале = максимум одна карточка (И7).
+// - Офлайн: операции владельца мгновенны локально, сеть догоняет.
 //
-// СЛОИ: CORE / DATA / AI / NET / DOMAIN / UI / PLATFORM / BOOT.
-// Каждый модуль — одна ответственность, дублей нет.
-// ═══════════════════════════════════════════════════════════════════════════════
+// ЗАКОНЫ КАРКАСА:
+// 1. Контент юзера/сети — только через textContent / createElement. Никакого
+//    innerHTML с данными. (XSS)
+// 2. Методы DOMAIN/Notes reject'ят при ошибке. UI обязан обрабатывать
+//    reject — текст пользователя неприкосновенен. (B-02)
+// 3. Embedder без fallback-хешей: embed() → null, пока модель не готова.
+//    Заметки без вектора легальны; Notes.backfill() доэмбеддит их после
+//    ai:ready. (B-01)
+// 4. Публикация только при version > publishedVersion. (M-03)
+// 5. Слои: CORE / DATA / AI / NET / DOMAIN / UI / PLATFORM / BOOT.
+//    DOMAIN не импортирует UI. UI не пишет в DB напрямую.
+// 6. Тихие catch — только с Logger.warn. Голый catch(_) допускается только
+//    там, где ошибка объективно не важна, и это указано в комментарии.
+//
+// СЛОИ И ПОРЯДОК: см. BOOT.mount — он единственный оркестратор.
+// ═════════════════════════════════════════════════════════════════════════════
 
 'use strict';
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// ВЕРСИЯ ПРИЛОЖЕНИЯ
-// ═══════════════════════════════════════════════════════════════════════════════
-const APP_VERSION = '0.9.9';
+const APP_VERSION = '1.0.0';
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// CORE/DI — ПРЕАМБУЛА
-// Контейнер зависимостей: ленивый резолв, защита от циклов.
-// ═══════════════════════════════════════════════════════════════════════════════
+// ═══ РЕЕСТР СОБЫТИЙ ШИНЫ (полный контракт) ════════════════════════════════════
+//
+// ai:progress   Embedder → Progress            {pct, loadedMB, totalMB, model}
+// ai:status     Embedder → HeaderStatus, Progress  {mode:'loading'|'model', percent?}
+// ai:ready      Embedder → Boot (→ Notes.backfill), HeaderStatus   (однократно)
+//
+// net:status    NetService → HeaderStatus      {status: connecting|connected|
+//               reconnecting|failed|disconnected}
+// net:canon     NetService → Mirror            (raw Nostr event kind 30078)
+// net:answer    NetService → Mirror            {queryId, uid, owner, score}
+// net:history   NetService → FeedView          {loading, window}
+// net:resync    NetService → Mirror            (сброс fetched-дедупа)
+//
+// sync:status   NetService → AccountView       {phase: 'off'|'active'|'idle'}
+// sync:toggle   Account → NetService           {enabled}
+//
+// db:change     DB → Feed, Influence, Provenance, FeedView, BaseView, NetService
+// db:mirror     DB → Feed, Influence, Provenance, FeedView
+//               (не эмитится из updatePublishState — тихая запись)
+//
+// note:created  Notes, Account(импорт) → NetService(очередь), Influence
+// note:updated  Notes → NetService(очередь), Influence
+// note:deleted  Notes → NetService(очередь deleted), Influence(rebuild)
+// note:pin      NoteView → Context              {uid, owner, text, vector}
+// note:open     FeedView, BaseView, модалки → NoteView  {uid}
+// notes:imported Account → Notes               {maxVersion}
+//
+// account:changed Account → NetService(сброс), AccountView(ре-открыть) {pubkey}
+// i18n:change   I18n → все UI-модули            {lang}
+// influence:updated Influence → FeedView
+// mirror:fetch  Mirror → NetService             {uid, owner}
+// wipe:request  MenuView → Boot                 (локальная очистка + сетевой wipe)
+// telegram:theme TelegramAdapter → (резерв)
+//
+// view, seg, sendMode, context, feed, lists — ТОЛЬКО через Store.subscribe.
+// Событий view:changed / view:set / editor:sent / config:imported НЕТ.
+// ═════════════════════════════════════════════════════════════════════════════
+
+// ═══ CORE/DI ═════════════════════════════════════════════════════════════════
+// Контейнер зависимостей: ленивый резолв, кэш, защита от циклов. Реализован —
+// это часть каркаса. (Без изменений от v0.9.9)
 const DI = (() => {
   const factories = new Map();
   const instances = new Map();
@@ -56,26 +99,18 @@ const DI = (() => {
   return { register, resolve };
 })();
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// СЛОЙ: CORE
-// ═══════════════════════════════════════════════════════════════════════════════
+// ═══ СЛОЙ: CORE ═══════════════════════════════════════════════════════════════
 
 // ─── CORE/EventBus ─── START ────────────────────────────────────────────────
 /**
- * Шина событий с точечными подписками и wildcard ('*').
+ * Шина событий. Контракт — см. РЕЕСТР в шапке файла.
+ * on/once/off/emit, wildcard '*'. Ошибки обработчиков изолированы.
+ * Итерация по копии множества: подписка/отписка внутри emit безопасны.
  */
 DI.register('EventBus', function () {
-  /** @type {Map<string, Set<Function>>} */
   const map = new Map();
-  /** @type {Set<Function>} */
   const wild = new Set();
 
-  /**
-   * Подписаться на событие.
-   * @param {string} event - Имя события или '*'.
-   * @param {Function} fn - Обработчик.
-   * @returns {Function} Функция отписки.
-   */
   function on(event, fn) {
     if (typeof fn !== 'function') return () => {};
     if (event === '*') {
@@ -93,12 +128,6 @@ DI.register('EventBus', function () {
     };
   }
 
-  /**
-   * Подписаться на одно срабатывание.
-   * @param {string} event
-   * @param {Function} fn
-   * @returns {Function}
-   */
   function once(event, fn) {
     const off = on(event, (...a) => {
       off();
@@ -107,11 +136,6 @@ DI.register('EventBus', function () {
     return off;
   }
 
-  /**
-   * Отписаться.
-   * @param {string} event
-   * @param {Function} fn
-   */
   function off(event, fn) {
     if (event === '*') {
       wild.delete(fn);
@@ -124,45 +148,32 @@ DI.register('EventBus', function () {
     }
   }
 
-  /**
-   * Эмит. Ошибки обработчиков изолированы.
-   * @param {string} event
-   * @param {*} [payload]
-   */
   function emit(event, payload) {
     const s = map.get(event);
     if (s) {
       for (const fn of Array.from(s)) {
-        try {
-          fn(payload);
-        } catch (e) {
-          console.error('[bus:' + event + ']', e);
-        }
+        try { fn(payload); } catch (e) { console.error('[bus:' + event + ']', e); }
       }
     }
     if (wild.size) {
       for (const fn of Array.from(wild)) {
-        try {
-          fn(event, payload);
-        } catch (e) {
-          console.error('[bus:*]', e);
-        }
+        try { fn(event, payload); } catch (e) { console.error('[bus:*]', e); }
       }
     }
   }
 
   return { on, once, off, emit };
-});
+}, []);
 // ─── CORE/EventBus ─── END ──────────────────────────────────────────────────
 
 // ─── CORE/Logger ─── START ──────────────────────────────────────────────────
 /**
- * Логгер с уровнями, кольцевым буфером и цветным выводом.
+ * Уровни debug/info/warn/error, кольцевой буфер 200, цветной вывод,
+ * history()/dump() — инфраструктура «пришлите логи» для баг-репортов.
+ * Порог читается из Config при создании; setLevel — на лету.
  */
 DI.register('Logger', function (Config) {
-  /** @type {Object<string, number>} */
   const LEVELS = { debug: 10, info: 20, warn: 30, error: 40 };
-  /** @type {Object<string, string>} */
   const COLORS = {
     debug: 'color:#56c2b8',
     info: 'color:#e8a33d',
@@ -170,21 +181,13 @@ DI.register('Logger', function (Config) {
     error: 'color:#e5646e;font-weight:bold',
   };
 
-  /** @type {number} */
   let threshold = LEVELS[Config.get('logLevel', 'info')] || LEVELS.info;
 
-  /** @type {Array<Object>} */
   const ring = [];
   const RING_MAX = 200;
 
-  const ts = () => new Date().toISOString().substr(11, 12);
+  const ts = () => new Date().toISOString().slice(11, 23);
 
-  /**
-   * Запись: буфер всегда, консоль — по порогу.
-   * @param {'debug'|'info'|'warn'|'error'} level
-   * @param {string} msg
-   * @param {*} [data]
-   */
   function write(level, msg, data) {
     const time = ts();
     ring.push({ ts: time, level, msg, data });
@@ -193,28 +196,22 @@ DI.register('Logger', function (Config) {
     if (LEVELS[level] < threshold) return;
     const fn = console[level] || console.log;
     const prefix = '%c[' + time + '][' + level.toUpperCase() + ']';
-    if (data === undefined) {
-      fn(prefix, COLORS[level], msg);
-    } else {
-      fn(prefix, COLORS[level], msg, data);
-    }
+    if (data === undefined) fn(prefix, COLORS[level], msg);
+    else fn(prefix, COLORS[level], msg, data);
   }
 
   return {
-    /** @param {'debug'|'info'|'warn'|'error'} l */
-    setLevel(l) {
-      if (LEVELS[l]) threshold = LEVELS[l];
-    },
+    setLevel(l) { if (LEVELS[l]) threshold = LEVELS[l]; },
     debug(m, d) { write('debug', m, d); },
     info(m, d) { write('info', m, d); },
     warn(m, d) { write('warn', m, d); },
     error(m, d) { write('error', m, d); },
-    /** @returns {Array<Object>} */
     history() { return ring.slice(); },
     dump() {
       for (const r of ring) {
         const fn = console[r.level] || console.log;
-        fn('[' + r.ts + '][' + r.level.toUpperCase() + ']', r.msg, r.data === undefined ? '' : r.data);
+        fn('[' + r.ts + '][' + r.level.toUpperCase() + ']',
+          r.msg, r.data === undefined ? '' : r.data);
       }
     },
   };
@@ -223,35 +220,26 @@ DI.register('Logger', function (Config) {
 
 // ─── CORE/Utils ─── START ───────────────────────────────────────────────────
 /**
- * Утилиты: экранирование, плюрализация, даты, debounce, uid.
+ * esc (зарезервирован законом 1), escRe, plural, word, fmtDate/fmtTime/
+ * fmtRelativeTime, shortPk, uid (crypto), debounce (с cancel).
+ *
+ * ИЗМЕНЕНИЯ v1.0 против v0.9.9:
+ * - uid: crypto.getRandomValues (6 случайных байт) вместо Math.random —
+ *   коллизии на одной миллисекунде практически исключены.
+ * - fmtRelativeTime: ts из будущего (разошедшиеся часы клиента/релея)
+ *   возвращает fmtDate вместо пустой строки — дата не «исчезает».
  */
 DI.register('Utils', function () {
-  /** @type {Object<string, string>} */
   const ESC = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 
-  /**
-   * HTML-экранирование (зарезервировано: контент рендерится textContent).
-   * @param {*} s
-   * @returns {string}
-   */
   function esc(s) {
     return String(s == null ? '' : s).replace(/[&<>"']/g, c => ESC[c]);
   }
 
-  /**
-   * Экранирование для RegExp.
-   * @param {*} s
-   * @returns {string}
-   */
   function escRe(s) {
     return String(s == null ? '' : s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
 
-  /**
-   * Плюрализация.
-   * @param {number} n @param {string} one @param {string} few @param {string} many
-   * @returns {string}
-   */
   function plural(n, one, few, many) {
     n = Math.abs(n);
     const a = n % 10, b = n % 100;
@@ -260,7 +248,6 @@ DI.register('Utils', function () {
     return many;
   }
 
-  /** @type {Object<string, Function>} */
   const words = {
     symbols: (n, l) => n + ' ' + (l === 'en' ? plural(n, 'char', 'chars', 'chars') : plural(n, 'символ', 'символа', 'символов')),
     peers: (n, l) => n + ' ' + (l === 'en' ? plural(n, 'peer', 'peers', 'peers') : plural(n, 'узел', 'узла', 'узлов')),
@@ -268,20 +255,11 @@ DI.register('Utils', function () {
     descendants: (n, l) => n + ' ' + (l === 'en' ? plural(n, 'heir', 'heirs', 'heirs') : plural(n, 'потомок', 'потомка', 'потомков')),
   };
 
-  /**
-   * @param {string} key @param {number} n @param {string} [lang]
-   * @returns {string}
-   */
   function word(key, n, lang) {
     const fn = words[key];
     return fn ? fn(n, lang) : String(n);
   }
 
-  /**
-   * Дата «12 мар».
-   * @param {number} ts @param {string} [lang]
-   * @returns {string}
-   */
   function fmtDate(ts, lang) {
     if (!ts) return '';
     try {
@@ -294,11 +272,6 @@ DI.register('Utils', function () {
     }
   }
 
-  /**
-   * Время «14:05».
-   * @param {number} ts @param {string} [lang]
-   * @returns {string}
-   */
   function fmtTime(ts, lang) {
     if (!ts) return '';
     try {
@@ -311,56 +284,42 @@ DI.register('Utils', function () {
     }
   }
 
-  /**
-   * Относительное время.
-   * @param {number} ts @param {string} lang @param {Function} t
-   * @returns {string}
-   */
   function fmtRelativeTime(ts, lang, t) {
     if (!ts || typeof t !== 'function') return '';
     const diff = Date.now() - ts;
-    if (diff < 0) return '';
+    if (diff < 0) return fmtDate(ts, lang); // будущее → дата, не пустота
     const sec = Math.floor(diff / 1000);
     if (sec < 60) return t('time.now');
     const min = Math.floor(sec / 60);
     if (min < 60) {
-      const form = plural(min, t('time.min.one'), t('time.min.few'), t('time.min.many'));
-      return min + ' ' + form;
+      return min + ' ' + plural(min, t('time.min.one'), t('time.min.few'), t('time.min.many'));
     }
     const hr = Math.floor(min / 60);
     if (hr < 24) {
-      const form = plural(hr, t('time.hr.one'), t('time.hr.few'), t('time.hr.many'));
-      return hr + ' ' + form;
+      return hr + ' ' + plural(hr, t('time.hr.one'), t('time.hr.few'), t('time.hr.many'));
     }
     const day = Math.floor(hr / 24);
     if (day < 30) {
-      const form = plural(day, t('time.day.one'), t('time.day.few'), t('time.day.many'));
-      return day + ' ' + form;
+      return day + ' ' + plural(day, t('time.day.one'), t('time.day.few'), t('time.day.many'));
     }
     return fmtDate(ts, lang);
   }
 
-  /**
-   * Сокращённый pubkey.
-   * @param {string} pk
-   * @returns {string}
-   */
   const shortPk = pk => (pk ? pk.slice(0, 8) + '…' : '');
 
-  /**
-   * Уникальный идентификатор.
-   * @param {string} [prefix]
-   * @returns {string}
-   */
   function uid(prefix) {
-    return (prefix || 'n') + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+    let rand = '';
+    try {
+      const b = new Uint8Array(6);
+      crypto.getRandomValues(b);
+      for (let i = 0; i < b.length; i++) rand += b[i].toString(36).padStart(2, '0');
+      rand = rand.slice(0, 6);
+    } catch (_) {
+      rand = Math.random().toString(36).slice(2, 8); // очень старые окружения
+    }
+    return (prefix || 'n') + Date.now().toString(36) + rand;
   }
 
-  /**
-   * Debounce с отменой.
-   * @param {Function} fn @param {number} ms
-   * @returns {Function & {cancel: Function}}
-   */
   function debounce(fn, ms) {
     let timer = null;
     function debounced(...args) {
@@ -380,17 +339,28 @@ DI.register('Utils', function () {
   }
 
   return { esc, escRe, plural, word, fmtDate, fmtTime, fmtRelativeTime, shortPk, uid, debounce };
-});
+}, []);
 // ─── CORE/Utils ─── END ─────────────────────────────────────────────────────
 
 // ─── CORE/I18n ─── START ────────────────────────────────────────────────────
 /**
  * Интернационализация ru/en.
+ * t(): каскад текущий → en → fallback → ключ; format {param}.
+ * applyToDOM: data-i18n / data-i18n-ph / data-i18n-aria.
+ * setLang: persist в Config + applyToDOM + onChange + bus 'i18n:change'.
+ *
+ * ИЗМЕНЕНИЯ v1.0 против v0.9.9 (словари):
+ * + 'st.ai.off' (вместо 'st.ai.demo' — demo-режима больше нет)
+ * + 'progress.skip' — кнопка «Продолжить без ИИ» на оверлее загрузки
+ * + 'ai.pending' — подсказка композера, пока модель учится
+ * + 'toast.save.fail' — ошибка сохранения (B-02)
+ * + 'toast.wipe.offline' — честный офлайн-вайп (H-04)
+ * + 'toast.pin.novector' — пин без вектора (H-03)
+ * ~ 'ranking.threshold.hint' — диапазон исправлен на 50%–95% (H-06)
+ * − 'note.public.noedit' — рудимент (M-05, консенсус)
  */
 DI.register('I18n', function (Config, bus) {
-  /** @type {Object<string, Object<string, string>>} */
   const dicts = Object.create(null);
-  /** @type {Array<Function>} */
   const listeners = [];
   let current = 'ru';
 
@@ -401,22 +371,12 @@ DI.register('I18n', function (Config, bus) {
     current = (navigator.language || 'ru').toLowerCase().indexOf('ru') === 0 ? 'ru' : 'en';
   }
 
-  /**
-   * Подстановка параметров.
-   * @param {string} str @param {Object} [params]
-   * @returns {string}
-   */
   function format(str, params) {
     const s = String(str == null ? '' : str);
     if (!params) return s;
     return s.replace(/\{(\w+)\}/g, (m, k) => (params[k] != null ? String(params[k]) : m));
   }
 
-  /**
-   * Перевод: текущий → en → fallback → ключ.
-   * @param {string} key @param {Object} [params] @param {string} [fallback]
-   * @returns {string}
-   */
   function t(key, params, fallback) {
     const d = dicts[current] || {};
     let val = Object.prototype.hasOwnProperty.call(d, key) ? d[key] : undefined;
@@ -427,15 +387,10 @@ DI.register('I18n', function (Config, bus) {
     return format(val !== undefined ? val : (fallback !== undefined ? fallback : key), params);
   }
 
-  /**
-   * Регистрация словаря.
-   * @param {string} lang @param {Object} dict
-   */
   function addDict(lang, dict) {
     dicts[lang] = Object.assign(dicts[lang] || {}, dict || {});
   }
 
-  /** Применить переводы к DOM. */
   function applyToDOM() {
     try {
       document.querySelectorAll('[data-i18n]').forEach(el => {
@@ -450,34 +405,22 @@ DI.register('I18n', function (Config, bus) {
         const key = el.getAttribute('data-i18n-aria');
         if (key) el.setAttribute('aria-label', t(key));
       });
-    } catch (_) {}
+    } catch (_) {} // DOM-элементы недоступны до body.ready — не критично
   }
 
-  /**
-   * Сменить язык.
-   * @param {string} lang
-   */
   function setLang(lang) {
     if (lang !== 'ru' && lang !== 'en') return;
     current = lang;
     Config.set('lang', current);
     applyToDOM();
     for (const fn of listeners.slice()) {
-      try {
-        fn(current);
-      } catch (_) {}
+      try { fn(current); } catch (_) {}
     }
-    try {
-      bus.emit('i18n:change', { lang: current });
-    } catch (_) {}
+    try { bus.emit('i18n:change', { lang: current }); } catch (_) {}
   }
 
   const getLang = () => current;
 
-  /**
-   * Подписка на смену языка.
-   * @param {Function} fn
-   */
   function onChange(fn) {
     if (typeof fn === 'function') listeners.push(fn);
   }
@@ -486,7 +429,7 @@ DI.register('I18n', function (Config, bus) {
     'st.net': 'сеть',
     'st.ai.loading': 'модель',
     'st.ai.ready': 'ии',
-    'st.ai.demo': 'ии/хеш',
+    'st.ai.off': 'ии нет',
     'st.net.online': 'онлайн',
     'st.net.connecting': 'соединение',
     'st.net.reconnecting': 'пересоединение',
@@ -494,12 +437,14 @@ DI.register('I18n', function (Config, bus) {
     'net.offline': 'офлайн — заметки сохраняются локально',
 
     'progress.title': 'Загружаем модель',
+    'progress.skip': 'Продолжить без ИИ',
 
     'ed.placeholder': 'О чём думаешь?',
     'ed.chars': 'симв.',
     'ed.limit.soft': 'Для точного поиска пиши короче',
     'ed.limit.hard': 'Вектор обрезается, качество поиска низкое',
     'ed.limit.max': 'Максимум {max} символов',
+    'ai.pending': 'ии учится: мысль сохранится и научится искаться позже',
 
     'btn.private': 'Личное',
     'btn.public': 'Мир',
@@ -577,9 +522,12 @@ DI.register('I18n', function (Config, bus) {
     'toast.copied': 'скопировано',
     'toast.deleted': 'удалено',
     'toast.copy.fail': 'не удалось',
+    'toast.save.fail': 'не удалось сохранить',
     'toast.empty': 'напиши что-нибудь',
     'toast.base.wiped': 'база очищена',
     'toast.edit.saved': 'сохранено',
+    'toast.wipe.offline': 'офлайн — копии в сети останутся',
+    'toast.pin.novector': 'мысль ещё не научилась искаться',
 
     'menu.settings': 'Настройки',
     'menu.theme': 'Тема',
@@ -594,7 +542,7 @@ DI.register('I18n', function (Config, bus) {
     'menu.account': 'Аккаунт и ключ',
 
     'ranking.threshold': 'Порог релевантности',
-    'ranking.threshold.hint': 'Минимальное сходство для показа в ленте (5%–95%)',
+    'ranking.threshold.hint': 'Минимальное сходство для показа в ленте (50%–95%)',
     'ranking.serendipity': 'Диапазон озарений',
     'ranking.serendipity.hint': 'Насколько широкие связи показывать как озарения (5%–30%)',
     'ranking.similarity': 'Порог одинаковости',
@@ -614,7 +562,6 @@ DI.register('I18n', function (Config, bus) {
     'net.loadmore': 'Загрузить ещё',
     'net.loading': 'Загружаю…',
 
-    'note.public.noedit': 'Публичные заметки нельзя редактировать',
     'note.edit.placeholder': 'Текст заметки',
 
     'account.title': 'Аккаунт и ключ',
@@ -701,7 +648,7 @@ DI.register('I18n', function (Config, bus) {
     'st.net': 'net',
     'st.ai.loading': 'model',
     'st.ai.ready': 'ai',
-    'st.ai.demo': 'ai/hash',
+    'st.ai.off': 'no ai',
     'st.net.online': 'online',
     'st.net.connecting': 'connecting',
     'st.net.reconnecting': 'reconnecting',
@@ -709,12 +656,14 @@ DI.register('I18n', function (Config, bus) {
     'net.offline': 'offline — notes are saved locally',
 
     'progress.title': 'Loading model',
+    'progress.skip': 'Continue without AI',
 
     'ed.placeholder': 'What are you thinking?',
     'ed.chars': 'chars',
     'ed.limit.soft': 'Shorter text = more precise search',
     'ed.limit.hard': 'Vector will be truncated, search quality drops',
     'ed.limit.max': 'Maximum {max} characters',
+    'ai.pending': 'ai is learning: the thought will be saved and become searchable later',
 
     'btn.private': 'Private',
     'btn.public': 'World',
@@ -792,9 +741,12 @@ DI.register('I18n', function (Config, bus) {
     'toast.copied': 'copied',
     'toast.deleted': 'deleted',
     'toast.copy.fail': 'copy failed',
+    'toast.save.fail': 'failed to save',
     'toast.empty': 'write something',
     'toast.base.wiped': 'base wiped',
     'toast.edit.saved': 'saved',
+    'toast.wipe.offline': 'offline — copies on relays remain',
+    'toast.pin.novector': 'this thought is not searchable yet',
 
     'menu.settings': 'Settings',
     'menu.theme': 'Theme',
@@ -809,7 +761,7 @@ DI.register('I18n', function (Config, bus) {
     'menu.account': 'Account & key',
 
     'ranking.threshold': 'Relevance threshold',
-    'ranking.threshold.hint': 'Minimum similarity to show in feed (5%–95%)',
+    'ranking.threshold.hint': 'Minimum similarity to show in feed (50%–95%)',
     'ranking.serendipity': 'Serendipity range',
     'ranking.serendipity.hint': 'How broad connections to show as insights (5%–30%)',
     'ranking.similarity': 'Duplicate threshold',
@@ -829,7 +781,6 @@ DI.register('I18n', function (Config, bus) {
     'net.loadmore': 'Load more',
     'net.loading': 'Loading…',
 
-    'note.public.noedit': 'Public notes cannot be edited',
     'note.edit.placeholder': 'Note text',
 
     'account.title': 'Account & key',
@@ -923,13 +874,17 @@ DI.register('I18n', function (Config, bus) {
 
 // ─── CORE/Config ─── START ──────────────────────────────────────────────────
 /**
- * Конфигурация приложения: localStorage, схема v9, цепочка миграций.
- * v9: kCanon/kQuery/kAnswer; dbName noomium_v3 (notes+mirror);
- * notesStore/mirrorStore; чистка сетевых ключей v8.
+ * Конфигурация: localStorage 'noomium:cfg', схема v10.
+ * v9 → v10: identity-миграция (поля не менялись; версия поднята
+ * для новой эпохи сборки). Загрузка с проверкой типов: значение
+ * битого типа не копируется — остаётся default.
+ * При битом JSON — бэкап сырой строки в 'noomium:cfg.broken'
+ * (Logger недоступен из-за цикла зависимостей — console напрямую).
  */
 DI.register('Config', function () {
   const KEY = 'noomium:cfg';
-  const SCHEMA_VERSION = 9;
+  const BROKEN_KEY = 'noomium:cfg.broken';
+  const SCHEMA_VERSION = 10;
 
   const defaults = Object.freeze({
     schemaVersion: SCHEMA_VERSION,
@@ -1039,6 +994,7 @@ DI.register('Config', function () {
       s.dbName = defaults.dbName;
       return s;
     },
+    10: s => s, // identity: поля и формат не менялись
   };
 
   const state = Object.assign({}, defaults);
@@ -1046,58 +1002,54 @@ DI.register('Config', function () {
   try {
     const raw = localStorage.getItem(KEY);
     if (raw) {
-      let saved = JSON.parse(raw);
+      const saved = JSON.parse(raw);
       if (saved && typeof saved === 'object') {
         let v = saved.schemaVersion || saved.version || 1;
         while (v < SCHEMA_VERSION) {
           const migrate = migrations[v];
-          if (typeof migrate === 'function') {
-            saved = migrate(saved);
-          }
+          if (typeof migrate === 'function') saved = migrate(saved);
           v++;
         }
         saved.schemaVersion = SCHEMA_VERSION;
+
+        // Копируем только ключи из defaults И только совпадающего типа.
         for (const k of Object.keys(defaults)) {
-          if (k in saved) state[k] = saved[k];
+          if (!(k in saved)) continue;
+          const d = defaults[k];
+          const s = saved[k];
+          const ok = Array.isArray(d) ? Array.isArray(s)
+            : d === null ? (s === null || typeof s === 'string')
+            : typeof s === typeof d;
+          if (ok) state[k] = s;
         }
       }
     }
-  } catch (_) {}
+  } catch (_) {
+    // Битый JSON: сохраняем сырую строку для разбора полётов, живём на defaults.
+    try {
+      const raw = localStorage.getItem(KEY);
+      if (raw) localStorage.setItem(BROKEN_KEY, raw);
+    } catch (_) {}
+    console.warn('[NOOmium] config повреждён — сброшен к значениям по умолчанию');
+  }
 
   function persist() {
     try {
       localStorage.setItem(KEY, JSON.stringify(state));
-    } catch (_) {}
+    } catch (e) {
+      console.warn('[NOOmium] config не сохранён (quota?)', String(e));
+    }
   }
 
+  console.info('[NOOmium] v' + APP_VERSION + ' · config готов (schema v' + SCHEMA_VERSION + ')');
+
   return {
-    /**
-     * @param {string} k @param {*} [def] @returns {*}
-     */
     get(k, def) { return (k in state) ? state[k] : def; },
-
-    /**
-     * @param {string} k @param {*} v
-     */
     set(k, v) { state[k] = v; persist(); },
-
     save: persist,
-
-    /**
-     * @returns {Object}
-     */
     defaults() { return Object.assign({}, defaults); },
-
-    /**
-     * @returns {Object}
-     */
     all() { return Object.assign({}, state); },
-
-    /**
-     * @returns {number}
-     */
     schemaVersion() { return SCHEMA_VERSION; },
-
     reset() {
       for (const k of Object.keys(defaults)) state[k] = defaults[k];
       persist();
@@ -1109,21 +1061,19 @@ DI.register('Config', function () {
 // ─── CORE/Store ─── START ───────────────────────────────────────────────────
 /**
  * UI-состояние сессии: view, seg, context, sendMode, lists, feed.
- * Context пина v0.9: {uid, owner} — идентичность заметки (И1).
+ * context: {source: 'pin'|'drift'|'input'|null, uid, owner, text,
+ *   vector, pinText}.
+ *
+ * КОНТРАКТ v1.0:
+ * - view меняется только через setState; DOM-переключение панелей —
+ *   единый подписчик в MenuView.applyView.
+ * - context всегда ЗАМЕНЯЕТСЯ новым объектом (Context.push), никогда
+ *   не мутируется на месте — подписки Object.is/shallowEqual корректны.
+ * - snapshot: копия верхнего уровня + freeze; вложенные объекты —
+ *   по ссылке, только для чтения.
+ * Логика v0.9.9 сохранена без изменений.
  */
 DI.register('Store', function () {
-  /**
-   * @type {Object}
-   * @property {string} view - 'stream' | 'base'
-   * @property {string} seg - 'local' | 'world' | 'seren'
-   * @property {Object} context - Контекст поиска
-   * @property {string|null} context.source - 'pin' | 'drift' | 'input' | null
-   * @property {string|null} context.uid - uid закреплённой заметки
-   * @property {string|null} context.owner - pubkey владельца пина
-   * @property {string} context.text - Текст контекста
-   * @property {Float32Array|Array<number>|null} context.vector - Вектор
-   * @property {string|null} context.pinText - Текст пина при дрейфе
-   */
   const state = {
     view: 'stream',
     seg: 'local',
@@ -1133,13 +1083,8 @@ DI.register('Store', function () {
     feed: [],
   };
 
-  /** @type {Array<Function>} */
   const listeners = [];
 
-  /**
-   * @param {*} a @param {*} b
-   * @returns {boolean}
-   */
   function shallowEqual(a, b) {
     if (Object.is(a, b)) return true;
     if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return false;
@@ -1151,48 +1096,24 @@ DI.register('Store', function () {
     return true;
   }
 
-  /**
-   * @returns {Object}
-   */
   const snapshot = () => Object.freeze(Object.assign({}, state));
 
   function notify() {
     const snap = snapshot();
     for (const l of listeners.slice()) {
-      try {
-        l(snap);
-      } catch (e) {
-        console.error('[store]', e);
-      }
+      try { l(snap); } catch (e) { console.error('[store]', e); }
     }
   }
 
-  /**
-   * @returns {Object}
-   */
   const getState = () => snapshot();
-
-  /**
-   * @param {string} k
-   * @returns {*}
-   */
   const get = k => state[k];
 
-  /**
-   * @param {Object} partial
-   */
   function setState(partial) {
     if (!partial || typeof partial !== 'object' || Array.isArray(partial)) return;
     Object.assign(state, partial);
     notify();
   }
 
-  /**
-   * @param {Function} a - Слушатель или селектор
-   * @param {Function} [b] - Слушатель (selector-вариант)
-   * @param {Function} [equals] - Функция равенства
-   * @returns {Function} Отписка
-   */
   function subscribe(a, b, equals) {
     if (typeof b === 'function') {
       const selector = a, listener = b, eq = equals || Object.is;
@@ -1219,6868 +1140,444 @@ DI.register('Store', function () {
   }
 
   return { getState, get, setState, subscribe, shallowEqual };
-});
+}, []);
 // ─── CORE/Store ─── END ─────────────────────────────────────────────────────
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// СЛОЙ: DATA
-// ═══════════════════════════════════════════════════════════════════════════════
+// ═══ СЛОЙ: DATA ═══════════════════════════════════════════════════════════════
 
 // ─── DATA/Vec ─── START ─────────────────────────────────────────────────────
 /**
- * Векторные операции: квантование base64, косинус, нормализация, kmeans.
+ * toB64/fromB64 (квантование int16, fromB64 нормализует), cosine (dot по
+ * min-длине, контракт нормализованных), normalize, sqDist, kmeans.
  */
 DI.register('Vec', function () {
-  /**
-   * @param {Float32Array|Array<number>} v
-   * @returns {Float32Array}
-   */
-  const f32 = v => (v instanceof Float32Array ? v : Float32Array.from(v || []));
-
-  /**
-   * @param {Float32Array|Array<number>} vec
-   * @returns {string}
-   */
-  function toB64(vec) {
-    const f = f32(vec);
-    const i16 = new Int16Array(f.length);
-
-    for (let i = 0; i < f.length; i++) {
-      let x = f[i];
-      if (x > 1) x = 1;
-      else if (x < -1) x = -1;
-      i16[i] = Math.round(x * 32767);
-    }
-
-    const bytes = new Uint8Array(i16.buffer, i16.byteOffset, i16.byteLength);
-    let bin = '';
-    for (let i = 0; i < bytes.length; i++) {
-      bin += String.fromCharCode(bytes[i]);
-    }
-
-    return btoa(bin);
-  }
-
-  /**
-   * @param {string} b64
-   * @returns {Float32Array|null}
-   */
-  function fromB64(b64) {
-    try {
-      const bin = atob(String(b64 || ''));
-      if (!bin || bin.length < 2 || bin.length % 2 !== 0) return null;
-
-      const bytes = new Uint8Array(bin.length);
-      for (let i = 0; i < bin.length; i++) {
-        bytes[i] = bin.charCodeAt(i);
-      }
-
-      const i16 = new Int16Array(bytes.buffer);
-      const out = new Float32Array(i16.length);
-      for (let i = 0; i < i16.length; i++) {
-        out[i] = i16[i] / 32767;
-      }
-
-      return normalize(out);
-    } catch (_) {
-      return null;
-    }
-  }
-
-  /**
-   * @param {Float32Array|Array<number>} a
-   * @param {Float32Array|Array<number>} b
-   * @returns {number}
-   */
-  function cosine(a, b) {
-    if (!a || !b) return 0;
-    const n = Math.min(a.length, b.length);
-    if (!n) return 0;
-
-    let s = 0;
-    for (let i = 0; i < n; i++) {
-      s += a[i] * b[i];
-    }
-
-    return s;
-  }
-
-  /**
-   * @param {Float32Array|Array<number>} v
-   * @returns {Float32Array}
-   */
-  function normalize(v) {
-    const f = f32(v);
-    let norm = 0;
-
-    for (let i = 0; i < f.length; i++) {
-      norm += f[i] * f[i];
-    }
-
-    norm = Math.sqrt(norm);
-    const out = new Float32Array(f.length);
-    if (!norm) return out;
-
-    for (let i = 0; i < f.length; i++) {
-      out[i] = f[i] / norm;
-    }
-
-    return out;
-  }
-
-  /**
-   * @param {Float32Array|Array<number>} a
-   * @param {Float32Array|Array<number>} b
-   * @returns {number}
-   */
-  function sqDist(a, b) {
-    const n = Math.min(a.length, b.length);
-    let s = 0;
-
-    for (let i = 0; i < n; i++) {
-      const d = a[i] - b[i];
-      s += d * d;
-    }
-
-    return s;
-  }
-
-  /**
-   * @param {Array} vectors
-   * @param {number} k
-   * @param {number} [iterations]
-   * @returns {Array<Float32Array>}
-   */
-  function kmeans(vectors, k, iterations) {
-    const iters = iterations || 10;
-    const n = vectors.length;
-
-    if (!n || !k) return [];
-    if (n <= k) return vectors.map(v => f32(v));
-
-    const dim = vectors[0].length;
-
-    const cents = [f32(vectors[0])];
-    while (cents.length < k) {
-      let bestI = 0, bestD = -1;
-
-      for (let i = 0; i < n; i++) {
-        let minD = Infinity;
-
-        for (const c of cents) {
-          const d = sqDist(vectors[i], c);
-          if (d < minD) minD = d;
-        }
-
-        if (minD > bestD) {
-          bestD = minD;
-          bestI = i;
-        }
-      }
-
-      cents.push(f32(vectors[bestI]));
-    }
-
-    for (let it = 0; it < iters; it++) {
-      const sums = Array.from({ length: k }, () => new Float32Array(dim));
-      const counts = new Array(k).fill(0);
-
-      for (let i = 0; i < n; i++) {
-        let best = 0, bestD = Infinity;
-
-        for (let c = 0; c < k; c++) {
-          const d = sqDist(vectors[i], cents[c]);
-          if (d < bestD) {
-            bestD = d;
-            best = c;
-          }
-        }
-
-        counts[best]++;
-        for (let d = 0; d < dim; d++) {
-          sums[best][d] += vectors[i][d];
-        }
-      }
-
-      for (let c = 0; c < k; c++) {
-        if (counts[c]) {
-          for (let d = 0; d < dim; d++) {
-            cents[c][d] = sums[c][d] / counts[c];
-          }
-        }
-      }
-    }
-
-    return cents;
-  }
-
-  return { toB64, fromB64, cosine, normalize, kmeans };
-});
+  // TODO: реализация (как в v0.9.9)
+}, []);
 // ─── DATA/Vec ─── END ───────────────────────────────────────────────────────
 
 // ─── DATA/DB ─── START ──────────────────────────────────────────────────────
 /**
- * Хранение: notes (свои) и mirror (чужие).
- * upsertMirror — сходимость по version с мерджем полей: ранняя
- * only-fact-версия не затирает позднюю полную той же версии
- * (порядок доставки fact→full не должен терять parent/text).
+ * IndexedDB noomium_v3: notes (keyPath uid), mirror (uid + индекс owner).
+ * In-memory fallback. ready() → Promise<IDBDatabase|null>.
+ *
+ * Контракты:
+ *   putNote(note) → Promise<uid>; эмитит db:change.
+ *   getNote(uid), delNote(uid) (эмитит db:change), allNotes(), hasOwn(uid).
+ *   upsertMirror(entry) → Promise<boolean>:
+ *     сходимость по noteVersion (payload) с fallback на version (created_at);
+ *     равные версии → мердж полей text/vec/parent (richer-wins);
+ *     НОВОЕ v1.0: deleted-факт побеждает равную версию (см. Mirror).
+ *   getMirror/allMirror/delMirror (эмитит db:mirror).
+ *   reset() — очистка обоих сторов.
+ *   updatePublishState(uid, version) — НОВОЕ v1.0: тихая запись
+ *     publishedVersion, БЕЗ db:change (иначе цикл очередь→события→рендер).
+ *   close() — НОВОЕ v1.0: закрывает соединение. Вызывать перед
+ *     deleteDatabase (иначе blocked). После close модуль DB не используется.
  */
 DI.register('DB', function (Config, bus, Logger) {
-  let db = null;
-  let memNotes = null;
-  let memMirror = null;
-  let openPromise = null;
-
-  const NOTES = () => Config.get('notesStore', 'notes');
-  const MIRROR = () => Config.get('mirrorStore', 'mirror');
-
-  /** @type {Set<string>} */
-  const ownUids = new Set();
-  /** @type {Set<string>} */
-  const mirrorUids = new Set();
-
-  function emitChange() {
-    try { bus.emit('db:change'); } catch (_) {}
-  }
-
-  function emitMirror() {
-    try { bus.emit('db:mirror'); } catch (_) {}
-  }
-
-  /**
-   * @param {IDBRequest} req
-   * @returns {Promise<*>}
-   */
-  function reqPromise(req) {
-    return new Promise((res, rej) => {
-      req.onsuccess = () => res(req.result);
-      req.onerror = () => rej(req.error);
-    });
-  }
-
-  /**
-   * @returns {Promise<IDBDatabase|null>}
-   */
-  function open() {
-    if (openPromise) return openPromise;
-
-    openPromise = new Promise(resolve => {
-      if (!window.indexedDB) {
-        memNotes = new Map();
-        memMirror = new Map();
-        Logger.warn('DB: IndexedDB недоступен, in-memory fallback');
-        return resolve(null);
-      }
-
-      try {
-        const req = indexedDB.open(Config.get('dbName', 'noomium_v3'), 1);
-
-        req.onupgradeneeded = e => {
-          const d = e.target.result;
-
-          if (!d.objectStoreNames.contains(NOTES())) {
-            d.createObjectStore(NOTES(), { keyPath: 'uid' });
-          }
-
-          if (!d.objectStoreNames.contains(MIRROR())) {
-            const s = d.createObjectStore(MIRROR(), { keyPath: 'uid' });
-            s.createIndex('owner', 'owner', { unique: false });
-          }
-        };
-
-        req.onsuccess = e => {
-          db = e.target.result;
-          buildIndexes().then(() => resolve(db)).catch(() => resolve(db));
-        };
-
-        req.onerror = () => {
-          memNotes = new Map();
-          memMirror = new Map();
-          Logger.warn('DB: ошибка открытия, fallback');
-          resolve(null);
-        };
-
-        req.onblocked = () => {
-          memNotes = new Map();
-          memMirror = new Map();
-          Logger.warn('DB: open blocked, fallback');
-          resolve(null);
-        };
-      } catch (err) {
-        memNotes = new Map();
-        memMirror = new Map();
-        Logger.warn('DB: не поддерживается, fallback', String(err));
-        resolve(null);
-      }
-    });
-
-    return openPromise;
-  }
-
-  /**
-   * @returns {Promise<void>}
-   */
-  function buildIndexes() {
-    const t = db.transaction([NOTES(), MIRROR()], 'readonly');
-
-    return Promise.all([
-      reqPromise(t.objectStore(NOTES()).getAllKeys()).catch(() => []),
-      reqPromise(t.objectStore(MIRROR()).getAllKeys()).catch(() => []),
-    ]).then(([nKeys, mKeys]) => {
-      ownUids.clear();
-      mirrorUids.clear();
-
-      (nKeys || []).forEach(k => ownUids.add(k));
-      (mKeys || []).forEach(k => mirrorUids.add(k));
-
-      Logger.info('DB: индексы (' + ownUids.size + ' своих, ' + mirrorUids.size + ' в зеркале)');
-    });
-  }
-
-  /**
-   * @param {string} store
-   * @param {string} mode
-   * @param {Function} fn
-   * @param {Function} memFn
-   * @returns {Promise<*>}
-   */
-  function withStore(store, mode, fn, memFn) {
-    return open().then(d => {
-      if (!d) return memFn();
-
-      return new Promise((res, rej) => {
-        try {
-          const r = fn(d.transaction(store, mode).objectStore(store));
-          r.onsuccess = () => res(r.result);
-          r.onerror = () => rej(r.error);
-        } catch (e) {
-          rej(e);
-        }
-      });
-    });
-  }
-
-  /**
-   * @param {Object} note
-   * @returns {Promise<string>}
-   */
-  function putNote(note) {
-    return withStore(
-      NOTES(),
-      'readwrite',
-      s => s.put(note),
-      () => { memNotes.set(note.uid, note); return note.uid; }
-    ).then(res => {
-      if (note && note.uid) ownUids.add(note.uid);
-      emitChange();
-      return res;
-    });
-  }
-
-  /**
-   * @param {string} uid
-   * @returns {Promise<Object|undefined>}
-   */
-  function getNote(uid) {
-    return withStore(
-      NOTES(),
-      'readonly',
-      s => s.get(uid),
-      () => memNotes.get(uid)
-    );
-  }
-
-  /**
-   * @param {string} uid
-   * @returns {Promise<*>}
-   */
-  function delNote(uid) {
-    return withStore(
-      NOTES(),
-      'readwrite',
-      s => s.delete(uid),
-      () => { memNotes.delete(uid); }
-    ).then(res => {
-      ownUids.delete(uid);
-      emitChange();
-      return res;
-    });
-  }
-
-  /**
-   * @returns {Promise<Array<Object>>}
-   */
-  function allNotes() {
-    return withStore(
-      NOTES(),
-      'readonly',
-      s => s.getAll(),
-      () => Array.from(memNotes.values())
-    );
-  }
-
-  /**
-   * @param {string} uid
-   * @returns {boolean}
-   */
-  function hasOwn(uid) {
-    return !!uid && ownUids.has(uid);
-  }
-
-  /**
-   * Upsert по version с мерджем: при равных версиях запись с
-   * полными полями (text/vec/parent) не затирается неполной
-   * (only-fact); при строго меньшей — новая поглощает старую,
-   * заимствуя недостающие поля.
-   * @param {Object} entry
-   * @returns {Promise<boolean>} true — запись обновлена.
-   */
-  function upsertMirror(entry) {
-    if (!entry || !entry.uid || typeof entry.version !== 'number') {
-      return Promise.resolve(false);
-    }
-
-    return withStore(
-      MIRROR(),
-      'readonly',
-      s => s.get(entry.uid),
-      () => memMirror.get(entry.uid)
-    ).then(existing => {
-      if (existing) {
-        if (existing.version > entry.version) {
-          return false;
-        }
-
-        if (existing.version === entry.version) {
-          const richer = hasRicherFields(entry, existing);
-          if (!richer) {
-            return false;
-          }
-        }
-
-        ['text', 'vec', 'parent'].forEach(k => {
-          if (entry[k] === undefined || entry[k] === null) {
-            if (existing[k] !== undefined && existing[k] !== null) {
-              entry[k] = existing[k];
-            }
-          }
-        });
-      }
-
-      return withStore(
-        MIRROR(),
-        'readwrite',
-        s => s.put(entry),
-        () => { memMirror.set(entry.uid, entry); return entry.uid; }
-      ).then(() => {
-        mirrorUids.add(entry.uid);
-        emitMirror();
-        return true;
-      });
-    }).catch(e => {
-      Logger.warn('DB: upsertMirror', String(e && e.message || e));
-      return false;
-    });
-  }
-
-  /**
-   * Новая запись полнее существующей той же версии?
-   * @param {Object} incoming
-   * @param {Object} existing
-   * @returns {boolean}
-   */
-  function hasRicherFields(incoming, existing) {
-    const incomingHas = !!(incoming.text || incoming.vec || incoming.parent);
-    const existingHas = !!(existing.text || existing.vec || existing.parent);
-    return incomingHas && !existingHas;
-  }
-
-  /**
-   * @param {string} uid
-   * @returns {Promise<Object|undefined>}
-   */
-  function getMirror(uid) {
-    return withStore(
-      MIRROR(),
-      'readonly',
-      s => s.get(uid),
-      () => memMirror.get(uid)
-    );
-  }
-
-  /**
-   * @returns {Promise<Array<Object>>}
-   */
-  function allMirror() {
-    return withStore(
-      MIRROR(),
-      'readonly',
-      s => s.getAll(),
-      () => Array.from(memMirror.values())
-    );
-  }
-
-  /**
-   * @param {string} uid
-   * @returns {Promise<*>}
-   */
-  function delMirror(uid) {
-    return withStore(
-      MIRROR(),
-      'readwrite',
-      s => s.delete(uid),
-      () => { memMirror.delete(uid); }
-    ).then(res => {
-      mirrorUids.delete(uid);
-      emitMirror();
-      return res;
-    });
-  }
-
-  /**
-   * @returns {Promise<void>}
-   */
-  function reset() {
-    return open().then(d => {
-      if (!d) {
-        memNotes.clear();
-        memMirror.clear();
-        return;
-      }
-
-      return new Promise((res, rej) => {
-        const t = d.transaction([NOTES(), MIRROR()], 'readwrite');
-        t.objectStore(NOTES()).clear();
-        t.objectStore(MIRROR()).clear();
-
-        t.oncomplete = () => res();
-        t.onerror = () => rej(t.error);
-      });
-    }).then(() => {
-      ownUids.clear();
-      mirrorUids.clear();
-      emitChange();
-      emitMirror();
-    });
-  }
-
-  return {
-    putNote,
-    getNote,
-    delNote,
-    allNotes,
-    hasOwn,
-
-    upsertMirror,
-    getMirror,
-    allMirror,
-    delMirror,
-
-    reset,
-
-    ready: open,
-  };
+  // TODO: реализация
 }, ['Config', 'EventBus', 'Logger']);
 // ─── DATA/DB ─── END ────────────────────────────────────────────────────────
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// СЛОЙ: AI
-// ═══════════════════════════════════════════════════════════════════════════════
+// ═══ СЛОЙ: AI ═════════════════════════════════════════════════════════════════
 
 // ─── AI/Embedder ─── START ──────────────────────────────────────────────────
 /**
- * Эмбеддер Granite R2: Web Worker + transformers.js (q8, CLS-pooling).
- * Режимы: 'loading' | 'model' | 'demo'. Fallback — FNV-1a хеш.
+ * Web Worker (Blob, module) + transformers.js, Granite q8, CLS-pooling.
+ *
+ * ИЗМЕНЕНИЯ v1.0:
+ * - Режимы ТОЛЬКО 'loading' | 'model'. Demo-режима и hashEmbed НЕТ.
+ * - embed(text) → Promise<Float32Array|null>:
+ *     null при !text, при mode==='loading', при таймауте 15с, при ошибке.
+ *     Результат null НЕ кэшируется.
+ * - load(onProgress?) → Promise<void>; resolve при model.
+ * - При готовности — emit 'ai:ready' (однократно) + 'ai:status' {mode:'model'}.
+ * - Кэш LRU 300 только настоящих векторов; при старте загрузки чистится.
+ * - Таймаут загрузки 120с → mode остаётся 'loading', emit ai:status
+ *   {mode:'loading', stalled:true}; HeaderStatus покажет «ии нет».
+ *   Ретрай — только перезапуском приложения (как было).
+ * - progressFns с возможностью отписки (load возвращает off-функцию).
  */
 DI.register('Embedder', function (Config, bus, Logger) {
-  /** @type {string} */
-  const workerCode = `
-let extractor = null;
-let ready = false;
-let files = new Map();
-
-self.onmessage = async function (e) {
-  const msg = e.data;
-  
-  if (msg.type === 'load') {
-    try {
-      const mod = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@latest');
-      mod.env.allowLocalModels = false;
-      mod.env.useBrowserCache = true;
-      
-      extractor = await mod.pipeline('feature-extraction', msg.model, {
-        dtype: 'q8',
-        progress_callback: function (p) {
-          if (p.status === 'progress') {
-            const fileName = p.file || p.name || 'unknown';
-            files.set(fileName, { 
-              loaded: p.loaded || 0, 
-              total: p.total || 0,
-              file: fileName
-            });
-            
-            let totalLoaded = 0, totalSize = 0;
-            files.forEach(f => { 
-              totalLoaded += f.loaded; 
-              if (f.total > 0) totalSize += f.total; 
-            });
-            
-            const pct = totalSize > 0 ? (totalLoaded / totalSize) * 100 : 0;
-            self.postMessage({ 
-              type: 'progress', 
-              pct,
-              loadedMB: (totalLoaded / 1024 / 1024).toFixed(1),
-              totalMB: totalSize > 0 ? (totalSize / 1024 / 1024).toFixed(1) : null,
-              model: msg.model
-            });
-          }
-        }
-      });
-      
-      ready = true;
-      self.postMessage({ type: 'ready' });
-    } catch (err) {
-      self.postMessage({ 
-        type: 'error', 
-        id: null, 
-        message: String(err && err.message || err) 
-      });
-    }
-    return;
-  }
-  
-  if (!ready) {
-    self.postMessage({ 
-      type: 'error', 
-      id: msg.id, 
-      message: 'model not loaded' 
-    });
-    return;
-  }
-  
-  if (msg.type === 'embed') {
-    try {
-      const out = await extractor(msg.text, { pooling: 'cls', normalize: true });
-      self.postMessage({ 
-        type: 'result', 
-        id: msg.id, 
-        vector: Array.from(out.data) 
-      });
-    } catch (err) {
-      self.postMessage({ 
-        type: 'error', 
-        id: msg.id, 
-        message: String(err && err.message || err) 
-      });
-    }
-  }
-};
-`;
-
-  /** @type {Worker|null} */
-  let worker = null;
-  /** @type {string|null} */
-  let workerUrl = null;
-  /** @type {'loading'|'model'|'demo'} */
-  let mode = 'loading';
-  let loadPromise = null;
-  let nextId = 0;
-  let lastPct = 0;
-  /** @type {Map<number, {resolve: Function, timer: number, text: string}>} */
-  const pending = new Map();
-  /** @type {Array<Function>} */
-  const progressFns = [];
-  /** @type {Map<string, Float32Array>} */
-  const cache = new Map();
-
-  function emitStatus() {
-    try {
-      bus.emit('ai:status', { mode, percent: lastPct });
-    } catch (_) {}
-  }
-
-  /**
-   * Fallback: детерминированный хеш-эмбеддинг (FNV-1a).
-   * @param {string} text
-   * @returns {Float32Array}
-   */
-  function hashEmbed(text) {
-    const DIM = Config.get('dim', 384);
-    const vec = new Float32Array(DIM);
-    const tokens = (text || '').toLowerCase().match(/[a-zа-яё0-9]+/gi) || [];
-
-    for (const tok of tokens) {
-      let h = 2166136261;
-      for (let i = 0; i < tok.length; i++) {
-        h ^= tok.charCodeAt(i);
-        h = Math.imul(h, 16777619);
-      }
-      vec[Math.abs(h) % DIM] += 1;
-
-      const h2 = Math.imul(h ^ 0x9e3779b9, 2654435761);
-      vec[Math.abs(h2) % DIM] += 0.5;
-    }
-
-    let norm = 0;
-    for (let i = 0; i < DIM; i++) norm += vec[i] * vec[i];
-    norm = Math.sqrt(norm) || 1;
-
-    for (let i = 0; i < DIM; i++) vec[i] /= norm;
-    return vec;
-  }
-
-  /**
-   * @param {string} key
-   * @returns {Float32Array|undefined}
-   */
-  function cacheGet(key) {
-    if (!cache.has(key)) return undefined;
-    const v = cache.get(key);
-    cache.delete(key);
-    cache.set(key, v);
-    return v;
-  }
-
-  /**
-   * @param {string} key
-   * @param {Float32Array} v
-   */
-  function cacheSet(key, v) {
-    if (cache.has(key)) {
-      cache.delete(key);
-    } else if (cache.size >= Config.get('aiCacheLimit', 300)) {
-      cache.delete(cache.keys().next().value);
-    }
-    cache.set(key, v);
-  }
-
-  /**
-   * Аварийная очистка: pending разрешаются хеш-векторами.
-   */
-  function cleanup() {
-    pending.forEach(p => {
-      clearTimeout(p.timer);
-      const v = hashEmbed(p.text);
-      cacheSet(p.text, v);
-      p.resolve(v);
-    });
-    pending.clear();
-
-    if (worker) {
-      try { worker.terminate(); } catch (_) {}
-      worker = null;
-    }
-
-    if (workerUrl) {
-      try { URL.revokeObjectURL(workerUrl); } catch (_) {}
-      workerUrl = null;
-    }
-  }
-
-  /**
-   * Загрузка модели: Worker → 'ready' | таймаут 120с | ошибка → demo.
-   * @returns {Promise<void>}
-   */
-  function doLoad() {
-    return new Promise(resolve => {
-      if (typeof Worker === 'undefined') {
-        mode = 'demo';
-        emitStatus();
-        Logger.warn('Embedder: Worker не поддерживается, demo mode');
-        return resolve();
-      }
-
-      try {
-        const blob = new Blob([workerCode], { type: 'application/javascript' });
-        workerUrl = URL.createObjectURL(blob);
-        worker = new Worker(workerUrl, { type: 'module' });
-      } catch (err) {
-        mode = 'demo';
-        emitStatus();
-        Logger.warn('Embedder: не создать Worker, demo mode', String(err));
-        return resolve();
-      }
-
-      const LOAD_TIMEOUT = 120000;
-      let resolved = false;
-
-      const loadTimer = setTimeout(() => {
-        if (resolved) return;
-        resolved = true;
-        Logger.warn('Embedder: таймаут загрузки модели (120с), demo mode');
-        cleanup();
-        mode = 'demo';
-        emitStatus();
-        resolve();
-      }, LOAD_TIMEOUT);
-
-      worker.onerror = err => {
-        if (resolved) return;
-        resolved = true;
-        clearTimeout(loadTimer);
-        Logger.warn('Embedder: ошибка Worker, demo mode', String(err && err.message || err));
-        cleanup();
-        mode = 'demo';
-        emitStatus();
-        resolve();
-      };
-
-      worker.onmessage = e => {
-        const msg = e.data;
-
-        if (msg.type === 'progress') {
-          lastPct = msg.pct;
-
-          for (const fn of progressFns) {
-            try { fn(msg); } catch (_) {}
-          }
-
-          try { bus.emit('ai:progress', msg); } catch (_) {}
-          try {
-            bus.emit('ai:status', {
-              mode: 'loading',
-              percent: msg.pct,
-              loadedMB: msg.loadedMB,
-              totalMB: msg.totalMB,
-              model: msg.model,
-            });
-          } catch (_) {}
-        }
-        else if (msg.type === 'ready') {
-          if (resolved) return;
-          resolved = true;
-          clearTimeout(loadTimer);
-          mode = 'model';
-          emitStatus();
-          Logger.info('Embedder: модель готова');
-          resolve();
-        }
-        else if (msg.type === 'error' && msg.id === null) {
-          if (resolved) return;
-          resolved = true;
-          clearTimeout(loadTimer);
-          Logger.warn('Embedder: ошибка загрузки модели, demo mode', msg.message);
-          cleanup();
-          mode = 'demo';
-          emitStatus();
-          resolve();
-        }
-        else if (msg.type === 'result') {
-          const p = pending.get(msg.id);
-          if (p) {
-            clearTimeout(p.timer);
-            pending.delete(msg.id);
-
-            const vec = Float32Array.from(msg.vector);
-            cacheSet(p.text, vec);
-            p.resolve(vec);
-          }
-        }
-        else if (msg.type === 'error' && msg.id != null) {
-          const p = pending.get(msg.id);
-          if (p) {
-            clearTimeout(p.timer);
-            pending.delete(msg.id);
-
-            Logger.warn('Embedder: ошибка embed, hash fallback', msg.message);
-            const v = hashEmbed(p.text);
-            cacheSet(p.text, v);
-            p.resolve(v);
-          }
-        }
-      };
-
-      worker.postMessage({
-        type: 'load',
-        model: Config.get('model', 'onnx-community/granite-embedding-97m-multilingual-r2-ONNX'),
-      });
-    });
-  }
-
-  return {
-    /**
-     * @param {Function} [onProgress]
-     * @returns {Promise<void>}
-     */
-    load(onProgress) {
-      if (typeof onProgress === 'function') {
-        progressFns.push(onProgress);
-      }
-
-      if (mode === 'model' || mode === 'demo') {
-        return Promise.resolve();
-      }
-
-      if (loadPromise) return loadPromise;
-
-      mode = 'loading';
-      emitStatus();
-      loadPromise = doLoad().then(() => {
-        loadPromise = null;
-      });
-
-      return loadPromise;
-    },
-
-    /**
-     * @param {string} text
-     * @returns {Promise<Float32Array|null>}
-     */
-    embed(text) {
-      const t = (text || '').trim();
-      if (!t) return Promise.resolve(null);
-
-      const cached = cacheGet(t);
-      if (cached) return Promise.resolve(cached);
-
-      if (mode === 'demo' || !worker) {
-        const v = hashEmbed(t);
-        cacheSet(t, v);
-        return Promise.resolve(v);
-      }
-
-      const id = nextId++;
-      return new Promise(resolve => {
-        const timer = setTimeout(() => {
-          if (pending.delete(id)) {
-            Logger.warn('Embedder: таймаут embed, hash fallback');
-            const v = hashEmbed(t);
-            cacheSet(t, v);
-            resolve(v);
-          }
-        }, Config.get('aiEmbedTimeout', 15000));
-
-        pending.set(id, { resolve, timer, text: t });
-        worker.postMessage({ type: 'embed', id, text: t });
-      });
-    },
-
-    /**
-     * @returns {boolean}
-     */
-    ready() {
-      return mode === 'model' || mode === 'demo';
-    },
-
-    /**
-     * @returns {string}
-     */
-    getMode() {
-      return mode;
-    },
-
-    /**
-     * @param {Function} fn
-     */
-    onProgress(fn) {
-      if (typeof fn === 'function') {
-        progressFns.push(fn);
-      }
-    },
-  };
+  // TODO: реализация
 }, ['Config', 'EventBus', 'Logger']);
 // ─── AI/Embedder ─── END ────────────────────────────────────────────────────
 
 // ─── AI/Ranker ─── START ────────────────────────────────────────────────────
 /**
- * Ранжирование: пакетный косинус, пороги relevant/serendipity,
- * проверка дубликатов по векторам.
+ * cosineBatch (линейный, AbortSignal), split (relevant/seren по
+ * Config threshold/serendipity на каждом вызове), isSimilar.
  */
 DI.register('Ranker', function (Vec, Config) {
-  /**
-   * @param {Float32Array|number[]} queryVector
-   * @param {Array<{id: string, vector: Array|Float32Array}>} items
-   * @param {AbortSignal} [signal]
-   * @returns {Promise<Array<{id: string, score: number}>>}
-   */
-  function cosineBatch(queryVector, items, signal) {
-    if (!queryVector || !items || !items.length) {
-      return Promise.resolve([]);
-    }
-
-    if (signal && signal.aborted) {
-      return Promise.reject(new Error('aborted'));
-    }
-
-    const out = [];
-    for (const it of items) {
-      if (signal && signal.aborted) {
-        return Promise.reject(new Error('aborted'));
-      }
-      out.push({ id: it.id, score: Vec.cosine(queryVector, it.vector) });
-    }
-
-    out.sort((a, b) => b.score - a.score);
-    return Promise.resolve(out);
-  }
-
-  /**
-   * @param {Array<{id: string, score: number}>} scored
-   * @returns {{relevant: Array, seren: Array}}
-   */
-  function split(scored) {
-    const threshold = Config.get('threshold', 0.81);
-    const serendipity = Config.get('serendipity', 0.07);
-
-    const lowerBound = threshold - serendipity;
-
-    const relevant = [];
-    const seren = [];
-
-    for (const s of scored) {
-      if (s.score < lowerBound) {
-        continue;
-      }
-
-      if (s.score >= threshold) {
-        relevant.push(s);
-      } else {
-        seren.push(s);
-      }
-    }
-
-    return { relevant, seren };
-  }
-
-  /**
-   * @param {Float32Array|number[]} a
-   * @param {Float32Array|number[]} b
-   * @returns {boolean}
-   */
-  function isSimilar(a, b) {
-    return Vec.cosine(a, b) >= Config.get('duplicateThreshold', 0.88);
-  }
-
-  return { cosineBatch, split, isSimilar };
+  // TODO: реализация (как в v0.9.9)
 }, ['Vec', 'Config']);
 // ─── AI/Ranker ─── END ──────────────────────────────────────────────────────
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// СЛОЙ: NET
-// ═══════════════════════════════════════════════════════════════════════════════
+// ═══ СЛОЙ: NET ═══════════════════════════════════════════════════════════════
 
 // ─── NET/Nostr ─── START ────────────────────────────────────────────────────
 /**
- * Транспорт: nostr-tools с CDN, ключи, SimplePool, publish, subscribe.
+ * nostr-tools@2.7.2 (запиннена), SimplePool, ключ localStorage hex
+ * (известный компромисс B-04 — изолирован здесь), init/setKey/sign/
+ * publish (первый принявший, таймаут 30с)/subscribe/ensureRelay/close.
  */
 DI.register('Nostr', function (Config, bus, Logger) {
-  const CDN = 'https://cdn.jsdelivr.net/npm/nostr-tools@2.7.2/+esm';
-  const SK_KEY = 'noomium:sk';
-
-  /** @type {Object|null} */
-  let nostr = null;
-  /** @type {Object|null} */
-  let pool = null;
-  /** @type {Uint8Array|null} */
-  let sk = null;
-  /** @type {string|null} */
-  let pk = null;
-  /** @type {Promise|null} */
-  let initPromise = null;
-
-  /**
-   * @returns {Uint8Array|null}
-   */
-  function loadKey() {
-    try {
-      const hex = localStorage.getItem(SK_KEY);
-      if (hex && /^[0-9a-f]{64}$/i.test(hex)) {
-        return new Uint8Array(hex.match(/.{1,2}/g).map(b => parseInt(b, 16)));
-      }
-    } catch (_) {}
-    return null;
-  }
-
-  /**
-   * @param {Uint8Array} key
-   */
-  function saveKey(key) {
-    try {
-      localStorage.setItem(
-        SK_KEY,
-        Array.from(key).map(b => b.toString(16).padStart(2, '0')).join('')
-      );
-    } catch (_) {}
-  }
-
-  /**
-   * Инициализация: загрузка библиотеки, восстановление/генерация
-   * ключа, создание пула. Идемпотентна.
-   * @returns {Promise<string>} Публичный ключ.
-   */
-  function init() {
-    if (initPromise) return initPromise;
-
-    initPromise = import(CDN).then(mod => {
-      nostr = (typeof mod.generateSecretKey === 'function')
-        ? mod
-        : (mod.default && typeof mod.default.generateSecretKey === 'function' ? mod.default : mod);
-
-      if (typeof nostr.generateSecretKey !== 'function') {
-        throw new Error('nostr-tools: несовместимый модуль');
-      }
-
-      sk = loadKey();
-      if (!sk) {
-        sk = nostr.generateSecretKey();
-        saveKey(sk);
-      }
-
-      pk = nostr.getPublicKey(sk);
-      pool = new nostr.SimplePool();
-
-      Logger.info('Nostr: готов, pubkey ' + pk.slice(0, 8) + '…');
-      return pk;
-    }).catch(err => {
-      initPromise = null;
-      Logger.error('Nostr: не загрузить nostr-tools', String(err && err.message || err));
-      try { bus.emit('net:status', { status: 'failed' }); } catch (_) {}
-      throw err;
-    });
-
-    return initPromise;
-  }
-
-  /**
-   * @returns {Object|null}
-   */
-  function lib() {
-    return nostr;
-  }
-
-  /**
-   * @returns {Uint8Array|null}
-   */
-  function getSecretKey() {
-    return sk;
-  }
-
-  /**
-   * @param {Uint8Array} newSk
-   * @returns {string}
-   * @throws {Error}
-   */
-  function setKey(newSk) {
-    if (!nostr) throw new Error('Nostr not ready');
-    if (!(newSk instanceof Uint8Array) || newSk.length !== 32) {
-      throw new Error('invalid secret key');
-    }
-
-    sk = newSk;
-    pk = nostr.getPublicKey(sk);
-    saveKey(sk);
-    Logger.info('Nostr: ключ заменён, pubkey ' + pk.slice(0, 8) + '…');
-    return pk;
-  }
-
-  /**
-   * @param {Object} template
-   * @returns {Object}
-   * @throws {Error}
-   */
-  function sign(template) {
-    if (!nostr || !sk) throw new Error('Nostr not ready');
-    return nostr.finalizeEvent(template, sk);
-  }
-
-  /**
-   * Публикация на все релеи; успех при первом принявшем.
-   * @param {Object} template
-   * @returns {Promise<Object>}
-   */
-  function publish(template) {
-    let ev;
-    try {
-      ev = sign(template);
-    } catch (e) {
-      return Promise.reject(e);
-    }
-
-    if (!pool) return Promise.reject(new Error('Nostr not ready'));
-
-    const urls = relays();
-    if (!urls.length) return Promise.reject(new Error('no relays configured'));
-
-    const PUBLISH_TIMEOUT = 30000;
-
-    const publishPromise = new Promise((resolve, reject) => {
-      let settled = false;
-      let failures = 0;
-
-      urls.forEach(url => {
-        pool.ensureRelay(url)
-          .then(relay => relay.publish(ev))
-          .then(() => {
-            if (!settled) {
-              settled = true;
-              resolve(ev);
-            }
-          })
-          .catch(err => {
-            failures++;
-            Logger.warn('Nostr: релей ' + url + ' не принял', String(err && err.message || err));
-
-            if (!settled && failures === urls.length) {
-              settled = true;
-              reject(new Error('no relay accepted'));
-            }
-          });
-      });
-    });
-
-    const timeoutPromise = new Promise((_, reject) => {
-      setTimeout(() => reject(new Error('publish timeout')), PUBLISH_TIMEOUT);
-    });
-
-    return Promise.race([publishPromise, timeoutPromise]);
-  }
-
-  /**
-   * @param {Array<Object>} filters
-   * @param {Object} handlers - {onevent, onclose}
-   * @returns {Object|null}
-   */
-  function subscribe(filters, handlers) {
-    if (!pool) return null;
-    return pool.subscribeMany(relays(), filters, handlers);
-  }
-
-  /**
-   * @returns {Array<string>}
-   */
-  function relays() {
-    return Config.get('relays', []);
-  }
-
-  /**
-   * @returns {string|null}
-   */
-  function getPubkey() {
-    return pk;
-  }
-
-  /**
-   * @returns {boolean}
-   */
-  function isReady() {
-    return !!(nostr && sk && pool);
-  }
-
-  function close() {
-    if (pool && typeof pool.close === 'function') {
-      try { pool.close(relays()); } catch (_) {}
-    }
-  }
-
-  return {
-    init,
-    sign,
-    publish,
-    subscribe,
-    ensureRelay(url) {
-      if (!pool) return Promise.reject(new Error('Nostr not ready'));
-      return pool.ensureRelay(url);
-    },
-    getPubkey,
-    getSecretKey,
-    setKey,
-    lib,
-    isReady,
-    relays,
-    close,
-  };
+  // TODO: реализация (как в v0.9.9)
 }, ['Config', 'EventBus', 'Logger']);
 // ─── NET/Nostr ─── END ──────────────────────────────────────────────────────
 
 // ─── NET/Vault ─── START ────────────────────────────────────────────────────
 /**
- * Шифрование приватного канона: NIP-44 self-ECDH.
- * Единственная точка криптографии payload.
+ * NIP-44 v2 self-ECDH: seal(plaintext) / open(ciphertext).
  */
 DI.register('Vault', function (Nostr) {
-  /**
-   * @returns {Promise<Object>}
-   * @throws {Error}
-   */
-  async function lib() {
-    await Nostr.init();
-    const n = Nostr.lib();
-    if (!n) throw new Error('nostr-tools not loaded');
-    return n;
-  }
-
-  /**
-   * @param {string} plaintext - JSON payload.
-   * @returns {Promise<string>} Шифртекст.
-   * @throws {Error}
-   */
-  async function seal(plaintext) {
-    const n = await lib();
-    const nip44 = n.nip44 && n.nip44.v2;
-    if (!nip44 || !nip44.utils || typeof nip44.encrypt !== 'function') {
-      throw new Error('NIP-44 unavailable');
-    }
-
-    const sk = Nostr.getSecretKey();
-    const pk = Nostr.getPubkey();
-    if (!sk || !pk) throw new Error('no secret key');
-
-    const conversationKey = nip44.utils.getConversationKey(sk, pk);
-    return nip44.encrypt(plaintext, conversationKey);
-  }
-
-  /**
-   * @param {string} ciphertext
-   * @returns {Promise<string>} Открытый JSON payload.
-   * @throws {Error}
-   */
-  async function open(ciphertext) {
-    const n = await lib();
-    const nip44 = n.nip44 && n.nip44.v2;
-    if (!nip44 || !nip44.utils || typeof nip44.decrypt !== 'function') {
-      throw new Error('NIP-44 unavailable');
-    }
-
-    const sk = Nostr.getSecretKey();
-    const pk = Nostr.getPubkey();
-    if (!sk || !pk) throw new Error('no secret key');
-
-    const conversationKey = nip44.utils.getConversationKey(sk, pk);
-    return nip44.decrypt(ciphertext, conversationKey);
-  }
-
-  return { seal, open };
+  // TODO: реализация (как в v0.9.9)
 }, ['Nostr']);
 // ─── NET/Vault ─── END ──────────────────────────────────────────────────────
 
 // ─── NET/Crypto ─── START ───────────────────────────────────────────────────
 /**
- * Криптография аккаунта: форматы ключей (nsec/npub/ncryptsec), NIP-49.
+ * classifyKeyInput / decodeSecret / NIP-49 encryptKey, decryptKey /
+ * nsecEncode / npubEncode. null-возвраты + Logger.warn.
  */
 DI.register('Crypto', function (Nostr, Logger) {
-  /**
-   * @returns {Promise<Object>}
-   * @throws {Error}
-   */
-  async function lib() {
-    await Nostr.init();
-    const n = Nostr.lib();
-    if (!n) throw new Error('nostr-tools not loaded');
-    return n;
-  }
-
-  /**
-   * @returns {Promise<boolean>}
-   */
-  async function hasNip49() {
-    try {
-      const n = await lib();
-      return !!(n.nip49 && typeof n.nip49.encrypt === 'function' && typeof n.nip49.decrypt === 'function');
-    } catch (_) {
-      return false;
-    }
-  }
-
-  /**
-   * @param {*} input
-   * @returns {'nsec'|'ncryptsec'|'hex'|null}
-   */
-  function classifyKeyInput(input) {
-    const t = String(input || '').trim();
-    if (t.startsWith('ncryptsec1')) return 'ncryptsec';
-    if (t.startsWith('nsec1')) return 'nsec';
-    if (/^[0-9a-fA-F]{64}$/.test(t)) return 'hex';
-    return null;
-  }
-
-  /**
-   * @param {*} input
-   * @returns {Promise<Uint8Array|null>}
-   */
-  async function decodeSecret(input) {
-    const t = String(input || '').trim();
-    if (!t) return null;
-
-    if (/^[0-9a-fA-F]{64}$/.test(t)) {
-      return new Uint8Array(t.match(/.{2}/g).map(b => parseInt(b, 16)));
-    }
-
-    try {
-      const n = await lib();
-      if (t.startsWith('nsec1') && n.nip19 && typeof n.nip19.decode === 'function') {
-        const dec = n.nip19.decode(t);
-        if (dec && dec.type === 'nsec' && dec.data instanceof Uint8Array && dec.data.length === 32) {
-          return dec.data;
-        }
-      }
-    } catch (_) {}
-
-    return null;
-  }
-
-  /**
-   * @param {Uint8Array} sk
-   * @param {string} password
-   * @returns {Promise<string|null>}
-   */
-  async function encryptKey(sk, password) {
-    try {
-      const n = await lib();
-      if (!n.nip49 || typeof n.nip49.encrypt !== 'function') return null;
-      return n.nip49.encrypt(sk, String(password || ''));
-    } catch (e) {
-      Logger.warn('Crypto: encryptKey', String(e && e.message || e));
-      return null;
-    }
-  }
-
-  /**
-   * @param {string} ncryptsec
-   * @param {string} password
-   * @returns {Promise<Uint8Array|null>}
-   */
-  async function decryptKey(ncryptsec, password) {
-    try {
-      const n = await lib();
-      if (!n.nip49 || typeof n.nip49.decrypt !== 'function') return null;
-
-      const res = n.nip49.decrypt(String(ncryptsec || '').trim(), String(password || ''));
-
-      if (res instanceof Uint8Array) return res.length === 32 ? res : null;
-      if (res && res.secretKey instanceof Uint8Array && res.secretKey.length === 32) return res.secretKey;
-      if (res && res.data instanceof Uint8Array && res.data.length === 32) return res.data;
-
-      return null;
-    } catch (_) {
-      return null;
-    }
-  }
-
-  /**
-   * @param {Uint8Array} sk
-   * @returns {Promise<string|null>}
-   */
-  async function encodeNsec(sk) {
-    try {
-      const n = await lib();
-      return n.nip19 ? n.nip19.nsecEncode(sk) : null;
-    } catch (_) {
-      return null;
-    }
-  }
-
-  /**
-   * @param {string} pk
-   * @returns {Promise<string|null>}
-   */
-  async function encodeNpub(pk) {
-    try {
-      const n = await lib();
-      return n.nip19 ? n.nip19.npubEncode(pk) : null;
-    } catch (_) {
-      return null;
-    }
-  }
-
-  return {
-    hasNip49,
-    classifyKeyInput,
-    decodeSecret,
-    encryptKey,
-    decryptKey,
-    encodeNsec,
-    encodeNpub,
-  };
+  // TODO: реализация (как в v0.9.9)
 }, ['Nostr', 'Logger']);
 // ─── NET/Crypto ─── END ─────────────────────────────────────────────────────
 
 // ─── NET/Protocol ─── START ─────────────────────────────────────────────────
 /**
- * Кодек событий: канон состояний (kind 30078, replaceable, d = uid)
- * и служебные события (запрос 21000, ответ-ссылка 21001).
+ * Кодек. Payload v2 (сетевой формат НЕ меняем — релеи уже хранят события).
  *
- * created_at = секунда публикации (свежесть в since-окнах,
- * монотонность при переизданиях).
- * payload несёт noteVersion (истина заметки) и ts (время заметки
- * — хронология для лент).
+ * canonPrivate/canonPublic(note) — payload {v:2, visibility, text, vec,
+ *   parent, noteVersion, ts}; tags [d, client, t].
+ * canonDeleted(uid, version) — НОВОЕ v1.0: payload несёт noteVersion,
+ *   на момент удаления (для LWW эхо-удаления на других устройствах).
+ * decodeCanon(ev) → {uid, owner, version, noteVersion?, visibility,
+ *   text?, vec?, parent?, ts, deleted?} | null. Валидация как в v0.9.9.
+ * queryEvent/answerEvent/decodeQuery/decodeAnswer — без изменений.
  */
 DI.register('Protocol', function (Config, Vec, Vault, Nostr) {
-  /** @type {number} */
-  const MAX_CONTENT = 65536;
-
-  /**
-   * @param {Array} tags
-   * @param {string} name
-   * @returns {Array|null}
-   */
-  function findTag(tags, name) {
-    if (!Array.isArray(tags)) return null;
-    for (const t of tags) {
-      if (Array.isArray(t) && t[0] === name) return t;
-    }
-    return null;
-  }
-
-  /**
-   * Свежая монотонная секунда публикации.
-   * @returns {number}
-   */
-  function nowSec() {
-    return Math.floor(Date.now() / 1000);
-  }
-
-  /**
-   * Канон приватной версии.
-   * @param {Object} note - {uid, text, vector, parent, version, updatedAt}
-   * @returns {Promise<Object>}
-   * @throws {Error}
-   */
-  async function canonPrivate(note) {
-    const payload = {
-      v: 2,
-      visibility: 'private',
-      text: note.text || '',
-      vec: note.vector ? Vec.toB64(note.vector) : null,
-      parent: note.parent || null,
-      noteVersion: note.version,
-      ts: note.updatedAt || note.version,
-    };
-
-    const content = await Vault.seal(JSON.stringify(payload));
-
-    return {
-      kind: Config.get('kCanon', 30078),
-      created_at: nowSec(),
-      tags: [
-        ['d', note.uid],
-        ['client', 'noomium'],
-        ['t', Config.get('room', 'noomium-main')],
-      ],
-      content,
-    };
-  }
-
-  /**
-   * Канон публичной версии.
-   * @param {Object} note
-   * @returns {Promise<Object>}
-   */
-  async function canonPublic(note) {
-    const payload = {
-      v: 2,
-      visibility: 'public',
-      text: note.text || '',
-      vec: note.vector ? Vec.toB64(note.vector) : null,
-      parent: note.parent || null,
-      noteVersion: note.version,
-      ts: note.updatedAt || note.version,
-    };
-
-    return {
-      kind: Config.get('kCanon', 30078),
-      created_at: nowSec(),
-      tags: [
-        ['d', note.uid],
-        ['client', 'noomium'],
-        ['t', Config.get('room', 'noomium-main')],
-      ],
-      content: JSON.stringify(payload),
-    };
-  }
-
-  /**
-   * Канон удаления.
-   * @param {string} uid
-   * @returns {Promise<Object>}
-   */
-  async function canonDeleted(uid) {
-    return {
-      kind: Config.get('kCanon', 30078),
-      created_at: nowSec(),
-      tags: [
-        ['d', uid],
-        ['client', 'noomium'],
-        ['t', Config.get('room', 'noomium-main')],
-      ],
-      content: JSON.stringify({ v: 2, visibility: 'deleted', ts: Date.now() }),
-    };
-  }
-
-  /**
-   * Декодирование канона.
-   * @param {Object} ev - Nostr-событие kind 30078.
-   * @returns {Promise<Object|null>} {uid, owner, version, visibility,
-   *   text?, vec?, parent?, ts, noteVersion}
-   */
-  async function decodeCanon(ev) {
-    if (!ev || ev.kind !== Config.get('kCanon', 30078)) return null;
-
-    const dTag = findTag(ev.tags, 'd');
-    if (!dTag || typeof dTag[1] !== 'string' || !dTag[1]) return null;
-    if (typeof ev.content !== 'string' || !ev.content) return null;
-    if (ev.content.length > MAX_CONTENT) return null;
-    if (!ev.created_at) return null;
-
-    const uid = dTag[1];
-    const owner = ev.pubkey;
-    const version = ev.created_at;
-
-    let data = null;
-    try {
-      data = JSON.parse(ev.content);
-    } catch (_) {
-      data = null;
-    }
-
-    if (!data || typeof data !== 'object') {
-      if (owner === Nostr.getPubkey()) {
-        try {
-          data = JSON.parse(await Vault.open(ev.content));
-        } catch (_) {
-          return null;
-        }
-      } else {
-        return { uid, owner, version, visibility: 'private', ts: version * 1000 };
-      }
-    }
-
-    if (!data || typeof data !== 'object') return null;
-
-    const visibility = data.visibility === 'public' ? 'public'
-      : data.visibility === 'deleted' ? 'deleted'
-      : 'private';
-
-    if (visibility === 'private' && owner !== Nostr.getPubkey()) {
-      return { uid, owner, version, visibility: 'private', ts: version * 1000 };
-    }
-
-    if (visibility === 'deleted') {
-      return { uid, owner, version, visibility, deleted: true };
-    }
-
-    if (typeof data.text !== 'string') return null;
-    if (data.text.length > Config.get('maxNoteTextLength', 10000)) return null;
-
-    let vec = null;
-    if (typeof data.vec === 'string') {
-      const v = Vec.fromB64(data.vec);
-      if (v) vec = Array.from(v);
-    }
-
-    let parent = null;
-    if (data.parent && typeof data.parent === 'object' && typeof data.parent.uid === 'string' && data.parent.uid) {
-      parent = { uid: data.parent.uid, owner: data.parent.owner || null };
-    }
-
-    const ts = typeof data.ts === 'number' && data.ts > 0 ? data.ts : (version * 1000);
-    const noteVersion = typeof data.noteVersion === 'number' ? data.noteVersion : undefined;
-
-    return { uid, owner, version, visibility, text: data.text, vec, parent, ts, noteVersion };
-  }
-
-  /**
-   * @param {Float32Array|Array<number>} vector
-   * @param {number} maxResponses
-   * @param {number} window
-   * @returns {Object}
-   */
-  function queryEvent(vector, maxResponses, window) {
-    return {
-      kind: Config.get('kQuery', 21000),
-      created_at: Math.floor(Date.now() / 1000),
-      tags: [['t', Config.get('room', 'noomium-main')]],
-      content: JSON.stringify({ vector: Array.from(vector), maxResponses, window }),
-    };
-  }
-
-  /**
-   * @param {Object} ev
-   * @returns {Object|null}
-   */
-  function decodeQuery(ev) {
-    if (!ev || ev.kind !== Config.get('kQuery', 21000)) return null;
-
-    let data;
-    try {
-      data = JSON.parse(ev.content);
-    } catch (_) {
-      return null;
-    }
-
-    if (!data || !Array.isArray(data.vector) || !data.vector.length) return null;
-
-    for (const x of data.vector) {
-      if (typeof x !== 'number' || !isFinite(x)) return null;
-    }
-
-    return {
-      vector: data.vector,
-      maxResponses: typeof data.maxResponses === 'number' ? data.maxResponses : Config.get('maxResponses', 8),
-      window: typeof data.window === 'number' ? data.window : Config.get('responseWindow', 6000),
-      owner: ev.pubkey,
-      queryId: ev.id,
-    };
-  }
-
-  /**
-   * @param {Object} note
-   * @param {number} score
-   * @param {string} queryId
-   * @returns {Object}
-   */
-  function answerEvent(note, score, queryId) {
-    return {
-      kind: Config.get('kAnswer', 21001),
-      created_at: Math.floor(Date.now() / 1000),
-      tags: [
-        ['t', Config.get('room', 'noomium-main')],
-        ['e', queryId],
-        ['uid', note.uid],
-      ],
-      content: JSON.stringify({ score }),
-    };
-  }
-
-  /**
-   * @param {Object} ev
-   * @returns {Object|null}
-   */
-  function decodeAnswer(ev) {
-    if (!ev || ev.kind !== Config.get('kAnswer', 21001)) return null;
-
-    const eTag = findTag(ev.tags, 'e');
-    const uidTag = findTag(ev.tags, 'uid');
-    if (!eTag || !uidTag || !uidTag[1]) return null;
-
-    let data = null;
-    try {
-      data = JSON.parse(ev.content);
-    } catch (_) {}
-
-    return {
-      queryId: eTag[1],
-      uid: uidTag[1],
-      owner: ev.pubkey,
-      score: data && typeof data.score === 'number' ? data.score : 0,
-    };
-  }
-
-  return {
-    canonPrivate,
-    canonPublic,
-    canonDeleted,
-    decodeCanon,
-    queryEvent,
-    decodeQuery,
-    answerEvent,
-    decodeAnswer,
-  };
+  // TODO: реализация
 }, ['Config', 'Vec', 'Vault', 'Nostr']);
 // ─── NET/Protocol ─── END ───────────────────────────────────────────────────
 
 // ─── NET/NetService ─── START ───────────────────────────────────────────────
 /**
- * Движение: подписка на комнату (каноны — без since: replaceable
- * отдаёт последнюю версию каждого канона комнаты; запросы/ответы —
- * со скользящим окном), подписка на себя, публикация канонов
- * через очередь, ответы-ссылки, запросы при контексте, история.
+ * Движение: подписка на комнату (каноны без since; query/answer окном),
+ * подписка на себя, очередь публикаций, ответы-ссылки, история, heartbeat.
+ *
+ * ИЗМЕНЕНИЯ v1.0:
+ * - Очередь localStorage {uids:[{uid,version}], deleted:[{uid,version}]}.
+ *   flushQueue публикует только если note.version > publishedVersion;
+ *   после успеха — DB.updatePublishState(uid, version) (тихо).
+ *   Стартовая переочередка: только неопубликованные заметки (НЕ все).
+ * - sync:status эмитит полный цикл: 'active' при начале flush/подписки,
+ *   'idle' при покое, 'off' при выключенном синке. (M-06)
+ * - publishWipeAll() → Promise<{published:number, offline:boolean}>.
+ *   Офлайн: {published:0, offline:true} — вызывающий честно тостит. (H-04)
+ * - deleted-каноны публикуются с version на момент удаления (см. Protocol).
+ * - В остальном (эпохи, бэкофф, окна, центроиды, rate-limits) — как v0.9.9.
  */
 DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Config, Logger, bus) {
-  let started = false;
-  let startPromise = null;
-  let subscription = null;
-  let selfSubscription = null;
-  let fetchSubscription = null;
-  let hbTimer = null;
-  let activeQueryId = null;
-  let lastQueryVec = null;
-  let lastQueryTime = 0;
-  let centroids = [];
-  let contextUnsub = null;
-  let flushing = false;
-  let flushTimer = null;
-  let startRetryTimer = null;
-  let onlineListenerAdded = false;
-  let reconnectAttempts = 0;
-  let busUnsubs = [];
-
-  /** @type {Set<string>} */
-  const seen = new Set();
-  /** @type {Map<string, number>} */
-  const peerQueryTimes = new Map();
-
-  let currentWindow = Config.get('subWindow', 300);
-  let historyLoading = false;
-  let subEpoch = 0;
-
-  const QUEUE_KEY = 'noomium:queue';
-
-  /**
-   * @returns {{uids: string[], deleted: Array<{uid: string}>}}
-   */
-  function loadQueue() {
-    try {
-      const raw = localStorage.getItem(QUEUE_KEY);
-      if (raw) {
-        const q = JSON.parse(raw);
-        return {
-          uids: Array.isArray(q.uids) ? q.uids.filter(Boolean) : [],
-          deleted: Array.isArray(q.deleted) ? q.deleted.filter(Boolean) : [],
-        };
-      }
-    } catch (_) {}
-
-    return { uids: [], deleted: [] };
-  }
-
-  /**
-   * Сохранение очереди.
-   */
-  function saveQueue() {
-    try {
-      localStorage.setItem(QUEUE_KEY, JSON.stringify(queue));
-    } catch (_) {}
-  }
-
-  let queue = loadQueue();
-
-  const kCanon = () => Config.get('kCanon', 30078);
-  const kQuery = () => Config.get('kQuery', 21000);
-  const kAnswer = () => Config.get('kAnswer', 21001);
-  const room = () => Config.get('room', 'noomium-main');
-
-  /**
-   * @param {string} s
-   */
-  function setStatus(s) {
-    try { bus.emit('net:status', { status: s }); } catch (_) {}
-  }
-
-  /**
-   * @param {string} phase
-   */
-  function emitSync(phase) {
-    try { bus.emit('sync:status', { phase }); } catch (_) {}
-  }
-
-  /**
-   * @returns {boolean}
-   */
-  function isOffline() {
-    return typeof navigator !== 'undefined' && navigator.onLine === false;
-  }
-
-  /**
-   * @returns {boolean}
-   */
-  function canPublish() {
-    return Nostr.isReady() && !isOffline();
-  }
-
-  /**
-   * @param {string} uid
-   */
-  function queuePublish(uid) {
-    if (!uid) return;
-    if (queue.uids.indexOf(uid) === -1) {
-      queue.uids.push(uid);
-      saveQueue();
-    }
-    scheduleFlush();
-  }
-
-  /**
-   * @param {string} uid
-   */
-  function queueDeleted(uid) {
-    if (!uid) return;
-
-    const i = queue.uids.indexOf(uid);
-    if (i > -1) queue.uids.splice(i, 1);
-
-    if (queue.deleted.indexOf(uid) === -1) {
-      queue.deleted.push(uid);
-      saveQueue();
-    }
-    scheduleFlush();
-  }
-
-  /**
-   * @param {number} [delay]
-   */
-  function scheduleFlush(delay) {
-    if (flushTimer) return;
-
-    flushTimer = setTimeout(() => {
-      flushTimer = null;
-      flushQueue();
-    }, delay || 5000);
-  }
-
-  /**
-   * Сброс очереди: каноны живых, затем deleted.
-   * @returns {Promise<void>}
-   */
-  async function flushQueue() {
-    if (flushing) return;
-    if (!canPublish()) return;
-    if (!queue.uids.length && !queue.deleted.length) return;
-
-    flushing = true;
-
-    try {
-      if (Config.get('syncEnabled', true)) {
-        for (const uid of queue.uids.slice()) {
-          const note = await DB.getNote(uid).catch(() => null);
-          if (!note) {
-            const i = queue.uids.indexOf(uid);
-            if (i > -1) {
-              queue.uids.splice(i, 1);
-              saveQueue();
-            }
-            continue;
-          }
-          try {
-            const tpl = note.visibility === 'public'
-              ? await Protocol.canonPublic(note)
-              : await Protocol.canonPrivate(note);
-            await Nostr.publish(tpl);
-            const i = queue.uids.indexOf(uid);
-            if (i > -1) {
-              queue.uids.splice(i, 1);
-              saveQueue();
-            }
-          } catch (_) {}
-        }
-
-        for (const uid of queue.deleted.slice()) {
-          try {
-            const tpl = await Protocol.canonDeleted(uid);
-            await Nostr.publish(tpl);
-            const i = queue.deleted.indexOf(uid);
-            if (i > -1) {
-              queue.deleted.splice(i, 1);
-              saveQueue();
-            }
-          } catch (_) {}
-        }
-      }
-    } catch (_) {} finally {
-      flushing = false;
-
-      if (queue.uids.length || queue.deleted.length) {
-        scheduleFlush(10000);
-      }
-    }
-  }
-
-  /**
-   * Перестройка центроидов.
-   */
-  function rebuildCentroids() {
-    DB.allNotes().then(notes => {
-      const vecs = notes.filter(n => n.visibility === 'public' && n.vector).map(n => n.vector);
-      if (!vecs.length) {
-        centroids = [];
-        return;
-      }
-
-      centroids = Vec.kmeans(
-        vecs,
-        Math.min(Config.get('centroidCount', 12), vecs.length),
-        8
-      );
-    }).catch(() => {});
-  }
-
-  /**
-   * @param {Float32Array|Array<number>} queryVector
-   * @returns {boolean}
-   */
-  function passesPrefilter(queryVector) {
-    if (!centroids.length) return true;
-
-    const floor = Config.get('threshold', 0.81) - 0.20;
-    for (const c of centroids) {
-      if (Vec.cosine(queryVector, c) >= floor) return true;
-    }
-
-    return false;
-  }
-
-  /**
-   * @param {boolean} hard
-   */
-  function markConnected(hard) {
-    if (!started) return;
-
-    if (hard) {
-      reconnectAttempts = 0;
-    }
-
-    setStatus('connected');
-    flushQueue();
-  }
-
-  /**
-   * @param {Object} ev
-   */
-  function onEvent(ev) {
-    if (!ev) return;
-
-    markConnected(true);
-
-    if (seen.has(ev.id)) return;
-
-    if (ev.kind === kCanon()) {
-      seen.add(ev.id);
-      trimSeen();
-      try { bus.emit('net:canon', ev); } catch (_) {}
-      return;
-    }
-
-    if (ev.kind === kQuery()) {
-      seen.add(ev.id);
-      trimSeen();
-      handleIncomingQuery(ev);
-      return;
-    }
-
-    if (ev.kind === kAnswer()) {
-      seen.add(ev.id);
-      trimSeen();
-      try { bus.emit('net:answer', Protocol.decodeAnswer(ev)); } catch (_) {}
-      return;
-    }
-  }
-
-  /**
-   * Обрезка seen.
-   */
-  function trimSeen() {
-    const max = Config.get('seenMaxSize', 1000);
-    if (seen.size <= max) return;
-
-    const arr = Array.from(seen);
-    seen.clear();
-
-    for (let i = arr.length - Math.floor(max / 2); i < arr.length; i++) {
-      seen.add(arr[i]);
-    }
-  }
-
-  /**
-   * @param {Object} ev
-   */
-  function handleIncomingQuery(ev) {
-    const q = Protocol.decodeQuery(ev);
-    if (!q) return;
-
-    if (q.owner === Nostr.getPubkey()) return;
-
-    const now = Date.now();
-    const last = peerQueryTimes.get(q.owner) || 0;
-
-    if (now - last < Config.get('queryRateLimit', 3000)) return;
-
-    peerQueryTimes.set(q.owner, now);
-
-    if (!passesPrefilter(q.vector)) return;
-
-    DB.allNotes().then(notes => {
-      const candidates = notes.filter(n => n.visibility === 'public' && n.vector);
-      if (!candidates.length) return null;
-
-      const byId = new Map(candidates.map(n => [n.uid, n]));
-      const items = candidates.map(n => ({ id: n.uid, vector: n.vector }));
-
-      return Ranker.cosineBatch(q.vector, items).then(scored => {
-        const top = scored
-          .filter(s => s.score >= Config.get('threshold', 0.81))
-          .slice(0, q.maxResponses || Config.get('maxResponses', 8));
-
-        top.forEach((s, i) => {
-          const note = byId.get(s.id);
-          if (!note) return;
-
-          setTimeout(() => {
-            Nostr.publish(Protocol.answerEvent(note, s.score, q.queryId))
-              .catch(e => Logger.warn('NetService: не отправить ответ', String(e)));
-          }, i * 250);
-        });
-      });
-    }).catch(e => Logger.warn('NetService: ошибка обработки запроса', String(e)));
-  }
-
-  /**
-   * Отправка запроса при изменении контекста.
-   */
-  function maybeSendQuery() {
-    const ctx = Store.get('context');
-
-    if ((ctx.source !== 'pin' && ctx.source !== 'drift') || !ctx.vector) {
-      lastQueryVec = null;
-      return;
-    }
-
-    if (!canPublish()) {
-      lastQueryVec = null;
-      return;
-    }
-
-    const now = Date.now();
-    if (now - lastQueryTime < Config.get('queryRateLimit', 3000)) return;
-
-    if (lastQueryVec && Ranker.isSimilar(lastQueryVec, ctx.vector)) return;
-
-    lastQueryVec = ctx.vector;
-    lastQueryTime = now;
-
-    const tpl = Protocol.queryEvent(
-      ctx.vector,
-      Config.get('maxResponses', 8),
-      Config.get('responseWindow', 6000)
-    );
-
-    Nostr.publish(tpl)
-      .then(ev => {
-        activeQueryId = ev.id;
-        Logger.info('NetService: запрос ' + ev.id.slice(0, 8) + '…');
-      })
-      .catch(e => {
-        lastQueryVec = null;
-        lastQueryTime = 0;
-        Logger.warn('NetService: не отправить запрос', String(e && e.message || e));
-      });
-  }
-
-  /**
-   * Подписка на комнату: каноны без since (replaceable-семантика:
-   * релей хранит последнюю версию каждого канона по d-tag — окно
-   * не нужно и отсекает старые публикации); запросы и ответы —
-   * со скользящим окном, как раньше.
-   */
-  function subscribeToRoom() {
-    const filters = [
-      { kinds: [kCanon()], '#t': [room()] },
-      { kinds: [kQuery(), kAnswer()], '#t': [room()], since: Math.floor(Date.now() / 1000) - currentWindow },
-    ];
-
-    const myEpoch = ++subEpoch;
-
-    if (subscription && typeof subscription.close === 'function') {
-      try { subscription.close(); } catch (_) {}
-    }
-
-    subscription = Nostr.subscribe(filters, {
-      onevent: onEvent,
-      onclose: () => {
-        if (myEpoch !== subEpoch) return;
-
-        setStatus('reconnecting');
-
-        const maxAttempts = Config.get('reconnectMaxAttempts', 10);
-        const baseDelay = Config.get('reconnectBaseDelay', 1000);
-        const maxDelay = Config.get('reconnectMaxDelay', 60000);
-
-        reconnectAttempts++;
-
-        if (reconnectAttempts > maxAttempts) {
-          Logger.warn('NetService: ' + maxAttempts + ' неудачных подключений');
-          setStatus('failed');
-          return;
-        }
-
-        const delay = Math.min(baseDelay * Math.pow(2, reconnectAttempts - 1), maxDelay);
-        const jitter = delay * 0.25 * Math.random();
-
-        setTimeout(() => {
-          if (started && myEpoch === subEpoch && !isOffline()) {
-            subscribeToRoom();
-          }
-        }, delay + jitter);
-      },
-    });
-
-    if (subscription) {
-      setStatus('connecting');
-
-      setTimeout(() => {
-        if (myEpoch === subEpoch && started && !isOffline()) {
-          markConnected(false);
-        }
-      }, 5000);
-    }
-  }
-
-  /**
-   * Подписка на свои каноны (синк устройств).
-   */
-  function subscribeSelf() {
-    const pk = Nostr.getPubkey();
-    if (!pk) return;
-
-    if (selfSubscription && typeof selfSubscription.close === 'function') {
-      try { selfSubscription.close(); } catch (_) {}
-    }
-
-    selfSubscription = Nostr.subscribe(
-      [{ authors: [pk], kinds: [kCanon()] }],
-      {
-        onevent: ev => {
-          if (!ev || !ev.id) return;
-          try { bus.emit('net:canon', ev); } catch (_) {}
-        },
-        onclose: () => {
-          setTimeout(() => {
-            if (started) subscribeSelf();
-          }, 5000);
-        },
-      }
-    );
-  }
-
-  /**
-   * Подтяжка цели по ответу-ссылке.
-   * @param {Object} p - {uid, owner}
-   */
-  function handleMirrorFetch(p) {
-    if (!p || !p.uid || !p.owner) return;
-    if (!Nostr.isReady()) return;
-
-    if (fetchSubscription && typeof fetchSubscription.close === 'function') {
-      try { fetchSubscription.close(); } catch (_) {}
-    }
-
-    fetchSubscription = Nostr.subscribe(
-      [{ authors: [p.owner], kinds: [kCanon()], '#d': [p.uid] }],
-      {
-        onevent: ev => {
-          if (!ev || !ev.id) return;
-          try { bus.emit('net:canon', ev); } catch (_) {}
-          if (fetchSubscription && typeof fetchSubscription.close === 'function') {
-            try { fetchSubscription.close(); } catch (_) {}
-            fetchSubscription = null;
-          }
-        },
-        onclose: () => {
-          setTimeout(() => {
-            if (fetchSubscription) {
-              try { fetchSubscription.close(); } catch (_) {}
-              fetchSubscription = null;
-            }
-          }, 10000);
-        },
-      }
-    );
-  }
-
-  /**
-   * Слушатели online/offline.
-   */
-  function ensureOnlineListener() {
-    if (onlineListenerAdded) return;
-    onlineListenerAdded = true;
-
-    window.addEventListener('online', () => {
-      if (!started) {
-        start();
-        return;
-      }
-
-      if (!isOffline()) {
-        if (!subscription) subscribeToRoom();
-        if (!selfSubscription) subscribeSelf();
-      }
-
-      flushQueue();
-    });
-
-    window.addEventListener('offline', () => {
-      if (!started) return;
-
-      setStatus('failed');
-
-      subEpoch++;
-
-      if (subscription && typeof subscription.close === 'function') {
-        try { subscription.close(); } catch (_) {}
-      }
-      subscription = null;
-    });
-  }
-
-  /**
-   * Heartbeat.
-   */
-  function startHeartbeat() {
-    if (hbTimer) clearInterval(hbTimer);
-
-    hbTimer = setInterval(() => {
-      const now = Date.now();
-
-      peerQueryTimes.forEach((ts, pk) => {
-        if (now - ts > 60000) peerQueryTimes.delete(pk);
-      });
-
-      trimSeen();
-    }, Config.get('heartbeat', 30000));
-  }
-
-  /**
-   * Расширение окна (для запросов/ответов; каноны окном не
-   * ограничены — подписка полная).
-   */
-  function loadHistory() {
-    if (!started || historyLoading) return;
-
-    const maxWindow = Config.get('historyMaxWindow', 2592000);
-    if (currentWindow >= maxWindow) {
-      emitHistoryDone(false);
-      return;
-    }
-
-    historyLoading = true;
-    emitHistoryDone(true);
-
-    currentWindow = Math.min(maxWindow, Math.max(currentWindow * 4, 86400));
-
-    try {
-      subscribeToRoom();
-      Logger.info('NetService: окно истории → ' + currentWindow + 's');
-    } finally {
-      setTimeout(() => {
-        historyLoading = false;
-        emitHistoryDone(false);
-      }, 1200);
-    }
-  }
-
-  /**
-   * @param {boolean} loading
-   */
-  function emitHistoryDone(loading) {
-    try { bus.emit('net:history', { loading: loading, window: currentWindow }); } catch (_) {}
-  }
-
-  /**
-   * Старт.
-   * @returns {Promise<void>}
-   */
-  function start() {
-    if (started) return Promise.resolve();
-    if (startPromise) return startPromise;
-
-    ensureOnlineListener();
-
-    startPromise = Nostr.init()
-      .then(() => DB.ready())
-      .then(() => {
-        const Notes = DI.resolve('Notes');
-        return Notes.init();
-      })
-      .then(() => {
-        started = true;
-        reconnectAttempts = 0;
-
-        busUnsubs.forEach(u => {
-          try { u(); } catch (_) {}
-        });
-        busUnsubs = [];
-
-        busUnsubs.push(bus.on('note:created', note => {
-          if (note && note.uid) queuePublish(note.uid);
-        }));
-
-        busUnsubs.push(bus.on('note:updated', note => {
-          if (note && note.uid) queuePublish(note.uid);
-        }));
-
-        busUnsubs.push(bus.on('note:deleted', p => {
-          if (p && p.uid) queueDeleted(p.uid);
-        }));
-
-        busUnsubs.push(bus.on('db:change', () => rebuildCentroids()));
-
-        busUnsubs.push(bus.on('account:changed', () => {
-          queue = { uids: [], deleted: [] };
-          saveQueue();
-          seen.clear();
-          peerQueryTimes.clear();
-        }));
-
-        busUnsubs.push(bus.on('sync:toggle', p => {
-          if (!p) return;
-          if (p.enabled) {
-            subscribeSelf();
-            flushQueue();
-          } else {
-            if (selfSubscription && typeof selfSubscription.close === 'function') {
-              try { selfSubscription.close(); } catch (_) {}
-            }
-            selfSubscription = null;
-            emitSync('off');
-          }
-        }));
-
-        busUnsubs.push(bus.on('mirror:fetch', handleMirrorFetch));
-
-        contextUnsub = Store.subscribe(s => s.context, () => maybeSendQuery());
-
-        startHeartbeat();
-        rebuildCentroids();
-
-        DB.allNotes().then(notes => {
-          notes.forEach(n => {
-            if (n && n.uid) queuePublish(n.uid);
-          });
-          flushQueue();
-        }).catch(() => {});
-
-        if (isOffline()) {
-          setStatus('failed');
-          Logger.warn('NetService: офлайн, ожидаем появление сети');
-        } else {
-          subscribeToRoom();
-        }
-
-        subscribeSelf();
-
-        Logger.info('NetService: запущен, комната #' + room());
-      }).catch(e => {
-        Logger.error('NetService: не стартовать', String(e && e.message || e));
-        setStatus('failed');
-
-        if (startRetryTimer) clearTimeout(startRetryTimer);
-        startRetryTimer = setTimeout(() => {
-          if (!started) start();
-        }, 10000);
-      }).finally(() => {
-        startPromise = null;
-      });
-
-    return startPromise;
-  }
-
-  /**
-   * Полное переподключение.
-   */
-  function resync() {
-    if (!Nostr.isReady()) {
-      start();
-      return;
-    }
-
-    reconnectAttempts = 0;
-
-    if (!isOffline()) {
-      subscribeToRoom();
-      if (Config.get('syncEnabled', true)) subscribeSelf();
-    }
-
-    try { bus.emit('net:resync'); } catch (_) {}
-
-    flushQueue();
-  }
-
-  /**
-   * @param {boolean} full
-   */
-  function stop(full) {
-    started = false;
-
-    if (subscription && typeof subscription.close === 'function') {
-      try { subscription.close(); } catch (_) {}
-    }
-    subscription = null;
-
-    if (selfSubscription && typeof selfSubscription.close === 'function') {
-      try { selfSubscription.close(); } catch (_) {}
-    }
-    selfSubscription = null;
-
-    if (fetchSubscription && typeof fetchSubscription.close === 'function') {
-      try { fetchSubscription.close(); } catch (_) {}
-    }
-    fetchSubscription = null;
-
-    if (hbTimer) {
-      clearInterval(hbTimer);
-      hbTimer = null;
-    }
-
-    if (contextUnsub) {
-      try { contextUnsub(); } catch (_) {}
-      contextUnsub = null;
-    }
-
-    busUnsubs.forEach(u => {
-      try { u(); } catch (_) {}
-    });
-    busUnsubs = [];
-
-    if (flushTimer) {
-      clearTimeout(flushTimer);
-      flushTimer = null;
-    }
-
-    if (startRetryTimer) {
-      clearTimeout(startRetryTimer);
-      startRetryTimer = null;
-    }
-
-    activeQueryId = null;
-    lastQueryVec = null;
-    lastQueryTime = 0;
-    reconnectAttempts = 0;
-
-    if (full) {
-      seen.clear();
-      peerQueryTimes.clear();
-    }
-
-    setStatus('disconnected');
-  }
-
-  /**
-   * Публичный wipe: каноны deleted для всех своих заметок.
-   * @returns {Promise<void>}
-   */
-  async function publishWipeAll() {
-    if (!canPublish()) return;
-
-    try {
-      const notes = await DB.allNotes();
-
-      for (const n of notes) {
-        if (!n || !n.uid) continue;
-        try {
-          const tpl = await Protocol.canonDeleted(n.uid);
-          await Nostr.publish(tpl);
-        } catch (_) {}
-      }
-    } catch (_) {}
-  }
-
-  return { start, stop, resync, loadHistory, publishWipeAll };
+  // TODO: реализация
 }, ['Nostr', 'Protocol', 'DB', 'Ranker', 'Vec', 'Store', 'Config', 'Logger', 'EventBus']);
 // ─── NET/NetService ─── END ─────────────────────────────────────────────────
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// СЛОЙ: DOMAIN
-// ═══════════════════════════════════════════════════════════════════════════════
+// ═══ СЛОЙ: DOMAIN ═════════════════════════════════════════════════════════════
 
 // ─── DOMAIN/Notes ─── START ─────────────────────────────────────────────────
 /**
- * Переходы состояний своих заметок. Единственная точка записи в
- * notes. Каждая мутация = новая version (noteVersion) + note:*;
- * публикацию дергает NetService через шину.
- * applyOwnCanonical сравнивает по noteVersion из payload —
- * created_at канона (секунда публикации) не является истиной
- * своей заметки.
+ * Переходы состояний своих заметок. Модель записи:
+ *   { uid, text, vector: Array|null, visibility, parent, version,
+ *     publishedVersion, createdAt, updatedAt }
+ *
+ * ИЗМЕНЕНИЯ v1.0 (контракты):
+ * - create(text, visibility, parent) → Promise<note>;
+ *   REJECT'ит при ошибке БД (Закон 2). vector = null — легально
+ *   (модель не готова): заметка сохраняется, backfill догонит.
+ * - edit(uid, text) → Promise<note>; REJECT'ит; НЕ затирает вектор
+ *   null'ом — если новый вектор недоступен, остаётся старый.
+ * - remove(uid) → Promise<note> (удалённая); emit note:deleted {uid, version}.
+ * - toggle(uid) → Promise<note>.
+ * - init(): восстановление versionCounter; подписка notes:imported.
+ * - backfill() — НОВОЕ v1.0: все заметки с vector===null → embed →
+ *   putNote с новым version (emit note:updated). Вызывается из BOOT
+ *   по ai:ready. Тихо пропускает заметки, чей embed снова null.
  */
 DI.register('Notes', function (DB, Embedder, bus, Logger, Utils) {
-  /** @type {number} */
-  let versionCounter = 0;
-
-  /**
-   * @param {string} event
-   * @param {*} payload
-   */
-  function emit(event, payload) {
-    try { bus.emit(event, payload); } catch (_) {}
-  }
-
-  /**
-   * Восстановление монотонности + подписка на notes:imported.
-   * @returns {Promise<void>}
-   */
-  async function init() {
-    try {
-      const notes = await DB.allNotes();
-      for (const n of notes) {
-        if (n && typeof n.version === 'number' && n.version > versionCounter) {
-          versionCounter = n.version;
-        }
-      }
-    } catch (_) {}
-
-    const now = Math.floor(Date.now() / 1000);
-    if (versionCounter < now) versionCounter = now;
-
-    bus.on('notes:imported', p => {
-      if (p && typeof p.maxVersion === 'number' && p.maxVersion > versionCounter) {
-        versionCounter = p.maxVersion;
-      }
-    });
-  }
-
-  /**
-   * @returns {number}
-   */
-  function nextVersion() {
-    const t = Math.floor(Date.now() / 1000);
-    if (t <= versionCounter) versionCounter = versionCounter + 1;
-    else versionCounter = t;
-    return versionCounter;
-  }
-
-  /**
-   * @param {string} text
-   * @param {string} visibility
-   * @param {Object|null} [parent]
-   * @returns {Promise<Object|null>}
-   */
-  async function create(text, visibility, parent) {
-    const t = (text || '').trim();
-    if (!t) return null;
-
-    try {
-      const vector = await Embedder.embed(t);
-      const now = Date.now();
-      const note = {
-        uid: Utils.uid('n'),
-        text: t,
-        vector: vector ? Array.from(vector) : null,
-        visibility: visibility === 'public' ? 'public' : 'private',
-        parent: parent && parent.uid ? { uid: parent.uid, owner: parent.owner || null } : null,
-        version: nextVersion(),
-        createdAt: now,
-        updatedAt: now,
-      };
-
-      await DB.putNote(note);
-      emit('note:created', note);
-      return note;
-    } catch (e) {
-      Logger.warn('Notes: create', String(e && e.message || e));
-      return null;
-    }
-  }
-
-  /**
-   * @param {string} uid
-   * @param {string} newText
-   * @returns {Promise<Object|null>}
-   */
-  async function edit(uid, newText) {
-    const t = (newText || '').trim();
-    if (!t) return null;
-
-    const note = await DB.getNote(uid);
-    if (!note) return null;
-
-    const vector = await Embedder.embed(t);
-    note.text = t;
-    note.vector = vector ? Array.from(vector) : null;
-    note.version = nextVersion();
-    note.updatedAt = Date.now();
-
-    await DB.putNote(note);
-    emit('note:updated', note);
-    return note;
-  }
-
-  /**
-   * @param {string} uid
-   * @returns {Promise<Object|null>}
-   */
-  async function remove(uid) {
-    const note = await DB.getNote(uid);
-    if (!note) return null;
-
-    await DB.delNote(uid);
-    emit('note:deleted', { uid });
-    return note;
-  }
-
-  /**
-   * @param {string} uid
-   * @returns {Promise<Object|null>}
-   */
-  async function toggle(uid) {
-    const note = await DB.getNote(uid);
-    if (!note) return null;
-
-    note.visibility = note.visibility === 'public' ? 'private' : 'public';
-    note.version = nextVersion();
-    note.updatedAt = Date.now();
-
-    await DB.putNote(note);
-    emit('note:updated', note);
-    return note;
-  }
-
-  /**
-   * @param {string} uid
-   * @returns {Promise<Object|undefined>}
-   */
-  function get(uid) {
-    return DB.getNote(uid);
-  }
-
-  /**
-   * Применение канона с другого устройства: LWW по noteVersion
-   * (payload), не по created_at публикации.
-   * @param {Object} canonical
-   * @returns {Promise<boolean>}
-   */
-  async function applyOwnCanonical(canonical) {
-    if (!canonical || !canonical.uid) return false;
-
-    const cur = await DB.getNote(canonical.uid);
-    if (!cur) return false;
-
-    const incoming = typeof canonical.noteVersion === 'number'
-      ? canonical.noteVersion
-      : canonical.version;
-
-    if (incoming <= cur.version) return false;
-
-    if (typeof canonical.text === 'string') cur.text = canonical.text;
-    if (canonical.vec) cur.vector = canonical.vec;
-    if (canonical.visibility === 'public' || canonical.visibility === 'private') {
-      cur.visibility = canonical.visibility;
-    }
-    if (canonical.parent) cur.parent = canonical.parent;
-    cur.version = incoming;
-    cur.updatedAt = Date.now();
-
-    await DB.putNote(cur);
-    emit('note:updated', cur);
-    return true;
-  }
-
-  /**
-   * @param {Object} canonical
-   * @returns {Promise<boolean>}
-   */
-  async function restoreFromCanonical(canonical) {
-    if (!canonical || !canonical.uid) return false;
-
-    const cur = await DB.getNote(canonical.uid);
-    if (cur) return applyOwnCanonical(canonical);
-
-    await DB.putNote({
-      uid: canonical.uid,
-      text: canonical.text || '',
-      vector: canonical.vec || null,
-      visibility: canonical.visibility || 'private',
-      parent: canonical.parent || null,
-      version: typeof canonical.noteVersion === 'number'
-        ? canonical.noteVersion
-        : (canonical.version || nextVersion()),
-      createdAt: (canonical.version * 1000) || Date.now(),
-      updatedAt: Date.now(),
-    });
-    emit('note:created', await DB.getNote(canonical.uid));
-    return true;
-  }
-
-  return {
-    init,
-    create,
-    edit,
-    remove,
-    toggle,
-    get,
-    applyOwnCanonical,
-    restoreFromCanonical,
-  };
+  // TODO: реализация
 }, ['DB', 'Embedder', 'EventBus', 'Logger', 'Utils']);
 // ─── DOMAIN/Notes ─── END ───────────────────────────────────────────────────
 
 // ─── DOMAIN/Mirror ─── START ────────────────────────────────────────────────
 /**
- * Интерпретация входящих канонов: свои — к notes (синк/restore/
- * удаление по эху), чужие — к mirror. Единственная точка записи в
- * mirror. Свои записи в mirror невозможны (И2).
- * ts из payload (время заметки) пробрасывается в mirror — для
- * хронологической сортировки ленты.
+ * Интерпретация входящих канонов: свой → notes (LWW по noteVersion;
+ * deleted-канон с noteVersion > cur.version → удаление по эху),
+ * чужой → DB.upsertMirror. purgeSelf при старте. fetchTarget по
+ * net:answer (дедуп 500) → mirror:fetch.
  */
 DI.register('Mirror', function (DB, Protocol, Notes, bus, Nostr, Logger) {
-  /** @type {Set<string>} */
-  const fetched = new Set();
-
-  /**
-   * Вычистка исторических mirror-дублей своего владельца.
-   * @returns {Promise<void>}
-   */
-  async function purgeSelf() {
-    try {
-      const pk = Nostr.getPubkey();
-      if (!pk) return;
-
-      const all = await DB.allMirror();
-      const mine = all.filter(m => m && m.owner === pk);
-
-      for (const m of mine) {
-        await DB.delMirror(m.uid).catch(() => {});
-      }
-
-      if (mine.length) {
-        Logger.info('Mirror: вычищено своих дублей — ' + mine.length);
-      }
-    } catch (_) {}
-  }
-
-  /**
-   * Инициализация: подписки, стартовая чистка.
-   */
-  function init() {
-    bus.on('net:canon', ev => {
-      if (ev) applyCanon(ev);
-    });
-
-    bus.on('net:answer', a => {
-      if (a && a.uid && a.owner) fetchTarget(a.uid, a.owner);
-    });
-
-    bus.on('net:resync', () => {
-      fetched.clear();
-    });
-
-    Nostr.init().then(purgeSelf).catch(() => {});
-  }
-
-  /**
-   * Применить входящее событие канона. Маршрутизация по владельцу:
-   * свой — notes (LWW по version, удаление по эху), чужой — mirror.
-   * @param {Object} ev - Nostr-событие kind 30078.
-   * @returns {Promise<void>}
-   */
-  async function applyCanon(ev) {
-    try {
-      const canonical = await Protocol.decodeCanon(ev);
-      if (!canonical || !canonical.uid || !canonical.owner) return;
-
-      const myPk = Nostr.getPubkey();
-
-      if (!myPk || canonical.owner !== myPk) {
-        await DB.upsertMirror(canonical);
-        return;
-      }
-
-      const cur = await DB.getNote(canonical.uid);
-      if (cur && canonical.version <= cur.version) {
-        return;
-      }
-
-      if (canonical.deleted) {
-        if (cur) {
-          await DB.delNote(canonical.uid);
-          Logger.info('Mirror: удаление по эху v' + canonical.version + ' ' + canonical.uid.slice(0, 6));
-        }
-        return;
-      }
-
-      if (cur) {
-        const applied = await Notes.applyOwnCanonical(canonical);
-        if (applied) {
-          Logger.info('Mirror: синк ' + canonical.uid.slice(0, 6) + ' v' + canonical.version);
-        }
-        return;
-      }
-
-      const restored = await Notes.restoreFromCanonical(canonical);
-      if (restored) {
-        Logger.info('Mirror: restore ' + canonical.uid.slice(0, 6) + ' v' + canonical.version);
-      }
-    } catch (e) {
-      Logger.warn('Mirror: applyCanon', String(e && e.message || e));
-    }
-  }
-
-  /**
-   * Подтяжка заметки по ответу-ссылке.
-   * @param {string} uid
-   * @param {string} owner
-   */
-  function fetchTarget(uid, owner) {
-    if (!uid || !owner) return;
-    if (DB.hasOwn(uid)) return;
-    if (fetched.has(uid)) return;
-
-    fetched.add(uid);
-    if (fetched.size > 500) {
-      const arr = Array.from(fetched);
-      fetched.clear();
-      for (let i = Math.floor(arr.length / 2); i < arr.length; i++) {
-        fetched.add(arr[i]);
-      }
-    }
-
-    bus.emit('mirror:fetch', { uid, owner });
-  }
-
-  return { init, applyCanon, fetchTarget };
+  // TODO: реализация
 }, ['DB', 'Protocol', 'Notes', 'EventBus', 'Nostr', 'Logger']);
 // ─── DOMAIN/Mirror ─── END ──────────────────────────────────────────────────
 
 // ─── DOMAIN/Context ─── START ───────────────────────────────────────────────
 /**
- * Контекст поиска: пин/дрейф/ввод. Приоритет drift > pin > input.
- * Пин несёт идентичность заметки {uid, owner} (И1) и вектор.
+ * Контекст поиска: drift > pin > input. setInput (debounce 350,
+ * гонка-гвард), setPin (требует vector — иначе тихо НЕ пинует и НЕ
+ * меняет состояние), clearPin, clear. push → Store.setState({context}).
  */
 DI.register('Context', function (Store, Embedder, Config, Utils, bus) {
-  /** @type {string} */
-  let inputText = '';
-  /** @type {Float32Array|null} */
-  let inputVector = null;
-  /** @type {Object|null} */
-  let pin = null;
-
-  /**
-   * Вычисление активного контекста.
-   * @returns {Object}
-   */
-  function activeContext() {
-    const hasInput = !!inputText.trim();
-
-    if (pin && hasInput) {
-      return {
-        source: 'drift',
-        uid: pin.uid,
-        owner: pin.owner,
-        text: inputText.trim(),
-        vector: inputVector,
-        pinText: pin.text,
-      };
-    }
-
-    if (pin) {
-      return {
-        source: 'pin',
-        uid: pin.uid,
-        owner: pin.owner,
-        text: pin.text,
-        vector: pin.vector,
-      };
-    }
-
-    if (hasInput) {
-      return {
-        source: 'input',
-        uid: null,
-        owner: null,
-        text: inputText.trim(),
-        vector: inputVector,
-      };
-    }
-
-    return {
-      source: null,
-      uid: null,
-      owner: null,
-      text: '',
-      vector: null,
-    };
-  }
-
-  /**
-   * Пуш контекста в Store.
-   */
-  function push() {
-    Store.setState({ context: activeContext() });
-  }
-
-  /**
-   * Дебаунс эмбеддинга ввода с защитой от гонок.
-   */
-  const debouncedEmbed = Utils.debounce(() => {
-    const t = inputText.trim();
-    if (!t) {
-      inputVector = null;
-      push();
-      return;
-    }
-
-    Embedder.embed(t).then(v => {
-      if (inputText.trim() === t) {
-        inputVector = v;
-        push();
-      }
-    });
-  }, Config.get('debounce', 350));
-
-  return {
-    /**
-     * @param {string} text
-     */
-    setInput(text) {
-      inputText = text || '';
-      if (!inputText.trim()) inputVector = null;
-      push();
-      debouncedEmbed();
-    },
-
-    /**
-     * @param {Object} note - Заметка с вектором (notes или mirror).
-     */
-    setPin(note) {
-      if (!note || !note.vector) return;
-      pin = {
-        uid: note.uid,
-        owner: note.owner !== undefined ? note.owner : (note.authorPubkey || null),
-        text: note.text,
-        vector: note.vector,
-      };
-      push();
-    },
-
-    clearPin() {
-      pin = null;
-      push();
-    },
-
-    clear() {
-      inputText = '';
-      inputVector = null;
-      pin = null;
-      debouncedEmbed.cancel();
-      push();
-    },
-
-    /**
-     * @returns {Float32Array|Array<number>|null}
-     */
-    getVector() {
-      return activeContext().vector;
-    },
-
-    /**
-     * @returns {Object}
-     */
-    getActive() {
-      return activeContext();
-    },
-
-    /**
-     * @returns {Object|null}
-     */
-    getPin() {
-      return pin;
-    },
-
-    init() {
-      bus.on('note:pin', note => {
-        if (note) this.setPin(note);
-      });
-    },
-  };
+  // TODO: реализация
 }, ['Store', 'Embedder', 'Config', 'Utils', 'EventBus']);
 // ─── DOMAIN/Context ─── END ─────────────────────────────────────────────────
 
 // ─── DOMAIN/Feed ─── START ──────────────────────────────────────────────────
 /**
- * Сборка лент из notes (свои: все) и mirror (чужие: public).
- * Свои private участвуют в поиске — ядро продукта.
- * Хронология чужих — по ts из payload (время заметки), не по
- * version (время публикации канона).
+ * Сборка лент: без контекста — хронология feed; с контекстом —
+ * lists.local/world/seren по cosineBatch+split. seq-guard.
+ *
+ * ИЗМЕНЕНИЕ v1.0: подписки db:change/db:mirror — через debounce 120мс
+ * (гасит шторм сканов при сетевом синке; логика не меняется).
  */
-DI.register('Feed', function (DB, Ranker, Store, bus, Logger) {
-  /** @type {number} */
-  let seq = 0;
-  /** @type {Array<Function>} */
-  let unsubs = [];
-
-  /**
-   * Пересборка лент (seq-guard).
-   * @returns {Promise<void>}
-   */
-  function refresh() {
-    const my = ++seq;
-    const ctx = Store.get('context');
-
-    return Promise.all([DB.allNotes(), DB.allMirror()]).then(([notes, mirror]) => {
-      if (my !== seq) return;
-
-      const ownUids = new Set();
-      notes.forEach(n => {
-        if (n) ownUids.add(n.uid);
-      });
-
-      const pinUid = ctx.uid || null;
-      const pinOwner = ctx.owner || null;
-
-      const ownNotes = notes
-        .filter(n => n && n.text)
-        .map(n => ({ uid: n.uid, owner: null, text: n.text, vector: n.vector,
-                     parent: n.parent, visibility: n.visibility,
-                     createdAt: n.createdAt, updatedAt: n.updatedAt,
-                     own: true }));
-
-      const foreignPublic = mirror
-        .filter(m => m && m.visibility === 'public' && m.text && !ownUids.has(m.uid))
-        .map(m => {
-          const ts = m.ts || (m.version * 1000);
-          return { uid: m.uid, owner: m.owner, text: m.text, vector: m.vec,
-                   parent: m.parent, visibility: 'public',
-                   createdAt: ts, updatedAt: ts,
-                   own: false };
-        });
-
-      if (!ctx.source) {
-        const merged = [...ownNotes, ...foreignPublic]
-          .filter(n => !isPin(n, pinUid, pinOwner))
-          .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-
-        Store.setState({
-          feed: merged,
-          lists: { local: [], world: [], seren: [] },
-        });
-
-        return;
-      }
-
-      if (!ctx.vector) return;
-
-      const all = [...ownNotes, ...foreignPublic]
-        .filter(n => !isPin(n, pinUid, pinOwner));
-
-      const items = [];
-      const dataMap = new Map();
-      const seenUids = new Set();
-
-      for (const n of all) {
-        if (!n.vector || seenUids.has(n.uid)) continue;
-        seenUids.add(n.uid);
-        items.push({ id: n.uid, vector: n.vector });
-        dataMap.set(n.uid, n);
-      }
-
-      return Ranker.cosineBatch(ctx.vector, items).then(scored => {
-        if (my !== seq) return;
-
-        const { relevant, seren } = Ranker.split(scored);
-
-        const toRes = s => {
-          const n = dataMap.get(s.id);
-          return n ? Object.assign({}, n, { score: s.score }) : null;
-        };
-
-        const rel = relevant.map(toRes).filter(Boolean);
-        const srn = seren.map(toRes).filter(Boolean);
-
-        Store.setState({
-          lists: {
-            local: rel.filter(n => n.own),
-            world: rel.filter(n => !n.own),
-            seren: srn,
-          },
-          feed: [],
-        });
-      });
-    }).catch(err => {
-      Logger.warn('Feed: ошибка refresh', String(err && err.message || err));
-    });
-  }
-
-  /**
-   * @param {Object} n
-   * @param {string|null} pinUid
-   * @param {string|null} pinOwner
-   * @returns {boolean}
-   */
-  function isPin(n, pinUid, pinOwner) {
-    if (!pinUid) return false;
-    if (n.uid !== pinUid) return false;
-    if (n.own && !pinOwner) return true;
-    if (!n.own && pinOwner && n.owner === pinOwner) return true;
-    return false;
-  }
-
-  /**
-   * Инициализация.
-   */
-  function init() {
-    unsubs.push(Store.subscribe(s => s.context, () => refresh(), Store.shallowEqual));
-    unsubs.push(bus.on('db:change', () => refresh()));
-    unsubs.push(bus.on('db:mirror', () => refresh()));
-
-    refresh();
-  }
-
-  /**
-   * Отписка.
-   */
-  function destroy() {
-    unsubs.forEach(u => {
-      try { u(); } catch (_) {}
-    });
-    unsubs = [];
-  }
-
-  return { init, destroy, refresh };
-}, ['DB', 'Ranker', 'Store', 'EventBus', 'Logger']);
-// ─── DOMAIN/Feed ─── END ────────────────────────────────────────────────────
+DI.register('Feed', function (DB, Ranker, Store, bus, Logger, Utils, Config) {
+  // TODO: реализация
+}, ['DB', 'Ranker', 'Store', 'EventBus', 'Logger', 'Utils', 'Config']);
+// ─── DOMAIN/Feed ─── END ─────────────────────────═══════════════════════════
 
 // ─── DOMAIN/Provenance ─── START ────────────────────────────────────────────
 /**
- * Генеалогия по parent {uid, owner} через notes + mirror.
- * mirror-записи своих uid исключаются (дубли-защита).
- * Цикл предков: seen содержит пройденные узлы; проверка на цикл
- * выполняется до рекурсии (parent.uid не должен быть уже пройден).
+ * Генеалогия: children/descendants (BFS)/ancestors (цепочка, кэш 5с)/
+ * hasResolvableParent/loadAll. Цикл-защита. clearCache на db:*.
  */
 DI.register('Provenance', function (DB, bus, Nostr) {
-  /** @type {Map<string, {chain: Array, timestamp: number}>} */
-  const cache = new Map();
-  const CACHE_TTL = 5000;
-
-  /**
-   * Все заметки: свои (notes, полные) + чужие mirror (не deleted,
-   * не свои uid).
-   * @returns {Promise<Array<Object>>}
-   */
-  function loadAll() {
-    return Promise.all([DB.allNotes(), DB.allMirror()]).then(([notes, mirror]) => {
-      const out = notes.map(n => ({
-        uid: n.uid, owner: null, text: n.text, visibility: n.visibility,
-        parent: n.parent, isOwn: true,
-      }));
-
-      mirror.forEach(m => {
-        if (!m || m.visibility === 'deleted') return;
-        if (DB.hasOwn(m.uid)) return;
-        out.push({
-          uid: m.uid, owner: m.owner, text: m.text, visibility: m.visibility,
-          parent: m.parent, isOwn: false,
-        });
-      });
-
-      return out;
-    });
-  }
-
-  /**
-   * @param {Array<Object>} all
-   * @returns {{byUid: Map}}
-   */
-  function buildIndex(all) {
-    const byUid = new Map();
-    all.forEach(n => {
-      if (n && n.uid) byUid.set(n.uid, n);
-    });
-    return { byUid };
-  }
-
-  /**
-   * @param {Object} note
-   * @param {{byUid: Map}} idx
-   * @returns {Object|null}
-   */
-  function resolveParent(note, idx) {
-    if (!note || !note.parent || !note.parent.uid) return null;
-    return idx.byUid.get(note.parent.uid) || null;
-  }
-
-  /**
-   * Прямые дети заметки.
-   * @param {string} uid
-   * @returns {Promise<Array<Object>>}
-   */
-  function children(uid) {
-    if (!uid) return Promise.resolve([]);
-
-    return loadAll().then(all => {
-      return all.filter(n => n.parent && n.parent.uid === uid);
-    });
-  }
-
-  /**
-   * Все потомки (BFS, защита от циклов).
-   * @param {string} uid
-   * @returns {Promise<Array<Object>>}
-   */
-  function descendants(uid) {
-    if (!uid) return Promise.resolve([]);
-
-    return loadAll().then(all => {
-      const out = [];
-      const seenIds = new Set([uid]);
-      let frontier = [uid];
-
-      while (frontier.length) {
-        const next = [];
-
-        for (const n of all) {
-          if (!n.parent || !n.parent.uid) continue;
-          if (frontier.indexOf(n.parent.uid) !== -1 && !seenIds.has(n.uid)) {
-            seenIds.add(n.uid);
-            out.push(n);
-            next.push(n.uid);
-          }
-        }
-
-        frontier = next;
-      }
-
-      return out;
-    });
-  }
-
-  /**
-   * Цепочка предков от заметки до корня.
-   * @param {string} uid
-   * @returns {Promise<Array<Object>>}
-   */
-  async function ancestors(uid) {
-    if (!uid) return [];
-
-    const cached = cache.get(uid);
-    if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
-      return cached.chain;
-    }
-
-    const all = await loadAll();
-    const idx = buildIndex(all);
-
-    let current = idx.byUid.get(uid) || null;
-    const chain = [];
-    const seen = new Set([uid]);
-
-    while (current && current.parent && current.parent.uid) {
-      const parent = resolveParent(current, idx);
-      if (!parent) break;
-      if (seen.has(parent.uid)) break;
-
-      seen.add(parent.uid);
-      chain.push(parent);
-      current = parent;
-    }
-
-    cache.set(uid, { chain, timestamp: Date.now() });
-    return chain;
-  }
-
-  /**
-   * @param {Object} note
-   * @returns {Promise<boolean>}
-   */
-  function hasResolvableParent(note) {
-    if (!note || !note.parent || !note.parent.uid) {
-      return Promise.resolve(false);
-    }
-
-    return loadAll().then(all => {
-      const idx = buildIndex(all);
-      return !!resolveParent(note, idx);
-    });
-  }
-
-  /**
-   * Очистка кэша.
-   */
-  function clearCache() {
-    cache.clear();
-  }
-
-  bus.on('db:change', clearCache);
-  bus.on('db:mirror', clearCache);
-
-  return { children, descendants, ancestors, hasResolvableParent, loadAll, clearCache };
+  // TODO: реализация (как в v0.9.9)
 }, ['DB', 'EventBus', 'Nostr']);
 // ─── DOMAIN/Provenance ─── END ──────────────────────────────────────────────
 
 // ─── DOMAIN/Influence ─── START ─────────────────────────────────────────────
 /**
- * Резонанс: уникальные авторы потомков по ключу uid родителя.
- * Свои дети — 'self'; чужие — owner. mirror-дубли своих uid
- * и неизвестные авторы не считаются.
+ * Резонанс: Map<parentUid, Set<авторов>> ('self' + чужие owner).
+ * rebuild + updateForNote; resonance(uid). emit influence:updated.
+ * ИЗМЕНЕНИЕ v1.0: db:* — через debounce 120мс (как Feed).
  */
-DI.register('Influence', function (DB, bus, Logger) {
-  /** @type {Map<string, Set<string>>} */
-  const map = new Map();
-  /** @type {number} */
-  let seq = 0;
-
-  /**
-   * @param {Object} n
-   * @returns {string|null}
-   */
-  function parentKey(n) {
-    if (!n || !n.parent || !n.parent.uid) return null;
-    return n.parent.uid;
-  }
-
-  /**
-   * @returns {Promise<void>}
-   */
-  function rebuild() {
-    const my = ++seq;
-
-    return Promise.all([DB.allNotes(), DB.allMirror()]).then(([notes, mirror]) => {
-      if (my !== seq) return;
-
-      const m = new Map();
-
-      const add = (key, author) => {
-        if (!key || !author) return;
-        if (!m.has(key)) m.set(key, new Set());
-        m.get(key).add(author);
-      };
-
-      notes.forEach(n => {
-        if (!n) return;
-        add(parentKey(n), 'self');
-      });
-
-      mirror.forEach(mm => {
-        if (!mm || mm.visibility !== 'public') return;
-        if (DB.hasOwn(mm.uid)) return;
-        add(parentKey(mm), mm.owner || null);
-      });
-
-      map.clear();
-      m.forEach((v, k) => map.set(k, v));
-
-      try { bus.emit('influence:updated'); } catch (_) {}
-    }).catch(e => Logger.warn('Influence: ошибка rebuild', String(e)));
-  }
-
-  /**
-   * @param {Object} note
-   */
-  function updateForNote(note) {
-    const key = parentKey(note);
-    if (!key) return;
-
-    if (!map.has(key)) map.set(key, new Set());
-    map.get(key).add('self');
-
-    try { bus.emit('influence:updated'); } catch (_) {}
-  }
-
-  /**
-   * @param {string} uid
-   * @returns {number}
-   */
-  function resonance(uid) {
-    if (!uid) return 0;
-    const s = map.get(uid);
-    return s ? s.size : 0;
-  }
-
-  /**
-   * Инициализация.
-   */
-  function init() {
-    bus.on('note:created', updateForNote);
-    bus.on('note:updated', updateForNote);
-    bus.on('note:deleted', () => rebuild());
-    bus.on('db:change', () => rebuild());
-    bus.on('db:mirror', () => rebuild());
-
-    rebuild();
-  }
-
-  return { init, resonance, rebuild };
-}, ['DB', 'EventBus', 'Logger']);
+DI.register('Influence', function (DB, bus, Logger, Utils, Config) {
+  // TODO: реализация
+}, ['DB', 'EventBus', 'Logger', 'Utils', 'Config']);
 // ─── DOMAIN/Influence ─── END ───────────────────────────────────────────────
 
 // ─── DOMAIN/Account ─── START ───────────────────────────────────────────────
 /**
- * Аккаунт: показ/ввод ключа (nsec/npub/ncryptsec, NIP-49),
- * вход с заменой ключа, JSON-архив v3 (заметки + конфиг).
+ * Аккаунт: ключи (npub/nsec/ncryptsec, NIP-49), enterKey (замена с
+ * DB.reset + account:changed + рестарт NetService), экспорт/импорт
+ * архива v3 (sanitize, LWW по version), setSyncEnabled.
+ * Импортированные заметки: publishedVersion=0 (переиздадутся один раз).
  */
 DI.register('Account', function (Config, Nostr, Crypto, DB, bus, Logger) {
-  /** @type {Array<string>} */
-  const CONFIG_WHITELIST = [
-    'threshold',
-    'serendipity',
-    'duplicateThreshold',
-    'similarityDisplay',
-    'lang',
-    'theme',
-  ];
-
-  /**
-   * @returns {Promise<Object>} {pubkey, keyExported, syncEnabled}
-   */
-  async function getAccountInfo() {
-    await Nostr.init();
-    return {
-      pubkey: Nostr.getPubkey(),
-      keyExported: Config.get('keyExported', false),
-      syncEnabled: Config.get('syncEnabled', true),
-    };
-  }
-
-  /**
-   * @returns {Promise<string|null>}
-   */
-  async function getNpub() {
-    const pk = Nostr.getPubkey();
-    if (!pk) return null;
-    return Crypto.encodeNpub(pk);
-  }
-
-  /**
-   * @returns {Promise<boolean>}
-   */
-  async function canWrapKey() {
-    try {
-      return await Crypto.hasNip49();
-    } catch (_) {
-      return false;
-    }
-  }
-
-  /**
-   * @param {string} [password]
-   * @returns {Promise<string|null>}
-   */
-  async function getWrappedKey(password) {
-    const sk = Nostr.getSecretKey();
-    if (!sk) return null;
-
-    const wrapped = await Crypto.encryptKey(sk, String(password || ''));
-    if (wrapped) {
-      Config.set('keyExported', true);
-      return wrapped;
-    }
-
-    const nsec = await Crypto.encodeNsec(sk);
-    if (nsec) {
-      Logger.warn('Account: NIP-49 недоступен, ключ в формате nsec');
-      Config.set('keyExported', true);
-      return nsec;
-    }
-
-    return null;
-  }
-
-  /**
-   * @param {string} input
-   * @param {string} [password]
-   * @returns {Promise<{ok: boolean, error?: string, pubkey?: string}>}
-   */
-  async function enterKey(input, password) {
-    const type = Crypto.classifyKeyInput(input);
-    if (!type) return { ok: false, error: 'bad' };
-
-    let sk = null;
-    try {
-      if (type === 'ncryptsec') {
-        sk = await Crypto.decryptKey(String(input || '').trim(), String(password || ''));
-      } else {
-        sk = await Crypto.decodeSecret(input);
-      }
-    } catch (e) {
-      Logger.warn('Account: enterKey decode', String(e && e.message || e));
-    }
-
-    if (!sk) return { ok: false, error: 'bad' };
-
-    try {
-      await Nostr.init();
-      const pk = Nostr.setKey(sk);
-
-      await DB.reset();
-
-      Config.set('keyExported', false);
-
-      try { bus.emit('account:changed', { pubkey: pk }); } catch (_) {}
-
-      try {
-        const NetService = DI.resolve('NetService');
-        NetService.stop(false);
-        setTimeout(() => { NetService.start(); }, 500);
-      } catch (_) {}
-
-      Logger.info('Account: ключ заменён, pubkey ' + pk.slice(0, 8) + '…');
-      return { ok: true, pubkey: pk };
-    } catch (e) {
-      Logger.error('Account: enterKey', String(e && e.message || e));
-      return { ok: false, error: 'failed' };
-    }
-  }
-
-  /**
-   * @param {Object} n
-   * @returns {Object|null}
-   */
-  function sanitizeNote(n) {
-    if (!n || typeof n.uid !== 'string' || typeof n.text !== 'string') return null;
-    if (n.text.length > Config.get('maxNoteTextLength', 10000)) return null;
-
-    let vector = null;
-    if (Array.isArray(n.vector)) {
-      vector = n.vector.filter(x => typeof x === 'number' && isFinite(x));
-    }
-
-    let parent = null;
-    if (n.parent && typeof n.parent === 'object' && typeof n.parent.uid === 'string' && n.parent.uid) {
-      parent = { uid: n.parent.uid, owner: n.parent.owner || null };
-    }
-
-    return {
-      uid: n.uid,
-      text: n.text,
-      vector,
-      visibility: n.visibility === 'public' ? 'public' : 'private',
-      parent,
-      version: typeof n.version === 'number' && n.version > 0 ? n.version : Math.floor(Date.now() / 1000),
-      createdAt: typeof n.createdAt === 'number' ? n.createdAt : Date.now(),
-      updatedAt: typeof n.updatedAt === 'number' ? n.updatedAt : Date.now(),
-    };
-  }
-
-  /**
-   * @param {boolean} [includeKey]
-   * @param {string} [keyPassword]
-   * @returns {Promise<{json: string, filename: string}|null>}
-   */
-  async function exportArchive(includeKey, keyPassword) {
-    try {
-      await Nostr.init();
-
-      const notes = await DB.allNotes();
-      const archive = {
-        version: 3,
-        app: 'noomium',
-        createdAt: Date.now(),
-        pubkey: Nostr.getPubkey(),
-        ncryptsec: null,
-        notes: notes.map(sanitizeNote).filter(Boolean),
-        config: {},
-      };
-
-      CONFIG_WHITELIST.forEach(k => {
-        archive.config[k] = Config.get(k);
-      });
-
-      if (includeKey) {
-        archive.ncryptsec = await getWrappedKey(keyPassword);
-        if (!archive.ncryptsec) {
-          return null;
-        }
-      }
-
-      const d = new Date();
-      const pad = n => String(n).padStart(2, '0');
-      const filename = 'noomium-backup-'
-        + d.getFullYear() + pad(d.getMonth() + 1) + pad(d.getDate())
-        + '-' + pad(d.getHours()) + pad(d.getMinutes())
-        + '.json';
-
-      return { json: JSON.stringify(archive, null, 2), filename };
-    } catch (e) {
-      Logger.error('Account: exportArchive', String(e && e.message || e));
-      return null;
-    }
-  }
-
-  /**
-   * @param {string} text
-   * @returns {{ok: boolean, error?: string, archive?: Object}}
-   */
-  function parseArchive(text) {
-    let data;
-    try {
-      data = JSON.parse(String(text || ''));
-    } catch (_) {
-      return { ok: false, error: 'bad' };
-    }
-
-    if (!data || typeof data !== 'object' || data.app !== 'noomium') {
-      return { ok: false, error: 'bad' };
-    }
-    if (!Array.isArray(data.notes)) {
-      return { ok: false, error: 'bad' };
-    }
-
-    const notes = [];
-    for (const raw of data.notes) {
-      const note = sanitizeNote(raw);
-      if (note) notes.push(note);
-    }
-
-    const config = {};
-    if (data.config && typeof data.config === 'object') {
-      CONFIG_WHITELIST.forEach(k => {
-        if (k in data.config) config[k] = data.config[k];
-      });
-    }
-
-    return {
-      ok: true,
-      archive: {
-        version: typeof data.version === 'number' ? data.version : 3,
-        pubkey: typeof data.pubkey === 'string' ? data.pubkey : null,
-        ncryptsec: (typeof data.ncryptsec === 'string' && data.ncryptsec) ? data.ncryptsec : null,
-        notes,
-        config,
-        noteCount: notes.length,
-      },
-    };
-  }
-
-  /**
-   * @param {Object} archive
-   * @returns {Promise<number>}
-   */
-  async function importArchive(archive) {
-    if (!archive || !Array.isArray(archive.notes)) return 0;
-
-    let applied = 0;
-    let maxVersion = 0;
-
-    for (const note of archive.notes) {
-      try {
-        const cur = await DB.getNote(note.uid);
-        if (cur && cur.version >= note.version) continue;
-
-        await DB.putNote({
-          uid: note.uid,
-          text: note.text,
-          vector: note.vector,
-          visibility: note.visibility,
-          parent: note.parent,
-          version: note.version,
-          createdAt: note.createdAt,
-          updatedAt: note.updatedAt,
-        });
-
-        try { bus.emit('note:created', note); } catch (_) {}
-
-        if (note.version > maxVersion) maxVersion = note.version;
-        applied++;
-      } catch (e) {
-        Logger.warn('Account: import note ' + note.uid, String(e && e.message || e));
-      }
-    }
-
-    if (maxVersion > 0) {
-      try { bus.emit('notes:imported', { maxVersion }); } catch (_) {}
-    }
-
-    const cfg = archive.config || {};
-    let cfgChanged = false;
-    CONFIG_WHITELIST.forEach(k => {
-      if (k in cfg) {
-        Config.set(k, cfg[k]);
-        cfgChanged = true;
-      }
-    });
-
-    if (cfgChanged) {
-      try { bus.emit('config:imported', { keys: Object.keys(cfg) }); } catch (_) {}
-    }
-
-    Logger.info('Account: импортировано заметок — ' + applied);
-    return applied;
-  }
-
-  /**
-   * @param {boolean} enabled
-   */
-  function setSyncEnabled(enabled) {
-    const v = enabled === true;
-    Config.set('syncEnabled', v);
-    try { bus.emit('sync:toggle', { enabled: v }); } catch (_) {}
-  }
-
-  return {
-    getAccountInfo,
-    getNpub,
-    canWrapKey,
-    getWrappedKey,
-    enterKey,
-    exportArchive,
-    parseArchive,
-    importArchive,
-    setSyncEnabled,
-  };
+  // TODO: реализация
 }, ['Config', 'Nostr', 'Crypto', 'DB', 'EventBus', 'Logger']);
-// ─── DOMAIN/Account ─── END ─────────────────────────────────────────────────
+// ─── DOMAIN/Account ─── END ─────────────────────────════════════════════════
 
-// ─── DOMAIN/NoteActions ─── START ───────────────────────────────────────────
-/**
- * UI-действия: удаление, видимость, копирование.
- */
-DI.register('NoteActions', function (Notes, Modal, Toast, I18n) {
-  /**
-   * @param {string} uid
-   */
-  function remove(uid) {
-    if (!uid) return;
-
-    Modal.confirm(I18n.t('btn.del'), I18n.t('del.confirm'), () => {
-      Notes.remove(uid).then(() => {
-        Toast.show('ok', I18n.t('toast.deleted'));
-      }).catch(() => {
-        Toast.show('err', I18n.t('toast.copy.fail'));
-      });
-    });
-  }
-
-  /**
-   * @param {string} uid
-   */
-  function toggle(uid) {
-    if (!uid) return;
-
-    Notes.toggle(uid).then(note => {
-      if (!note) return;
-      Toast.show('ok', I18n.t(note.visibility === 'public' ? 'toast.saved.public' : 'toast.saved.private'));
-    }).catch(() => {
-      Toast.show('err', I18n.t('toast.copy.fail'));
-    });
-  }
-
-  /**
-   * @param {string} text
-   */
-  function copy(text) {
-    const done = () => Toast.show('ok', I18n.t('toast.copied'));
-    const fail = () => Toast.show('err', I18n.t('toast.copy.fail'));
-
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(text || '').then(done).catch(fail);
-    } else {
-      try {
-        const ta = document.createElement('textarea');
-        ta.value = text || '';
-        ta.style.position = 'fixed';
-        ta.style.left = '-9999px';
-        document.body.appendChild(ta);
-        ta.select();
-        document.execCommand('copy');
-        ta.remove();
-        done();
-      } catch (_) {
-        fail();
-      }
-    }
-  }
-
-  return { remove, toggle, copy };
-}, ['Notes', 'Modal', 'Toast', 'I18n']);
-// ─── DOMAIN/NoteActions ─── END ─────────────────────────────────────────────
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// СЛОЙ: UI
-// ═══════════════════════════════════════════════════════════════════════════════
+// ═══ СЛОЙ: UI ═════════════════════════════════════════════════════════════════
 
 // ─── UI/Modal ─── START ─────────────────────────────────────────────────────
 /**
- * Универсальные модалки: open/close/confirm, Escape, клик по overlay,
- * возврат фокуса, автофокус.
+ * open({title, body:string|Element, buttons}) — textContent-only,
+ * Escape, клик по overlay, возврат фокуса, автофокус.
+ * confirm(title, text, onOk, okText) — Cancel + подтверждение.
+ * ИЗМЕНЕНИЕ v1.0: кнопка OK — primary ИЛИ danger (не оба сразу);
+ * confirm по умолчанию primary (розовой бывает только явная деструкция
+ * через okDanger-флаг).
+ * При buttons=[] — #modal-f скрывается целиком (нет пустой полосы).
  */
 DI.register('Modal', function (I18n) {
-  let overlay, modal, titleEl, bodyEl, footEl, closeBtn;
-  let escHandler = null;
-  let lastFocus = null;
-
-  /**
-   * Ленивая привязка к DOM.
-   */
-  function bind() {
-    if (overlay) return;
-
-    overlay = document.getElementById('overlay');
-    modal = document.getElementById('modal');
-    titleEl = document.getElementById('modal-t');
-    bodyEl = document.getElementById('modal-b');
-    footEl = document.getElementById('modal-f');
-    closeBtn = document.getElementById('modal-x');
-
-    if (closeBtn) closeBtn.addEventListener('click', close);
-    if (overlay) overlay.addEventListener('click', e => {
-      if (e.target === overlay) close();
-    });
-  }
-
-  /**
-   * @param {Object} opts - {title, body (string|Element),
-   *   buttons: [{text, primary?, danger?, onClick}]}
-   */
-  function open(opts) {
-    bind();
-    if (!overlay) return;
-
-    opts = opts || {};
-    lastFocus = document.activeElement;
-
-    if (titleEl) titleEl.textContent = opts.title || '';
-
-    if (bodyEl) {
-      bodyEl.innerHTML = '';
-
-      if (opts.body) {
-        if (typeof opts.body === 'string') {
-          bodyEl.textContent = opts.body;
-        } else {
-          bodyEl.appendChild(opts.body);
-        }
-      }
-    }
-
-    if (footEl) {
-      footEl.innerHTML = '';
-
-      (opts.buttons || []).forEach(b => {
-        const btn = document.createElement('button');
-        btn.className = 'mbtn' + (b.primary ? ' primary' : '') + (b.danger ? ' danger' : '');
-        btn.textContent = b.text || 'OK';
-        btn.addEventListener('click', () => {
-          if (b.onClick) b.onClick();
-        });
-        footEl.appendChild(btn);
-      });
-    }
-
-    overlay.classList.add('on');
-
-    if (escHandler) document.removeEventListener('keydown', escHandler);
-    escHandler = e => {
-      if (e.key === 'Escape') close();
-    };
-    document.addEventListener('keydown', escHandler);
-
-    setTimeout(() => {
-      if (!modal) return;
-      const focusable = modal.querySelectorAll('button, input, textarea, [tabindex]:not([tabindex="-1"])');
-      if (focusable.length) focusable[0].focus();
-    }, 50);
-  }
-
-  /**
-   * Закрыть.
-   */
-  function close() {
-    if (!overlay) return;
-
-    overlay.classList.remove('on');
-
-    if (escHandler) {
-      document.removeEventListener('keydown', escHandler);
-      escHandler = null;
-    }
-
-    if (lastFocus && lastFocus.focus) {
-      try { lastFocus.focus(); } catch (_) {}
-    }
-  }
-
-  /**
-   * @param {string} title
-   * @param {string} text
-   * @param {Function} onOk
-   * @param {string} [okText]
-   */
-  function confirm(title, text, onOk, okText) {
-    open({
-      title,
-      body: text,
-      buttons: [
-        { text: I18n.t('btn.cancel'), onClick: close },
-        {
-          text: okText || 'OK',
-          primary: true,
-          danger: true,
-          onClick: () => {
-            close();
-            if (onOk) onOk();
-          },
-        },
-      ],
-    });
-  }
-
-  return { open, close, confirm };
+  // TODO: реализация
 }, ['I18n']);
+// └ Modal.confirm(title, text, onOk, okText, opts={danger:true|false})
 // ─── UI/Modal ─── END ───────────────────────────────────────────────────────
 
 // ─── UI/Toast ─── START ─────────────────────────────────────────────────────
 /**
- * Тосты: 4 типа, лимит, автоудаление, haptic.
+ * show(type, msg, ms?) — 4 типа, лимит 3, авто-fade, haptic через
+ * TelegramAdapter (DI.resolve в try — как в v0.9.9).
+ * Контейнер #toasts — FIXED снизу (см. style.css патч H-01).
  */
 DI.register('Toast', function (Config) {
-  /** @type {Object<string, string>} */
-  const ICONS = { ok: '✓', err: '✕', warn: '!', info: '◆' };
-
-  /** @type {HTMLElement|null} */
-  let container = null;
-
-  /**
-   * @param {'ok'|'err'|'warn'|'info'} type
-   */
-  function haptic(type) {
-    try {
-      const tg = DI.resolve('TelegramAdapter');
-      if (tg && tg.isTelegram()) {
-        if (type === 'ok') tg.hapticFeedback('success');
-        else if (type === 'err') tg.hapticFeedback('error');
-        else tg.hapticFeedback('light');
-      }
-    } catch (_) {}
-  }
-
-  /**
-   * @param {'ok'|'err'|'warn'|'info'} type
-   * @param {string} msg
-   * @param {number} [ms]
-   */
-  function show(type, msg, ms) {
-    if (!container) container = document.getElementById('toasts');
-    if (!container) return;
-
-    const cls = ICONS[type] ? type : 'info';
-    haptic(type);
-
-    const el = document.createElement('div');
-    el.className = 'toast ' + cls;
-
-    const ic = document.createElement('span');
-    ic.className = 't-ic';
-    ic.textContent = ICONS[cls];
-
-    const m = document.createElement('span');
-    m.textContent = String(msg || '');
-
-    el.appendChild(ic);
-    el.appendChild(m);
-    container.appendChild(el);
-
-    const limit = Config.get('toastMaxVisible', 3);
-    while (container.children.length > limit) {
-      container.removeChild(container.firstChild);
-    }
-
-    setTimeout(() => {
-      el.style.transition = 'opacity .25s, transform .25s';
-      el.style.opacity = '0';
-      el.style.transform = 'translateY(6px)';
-
-      setTimeout(() => {
-        try { el.remove(); } catch (_) {}
-      }, 260);
-    }, ms || Config.get('toastDefaultDuration', 2200));
-  }
-
-  return { show };
+  // TODO: реализация
 }, ['Config']);
 // ─── UI/Toast ─── END ───────────────────────────────────────────────────────
 
 // ─── UI/Progress ─── START ──────────────────────────────────────────────────
 /**
- * Оверлей загрузки модели: задержка показа 500мс, скрытие по
- * ai:status (model/demo).
+ * Оверлей загрузки модели: показ с задержкой 500мс, скрытие по
+ * ai:status model. НОВОЕ v1.0: кнопка «Продолжить без ИИ» (скрытие
+ * оверлея вручную; модель докачается в фоне) — модель не блокирует
+ * интерфейс, заметки сохраняются без вектора до ai:ready.
  */
-DI.register('Progress', function (bus) {
-  let overlay, fill, pctEl, infoEl;
-  let showTimer = null;
-  const SHOW_DELAY = 500;
-
-  /**
-   * Привязка к DOM.
-   */
-  function bind() {
-    overlay = document.getElementById('progress');
-    fill = document.getElementById('prog-fill');
-    pctEl = document.getElementById('prog-pct');
-    infoEl = document.getElementById('prog-info');
-  }
-
-  /**
-   * Показ.
-   */
-  function show() {
-    if (overlay) overlay.classList.add('on');
-  }
-
-  /**
-   * Скрытие.
-   */
-  function hide() {
-    if (overlay) overlay.classList.remove('on');
-  }
-
-  /**
-   * @param {Object} data - {pct|percent, loadedMB, totalMB, model}
-   */
-  function update(data) {
-    if (!data) return;
-
-    const p = Math.max(0, Math.min(100, Math.round(data.pct || data.percent || 0)));
-
-    if (fill) {
-      fill.style.width = p + '%';
-    }
-
-    if (pctEl) {
-      let text = p + '%';
-
-      if (data.loadedMB) {
-        text = data.loadedMB + ' MB';
-        if (data.totalMB) text += ' / ' + data.totalMB + ' MB';
-      }
-
-      pctEl.textContent = text;
-    }
-
-    if (infoEl && data.model) {
-      infoEl.textContent = data.model;
-    }
-  }
-
-  /**
-   * Инициализация.
-   */
-  function init() {
-    bind();
-
-    bus.on('ai:progress', e => update(e));
-
-    bus.on('ai:status', e => {
-      if (!e) return;
-
-      if (e.mode === 'loading') {
-        update(e);
-
-        if (!showTimer && overlay && !overlay.classList.contains('on')) {
-          showTimer = setTimeout(() => {
-            show();
-            showTimer = null;
-          }, SHOW_DELAY);
-        }
-      } else {
-        if (showTimer) {
-          clearTimeout(showTimer);
-          showTimer = null;
-        }
-        hide();
-      }
-    });
-  }
-
-  return { init, show, hide, update };
-}, ['EventBus']);
+DI.register('Progress', function (bus, I18n) {
+  // TODO: реализация
+}, ['EventBus', 'I18n']);
 // ─── UI/Progress ─── END ────────────────────────────────────────────────────
 
 // ─── UI/HeaderStatus ─── START ──────────────────────────────────────────────
 /**
- * Индикаторы шапки: сеть/ИИ, офлайн-бар, клик по статусу сети —
- * переподключение.
+ * Индикаторы сеть/ИИ (dot ok/warn/err/load), офлайн-бар, клик по
+ * статусу сети → рестарт NetService. НОВОЕ v1.0: ai-статус
+ * 'loading'+stalled → «ии нет» (dot warn); title-подсказка на клике.
  */
 DI.register('HeaderStatus', function (bus, I18n, Embedder) {
-  let netDot, netTxt, aiDot, aiTxt, offlineBar;
-  let unsubs = [];
-  let currentNetStatus = 'disconnected';
-  let currentAiMode = 'loading';
-  let currentAiPercent = 0;
-
-  /**
-   * Привязка к DOM.
-   */
-  function bind() {
-    netDot = document.getElementById('st-net-dot');
-    netTxt = document.getElementById('st-net-txt');
-    aiDot = document.getElementById('st-ai-dot');
-    aiTxt = document.getElementById('st-ai-txt');
-    offlineBar = document.getElementById('offline-bar');
-  }
-
-  /**
-   * @param {'loading'|'model'|'demo'} mode
-   * @param {number} [percent]
-   */
-  function setAI(mode, percent) {
-    currentAiMode = mode;
-    currentAiPercent = percent || 0;
-
-    if (!aiDot || !aiTxt) return;
-
-    if (mode === 'model') {
-      aiDot.className = 'dot ok';
-      aiTxt.textContent = I18n.t('st.ai.ready');
-    } else if (mode === 'demo') {
-      aiDot.className = 'dot warn';
-      aiTxt.textContent = I18n.t('st.ai.demo');
-    } else {
-      aiDot.className = 'dot load';
-      aiTxt.textContent = I18n.t('st.ai.loading') + (currentAiPercent ? ' ' + Math.round(currentAiPercent) + '%' : '');
-    }
-  }
-
-  /**
-   * @param {string} status
-   */
-  function setNet(status) {
-    currentNetStatus = status;
-
-    if (!netDot || !netTxt) return;
-
-    const map = {
-      connected: ['ok', 'st.net.online'],
-      connecting: ['load', 'st.net.connecting'],
-      reconnecting: ['warn', 'st.net.reconnecting'],
-      failed: ['err', 'st.net.failed'],
-      disconnected: ['', 'st.net'],
-    };
-
-    const [cls, key] = map[status] || ['', 'st.net'];
-    netDot.className = 'dot' + (cls ? ' ' + cls : '');
-    netTxt.textContent = I18n.t(key);
-
-    if (offlineBar) {
-      const offline = status === 'failed' && typeof navigator !== 'undefined' && navigator.onLine === false;
-      offlineBar.classList.toggle('on', offline);
-    }
-  }
-
-  /**
-   * Инициализация.
-   */
-  function init() {
-    bind();
-
-    if (netTxt) {
-      netTxt.style.cursor = 'pointer';
-      netTxt.addEventListener('click', () => {
-        try {
-          const NetService = DI.resolve('NetService');
-          if (NetService) {
-            NetService.stop(false);
-            setTimeout(() => NetService.start(), 500);
-          }
-        } catch (_) {}
-      });
-    }
-
-    window.addEventListener('offline', () => setNet('failed'));
-    window.addEventListener('online', () => {
-      if (offlineBar) offlineBar.classList.remove('on');
-    });
-
-    unsubs.push(bus.on('ai:status', e => setAI(e.mode, e.percent)));
-    unsubs.push(bus.on('net:status', e => setNet(e.status)));
-
-    unsubs.push(bus.on('i18n:change', () => {
-      setAI(currentAiMode, currentAiPercent);
-      setNet(currentNetStatus);
-    }));
-
-    setAI(Embedder.getMode());
-    setNet('disconnected');
-  }
-
-  /**
-   * Отписка.
-   */
-  function destroy() {
-    unsubs.forEach(u => {
-      try { u(); } catch (_) {}
-    });
-    unsubs = [];
-  }
-
-  return { init, destroy };
+  // TODO: реализация
 }, ['EventBus', 'I18n', 'Embedder']);
 // ─── UI/HeaderStatus ─── END ────────────────────────────────────────────────
 
 // ─── UI/Onboarding ─── START ────────────────────────────────────────────────
 /**
- * Онбординг: 8 секций механик, флажок «больше не показывать».
+ * 8 секций + чекбокс «больше не показывать». init(): показ после
+ * Embedder.load(). НОВОЕ v1.0: НЕ ждёт модель бесконечно — если через
+ * 30с модель не готова, онбординг всё равно показывается (progress
+ * уже не блокирует).
  */
 DI.register('Onboarding', function (Config, Modal, I18n, Embedder) {
-  /**
-   * @param {boolean} firstRun
-   * @returns {{el: Element, checkbox: HTMLInputElement|null}}
-   */
-  function buildBody(firstRun) {
-    const el = document.createElement('div');
-    el.style.cssText = 'display:flex;flex-direction:column;gap:14px;';
-
-    const sections = [
-      ['◇ ' + I18n.t('onb.what.t'), I18n.t('onb.what.d')],
-      ['▤ ' + I18n.t('onb.stream.t'), I18n.t('onb.stream.d')],
-      ['◈ ' + I18n.t('onb.pin.t'), I18n.t('onb.pin.d')],
-      ['∿ ' + I18n.t('onb.drift.t'), I18n.t('onb.drift.d')],
-      ['⌘ ' + I18n.t('onb.modes.t'), I18n.t('onb.modes.d')],
-      ['⚿ ' + I18n.t('onb.key.t'), I18n.t('onb.key.d')],
-      ['◆ ' + I18n.t('onb.resonance.t'), I18n.t('onb.resonance.d')],
-      ['⌫ ' + I18n.t('onb.delete.t'), I18n.t('onb.delete.d')],
-    ];
-
-    sections.forEach(([title, desc]) => {
-      const s = document.createElement('div');
-      const t = document.createElement('div');
-      t.style.cssText = 'font-weight:700;font-size:13px;margin-bottom:3px;';
-      t.textContent = title;
-
-      const d = document.createElement('div');
-      d.style.cssText = 'font-size:13px;color:var(--text-2);line-height:1.5;';
-      d.textContent = desc;
-
-      s.appendChild(t);
-      s.appendChild(d);
-      el.appendChild(s);
-    });
-
-    let checkbox = null;
-
-    if (firstRun) {
-      const label = document.createElement('label');
-      label.style.cssText = 'display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text-2);cursor:pointer;margin-top:4px;';
-
-      checkbox = document.createElement('input');
-      checkbox.type = 'checkbox';
-
-      label.appendChild(checkbox);
-
-      const span = document.createElement('span');
-      span.textContent = I18n.t('onb.dontshow');
-      label.appendChild(span);
-
-      el.appendChild(label);
-    }
-
-    return { el, checkbox };
-  }
-
-  /**
-   * @param {boolean} [firstRun]
-   */
-  function showHelp(firstRun) {
-    const { el, checkbox } = buildBody(!!firstRun);
-
-    Modal.open({
-      title: I18n.t('onb.title'),
-      body: el,
-      buttons: [{
-        text: I18n.t('onb.gotit'),
-        primary: true,
-        onClick: () => {
-          if (firstRun && checkbox && checkbox.checked) {
-            Config.set('onboarded', true);
-          }
-          Modal.close();
-        },
-      }],
-    });
-  }
-
-  /**
-   * Инициализация.
-   */
-  function init() {
-    if (Config.get('onboarded', false)) return;
-
-    Embedder.load().then(() => {
-      showHelp(true);
-    });
-  }
-
-  return { init, showHelp };
+  // TODO: реализация
 }, ['Config', 'Modal', 'I18n', 'Embedder']);
 // ─── UI/Onboarding ─── END ──────────────────────────────────────────────────
 
 // ─── UI/Composer ─── START ──────────────────────────────────────────────────
 /**
- * Ввод: лимиты, тумблер видимости, отправка через Notes.create.
- * Родитель = пин {uid, owner} (И1).
+ * Лимиты (soft/hard/max), тумблер видимости, Ctrl+Enter, VisualViewport.
+ *
+ * ИЗМЕНЕНИЯ v1.0:
+ * - Notes.create REJECT → catch: тост 'toast.save.fail', текст ОСТАЁТСЯ
+ *   в textarea, кнопка восстанавливается. (B-02)
+ * - .then(note) — note гарантированно не null (контракт Notes).
+ * - При mode='loading' и непустом тексте: hint 'ai.pending' (warn),
+ *   отправка НЕ блокируется (заметка сохранится, backfill догонит).
  */
-DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils, Config) {
-  let ta, cnt, sendBtn, toggle, footEl;
-  let sending = false;
-  let unsubs = [];
-  let vvCleanup = null;
-  let iconTimer = null;
-
-  const SEND_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></svg>';
-
-  const SEND_SPINNER = '<span class="btn-spinner"></span>';
-
-  /**
-   * Вставить иконку отправки, если кнопка пуста.
-   */
-  function ensureSendIcon() {
-    if (!sendBtn || sending) return;
-    if (!sendBtn.querySelector('svg, .btn-spinner')) {
-      sendBtn.innerHTML = SEND_ICON;
-    }
-  }
-
-  /**
-   * Обновление счётчика и лимитов.
-   */
-  function updateCounter() {
-    if (!cnt || !ta) return;
-
-    const len = ta.value.length;
-    const max = Config.get('maxPostLength', 2500);
-    const soft = Config.get('softLimit', 1200);
-    const hard = Config.get('hardLimit', 2000);
-
-    cnt.textContent = Utils.word('symbols', len, I18n.getLang());
-
-    let color = 'var(--text-3)';
-    let hint = null;
-    let hintLevel = null;
-
-    if (len >= max) {
-      color = 'var(--rose)';
-      hint = I18n.t('ed.limit.max', { max });
-      hintLevel = 'err';
-    } else if (len >= hard) {
-      color = 'var(--rose)';
-      hint = I18n.t('ed.limit.hard');
-      hintLevel = 'err';
-    } else if (len >= soft) {
-      color = 'var(--amber)';
-      hint = I18n.t('ed.limit.soft');
-      hintLevel = 'warn';
-    }
-
-    cnt.style.color = color;
-    updateHint(hint, hintLevel);
-
-    if (sendBtn) {
-      sendBtn.disabled = len >= max || sending;
-    }
-  }
-
-  /**
-   * @param {string|null} text
-   * @param {'warn'|'err'|null} [level]
-   */
-  function updateHint(text, level) {
-    let hintEl = document.getElementById('ed-hint');
-
-    if (!text) {
-      if (hintEl) hintEl.remove();
-      return;
-    }
-
-    if (!hintEl) {
-      hintEl = document.createElement('div');
-      hintEl.id = 'ed-hint';
-      if (footEl && footEl.parentNode) {
-        footEl.parentNode.insertBefore(hintEl, footEl.nextSibling);
-      }
-    }
-
-    hintEl.textContent = text;
-    hintEl.className = level === 'err' ? 'err' : 'warn';
-  }
-
-  /**
-   * @param {string} mode
-   */
-  function reflectMode(mode) {
-    if (!toggle) return;
-    toggle.setAttribute('data-mode', mode);
-    toggle.querySelectorAll('.mt-opt').forEach(o =>
-      o.classList.toggle('on', o.getAttribute('data-v') === mode)
-    );
-  }
-
-  /**
-   * @param {boolean} on
-   */
-  function setSendingUI(on) {
-    if (!sendBtn) return;
-    sendBtn.disabled = on;
-    sendBtn.classList.toggle('sending', on);
-    sendBtn.innerHTML = on ? SEND_SPINNER : SEND_ICON;
-  }
-
-  /**
-   * Отправка: Notes.create(text, visibility, parent).
-   */
-  function send() {
-    if (sending) return;
-
-    const text = ta.value.trim();
-    if (!text) {
-      Toast.show('warn', I18n.t('toast.empty'));
-      return;
-    }
-
-    const max = Config.get('maxPostLength', 2500);
-    if (text.length > max) {
-      Toast.show('err', I18n.t('ed.limit.max', { max }));
-      return;
-    }
-
-    const sendMode = Store.get('sendMode');
-    const visibility = sendMode === 'world' ? 'public' : 'private';
-
-    sending = true;
-    setSendingUI(true);
-
-    const finish = () => {
-      sending = false;
-      setSendingUI(false);
-      ta.value = '';
-      ta.style.height = 'auto';
-      Context.setInput('');
-      updateCounter();
-    };
-
-    const pin = Context.getPin();
-    const parent = pin ? { uid: pin.uid, owner: pin.owner || null } : null;
-
-    Notes.create(text, visibility, parent)
-      .then(note => {
-        Toast.show('ok', I18n.t(visibility === 'public' ? 'toast.saved.public' : 'toast.saved.private')
-          + (note && note.parent ? ' · ' + I18n.t('inf.linked') : ''));
-        try { bus.emit('editor:sent'); } catch (_) {}
-        finish();
-      })
-      .catch(e => {
-        Toast.show('err', String(e && e.message || e));
-        sending = false;
-        setSendingUI(false);
-      });
-  }
-
-  /**
-   * VisualViewport-обработка клавиатуры.
-   */
-  function setupKeyboardHandler() {
-    if (!window.visualViewport) return;
-
-    const vv = window.visualViewport;
-
-    const onResize = () => {
-      const app = document.getElementById('app');
-      if (!app) return;
-
-      const keyboardHeight = window.innerHeight - vv.height;
-
-      if (keyboardHeight > 100) {
-        app.style.height = vv.height + 'px';
-        app.style.maxHeight = vv.height + 'px';
-      } else {
-        app.style.height = '';
-        app.style.maxHeight = '';
-      }
-    };
-
-    vv.addEventListener('resize', onResize);
-    vv.addEventListener('scroll', onResize);
-
-    vvCleanup = () => {
-      vv.removeEventListener('resize', onResize);
-      vv.removeEventListener('scroll', onResize);
-    };
-  }
-
-  /**
-   * Инициализация.
-   */
-  function init() {
-    ta = document.getElementById('ed-ta');
-    cnt = document.getElementById('ed-cnt');
-    sendBtn = document.getElementById('btn-send');
-    toggle = document.getElementById('mode-toggle');
-    footEl = document.getElementById('ed-foot');
-
-    if (!ta) return;
-
-    ensureSendIcon();
-
-    if (iconTimer) clearTimeout(iconTimer);
-    iconTimer = setTimeout(ensureSendIcon, 300);
-
-    ta.setAttribute('maxlength', Config.get('maxPostLength', 2500));
-
-    ta.addEventListener('input', () => {
-      ta.style.height = 'auto';
-      ta.style.height = Math.min(ta.scrollHeight, 120) + 'px';
-
-      updateCounter();
-      Context.setInput(ta.value);
-    });
-
-    setupKeyboardHandler();
-
-    ta.addEventListener('keydown', e => {
-      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
-        e.preventDefault();
-        send();
-      }
-    });
-
-    if (sendBtn) sendBtn.addEventListener('click', send);
-
-    if (toggle) {
-      toggle.addEventListener('click', e => {
-        const opt = e.target.closest('.mt-opt');
-        if (opt && opt.getAttribute('data-v')) {
-          Store.setState({ sendMode: opt.getAttribute('data-v') });
-        }
-      });
-    }
-
-    unsubs.push(Store.subscribe(s => s.sendMode, reflectMode));
-
-    unsubs.push(bus.on('i18n:change', () => {
-      updateCounter();
-      reflectMode(Store.get('sendMode'));
-    }));
-
-    reflectMode(Store.get('sendMode'));
-    updateCounter();
-  }
-
-  /**
-   * Отписка.
-   */
-  function destroy() {
-    unsubs.forEach(u => {
-      try { u(); } catch (_) {}
-    });
-    unsubs = [];
-
-    if (iconTimer) {
-      clearTimeout(iconTimer);
-      iconTimer = null;
-    }
-
-    if (vvCleanup) {
-      try { vvCleanup(); } catch (_) {}
-      vvCleanup = null;
-    }
-  }
-
-  return { init, destroy, send };
-}, ['Context', 'Notes', 'Store', 'I18n', 'EventBus', 'Toast', 'Utils', 'Config']);
+DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils, Config, Embedder) {
+  // TODO: реализация
+}, ['Context', 'Notes', 'Store', 'I18n', 'EventBus', 'Toast', 'Utils', 'Config', 'Embedder']);
 // ─── UI/Composer ─── END ────────────────────────────────────────────────────
 
 // ─── UI/FeedView ─── START ──────────────────────────────────────────────────
 /**
- * Рендер ленты: три режима (хронология / пин-дрейф / ввод),
- * карточки, связи, резонанс, история.
+ * Рендер ленты: хронология / пин-дрейф / ввод; карточки, связи,
+ * резонанс, история (кнопка btn-history).
+ *
+ * ИЗМЕНЕНИЯ v1.0:
+ * - Анимация входа только для НОВЫХ карточек (diff по uid): повторный
+ *   рендер не мигает. (M-02)
+ * - Тикер 30с: обновляет только текст .note-date (dataset.ts), без
+ *   пересборки. (твой баг «время не тикает»)
+ * - isTyping && ctx.vector===null → показываем ПРЕЖНЮЮ ленту (state.feed
+ *   или последние lists), пустое состояние НЕ показываем. (H-05)
+ * - Кнопка ↳: слушатель вешается СРАЗУ с флагом parentOk; резолв
+ *   hasResolvableParent поднимает флаг / вешает orphan. Быстрый клик до
+ *   резолва — ничего (без всплытия в пин). (M-08)
+ * - Клик по карточке без вектора — toast 'toast.pin.novector' (warn).
  */
 DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Influence, Provenance, Modal, NetService) {
-  let feedEl, emptyEl, emptyT, segBar, ctxBanner, ctxSrc, ctxTxt, ctxX;
-  let cLocal, cWorld, cSeren, histBtn;
-  let unsubs = [];
-  let rafPending = false;
-
-  /**
-   * Привязка к DOM.
-   */
-  function bind() {
-    feedEl = document.getElementById('feed');
-    emptyEl = document.getElementById('feed-empty');
-    emptyT = document.getElementById('feed-empty-t');
-    segBar = document.getElementById('seg');
-    ctxBanner = document.getElementById('ctx-banner');
-    ctxSrc = document.getElementById('ctx-src');
-    ctxTxt = document.getElementById('ctx-txt');
-    ctxX = document.getElementById('ctx-x');
-    cLocal = document.getElementById('c-local');
-    cWorld = document.getElementById('c-world');
-    cSeren = document.getElementById('c-seren');
-    histBtn = document.getElementById('btn-history');
-  }
-
-  /**
-   * Коалесценция рендеров.
-   */
-  function scheduleRender() {
-    if (rafPending) return;
-    rafPending = true;
-    requestAnimationFrame(() => {
-      rafPending = false;
-      render();
-    });
-  }
-
-  /**
-   * @param {Object} n
-   * @returns {boolean}
-   */
-  function isPinnedCard(n) {
-    const ctx = Store.get('context');
-    return ctx.source === 'pin' && ctx.uid === n.uid;
-  }
-
-  /**
-   * @param {Object} n
-   */
-  function onNoteClick(n) {
-    const ctx = Store.get('context');
-
-    if ((ctx.source === 'pin' || ctx.source === 'drift') && ctx.uid === n.uid) {
-      Context.clearPin();
-      return;
-    }
-
-    if (n.vector) Context.setPin(n);
-  }
-
-  /**
-   * @param {Array<Object>} childrenList
-   */
-  function renderChildrenModal(childrenList) {
-    const truncate = Config.get('truncateTextLength', 140);
-    const body = document.createElement('div');
-    body.style.cssText = 'display:flex;flex-direction:column;gap:8px;';
-
-    if (!childrenList.length) {
-      const empty = document.createElement('div');
-      empty.style.cssText = 'color:var(--text-3);font-size:13px;text-align:center;padding:12px;';
-      empty.textContent = I18n.t('inf.nochildren');
-      body.appendChild(empty);
-    } else {
-      childrenList.forEach(c => {
-        const item = document.createElement('button');
-        item.className = 'nv-act';
-        item.style.cssText = 'text-align:left;justify-content:flex-start;white-space:normal;height:auto;min-height:40px;width:100%;';
-        item.textContent = (c.text || '').slice(0, truncate);
-
-        item.addEventListener('click', () => {
-          Modal.close();
-          try { bus.emit('note:open', { uid: c.uid }); } catch (_) {}
-        });
-
-        body.appendChild(item);
-      });
-    }
-
-    Modal.open({
-      title: I18n.t('inf.children') + (childrenList.length ? ' · ' + childrenList.length : ''),
-      body: body,
-      buttons: [{ text: I18n.t('btn.close'), onClick: () => Modal.close() }],
-    });
-  }
-
-  /**
-   * @param {Object} note
-   */
-  function showChildren(note) {
-    Provenance.children(note.uid).then(childrenList => {
-      renderChildrenModal(childrenList);
-    }).catch(() => {});
-  }
-
-  /**
-   * @param {Object} note
-   * @param {Array<Object>} chain
-   */
-  function renderAncestorsModal(note, chain) {
-    const truncate = Config.get('truncateTextLength', 140);
-    const body = document.createElement('div');
-    body.style.cssText = 'display:flex;flex-direction:column;gap:8px;';
-
-    if (!chain.length) {
-      const empty = document.createElement('div');
-      empty.style.cssText = 'color:var(--text-3);font-size:13px;text-align:center;padding:12px;';
-      empty.textContent = I18n.t('inf.noancestors');
-      body.appendChild(empty);
-    } else {
-      chain.forEach((c, i) => {
-        const item = document.createElement('button');
-        item.className = 'nv-act';
-        item.style.cssText = 'text-align:left;justify-content:flex-start;white-space:normal;height:auto;min-height:40px;width:100%;';
-        item.style.paddingLeft = (16 + i * 14) + 'px';
-        item.textContent = '↳ ' + (c.text || '').slice(0, truncate);
-
-        item.addEventListener('click', () => {
-          Modal.close();
-          try { bus.emit('note:open', { uid: c.uid }); } catch (_) {}
-        });
-
-        body.appendChild(item);
-      });
-    }
-
-    Modal.open({
-      title: I18n.t('inf.lineage') + (chain.length ? ' · ' + chain.length : ''),
-      body: body,
-      buttons: [{ text: I18n.t('btn.close'), onClick: () => Modal.close() }],
-    });
-  }
-
-  /**
-   * @param {Object} note
-   */
-  function showAncestors(note) {
-    Provenance.ancestors(note.uid).then(chain => {
-      renderAncestorsModal(note, chain);
-    }).catch(() => {});
-  }
-
-  /**
-   * @returns {HTMLSpanElement}
-   */
-  function createSep() {
-    const sep = document.createElement('span');
-    sep.className = 'note-meta-sep';
-    return sep;
-  }
-
-  /**
-   * @param {Object} n
-   * @param {boolean} isRanked
-   * @param {number} i
-   * @returns {HTMLDivElement}
-   */
-  function card(n, isRanked, i) {
-    const el = document.createElement('div');
-    el.className = 'note' + (isPinnedCard(n) ? ' pinned' : '');
-    el.style.animationDelay = Math.min(i * 25, 300) + 'ms';
-    el.dataset.uid = n.uid;
-
-    const txt = document.createElement('div');
-    txt.className = 'note-txt';
-    txt.textContent = n.text || '';
-    el.appendChild(txt);
-
-    const meta = document.createElement('div');
-    meta.className = 'note-meta';
-
-    const tag = document.createElement('span');
-    if (n.own) {
-      tag.className = 'note-tag ' + (n.visibility === 'public' ? 'world' : 'priv');
-      tag.textContent = n.visibility === 'public' ? I18n.t('base.tag.shared') : I18n.t('base.tag.private');
-    } else {
-      tag.className = 'note-tag world';
-      tag.textContent = '· ' + Utils.shortPk(n.owner || '');
-    }
-    meta.appendChild(tag);
-
-    const hasNav = !!(n.parent && n.parent.uid);
-    const res = Influence.resonance(n.uid);
-    const hasResonance = res > 0;
-
-    if (hasNav || hasResonance) {
-      meta.appendChild(createSep());
-
-      if (hasNav) {
-        const link = document.createElement('button');
-        link.className = 'note-parent';
-        link.textContent = '↳';
-        link.title = I18n.t('inf.lineage');
-        link.setAttribute('aria-label', I18n.t('inf.openparent'));
-
-        Provenance.hasResolvableParent(n).then(ok => {
-          if (ok) {
-            link.addEventListener('click', e => {
-              e.stopPropagation();
-              showAncestors(n);
-            });
-          } else {
-            link.classList.add('orphan');
-            link.title = I18n.t('inf.orphan.hint');
-          }
-        }).catch(() => {
-          link.classList.add('orphan');
-          link.title = I18n.t('inf.orphan.hint');
-        });
-
-        meta.appendChild(link);
-      }
-
-      if (hasResonance) {
-        const r = document.createElement('button');
-        r.className = 'note-sim';
-        r.textContent = '◆' + res;
-        r.title = I18n.t('inf.resonance');
-        r.setAttribute('aria-label', I18n.t('inf.resonance'));
-
-        r.addEventListener('click', e => {
-          e.stopPropagation();
-          showChildren(n);
-        });
-
-        meta.appendChild(r);
-      }
-    }
-
-    meta.appendChild(createSep());
-
-    if (isRanked && typeof n.score === 'number') {
-      const threshold = Config.get('threshold', 0.81);
-      const serendipity = Config.get('serendipity', 0.07);
-      const serenMid = threshold - serendipity / 2;
-      const displayMode = Config.get('similarityDisplay', 'signal');
-      const pct = Math.round(n.score * 100);
-
-      const sim = document.createElement('span');
-      sim.className = 'note-sim-info';
-
-      if (displayMode === 'percent') {
-        sim.textContent = pct + '%';
-        sim.title = I18n.t('sim.score');
-      } else {
-        if (n.score >= threshold) {
-          sim.innerHTML = '<span class="sig-bar sig-full"></span><span class="sig-bar sig-full"></span><span class="sig-bar sig-full"></span>';
-          sim.title = I18n.t('sim.level.high') + ' (' + pct + '%)';
-        } else if (n.score >= serenMid) {
-          sim.innerHTML = '<span class="sig-bar sig-full"></span><span class="sig-bar sig-full"></span><span class="sig-bar sig-empty"></span>';
-          sim.title = I18n.t('sim.level.mid') + ' (' + pct + '%)';
-        } else {
-          sim.innerHTML = '<span class="sig-bar sig-full"></span><span class="sig-bar sig-empty"></span><span class="sig-bar sig-empty"></span>';
-          sim.title = I18n.t('sim.level.low') + ' (' + pct + '%)';
-        }
-        const label = document.createElement('span');
-        label.className = 'sig-label';
-        label.textContent = n.score >= threshold
-          ? I18n.t('sim.level.high')
-          : (n.score >= serenMid ? I18n.t('sim.level.mid') : I18n.t('sim.level.low'));
-        sim.appendChild(label);
-      }
-
-      meta.appendChild(sim);
-    }
-
-    const date = document.createElement('span');
-    date.className = 'note-date';
-    date.textContent = Utils.fmtRelativeTime(n.updatedAt || n.createdAt, I18n.getLang(), I18n.t);
-    meta.appendChild(date);
-
-    if (n.own) {
-      const openBtn = document.createElement('button');
-      openBtn.className = 'na';
-      openBtn.textContent = '✎';
-      openBtn.title = I18n.t('btn.open');
-      openBtn.setAttribute('aria-label', I18n.t('btn.open'));
-
-      openBtn.addEventListener('click', e => {
-        e.stopPropagation();
-        try { bus.emit('note:open', { uid: n.uid }); } catch (_) {}
-      });
-
-      meta.appendChild(openBtn);
-    }
-
-    el.appendChild(meta);
-    el.addEventListener('click', () => onNoteClick(n));
-    return el;
-  }
-
-  /**
-   * Полный рендер.
-   */
-  function render() {
-    if (!feedEl) return;
-
-    const state = Store.getState();
-    const ctx = state.context;
-    const isPinnedMode = ctx.source === 'pin';
-    const isTyping = ctx.source === 'input';
-    const isDrift = ctx.source === 'drift';
-    const isRanked = isPinnedMode || isTyping || isDrift;
-
-    segBar.classList.toggle('on', isTyping);
-    ctxBanner.classList.toggle('on', isPinnedMode || isDrift);
-
-    if (isPinnedMode || isDrift) {
-      ctxSrc.textContent = isDrift ? I18n.t('ctx.drift') : I18n.t('ctx.pinned');
-      ctxTxt.textContent = isDrift ? (ctx.pinText || ctx.text) : ctx.text;
-    }
-
-    document.querySelectorAll('.seg-b').forEach(b => {
-      b.classList.toggle('on', b.getAttribute('data-k') === state.seg);
-    });
-
-    cLocal.textContent = state.lists.local.length;
-    cWorld.textContent = state.lists.world.length;
-    cSeren.textContent = state.lists.seren.length;
-
-    let notes;
-
-    if (isPinnedMode || isDrift) {
-      notes = [...state.lists.local, ...state.lists.world, ...state.lists.seren]
-        .sort((a, b) => (b.score || 0) - (a.score || 0));
-    } else if (isTyping) {
-      notes = state.lists[state.seg] || [];
-    } else {
-      notes = state.feed;
-    }
-
-    feedEl.innerHTML = '';
-
-    if (!notes.length) {
-      emptyEl.classList.add('on');
-
-      emptyT.textContent = (isPinnedMode || isDrift)
-        ? I18n.t('empty.world.t')
-        : (isTyping ? I18n.t('empty.' + state.seg + '.t') : I18n.t('empty.local.t'));
-    } else {
-      emptyEl.classList.remove('on');
-
-      const frag = document.createDocumentFragment();
-      notes.forEach((n, i) => {
-        frag.appendChild(card(n, isRanked, i));
-      });
-      feedEl.appendChild(frag);
-    }
-  }
-
-  /**
-   * Инициализация.
-   */
-  function init() {
-    bind();
-    if (!feedEl) return;
-
-    unsubs.push(Store.subscribe(s => s.context, scheduleRender, Store.shallowEqual));
-    unsubs.push(Store.subscribe(s => s.lists, scheduleRender));
-    unsubs.push(Store.subscribe(s => s.feed, scheduleRender));
-    unsubs.push(Store.subscribe(s => s.seg, scheduleRender));
-    unsubs.push(bus.on('i18n:change', scheduleRender));
-    unsubs.push(bus.on('db:change', scheduleRender));
-    unsubs.push(bus.on('db:mirror', scheduleRender));
-    unsubs.push(bus.on('influence:updated', scheduleRender));
-
-    if (histBtn) {
-      histBtn.addEventListener('click', () => NetService.loadHistory());
-
-      unsubs.push(bus.on('net:history', e => {
-        if (!histBtn) return;
-
-        if (e && e.loading) {
-          histBtn.disabled = true;
-          histBtn.textContent = I18n.t('net.loading');
-        } else {
-          histBtn.disabled = false;
-          histBtn.textContent = I18n.t('net.loadmore');
-        }
-      }));
-    }
-
-    document.querySelectorAll('.seg-b').forEach(b => {
-      b.addEventListener('click', () => {
-        Store.setState({ seg: b.getAttribute('data-k') });
-      });
-    });
-
-    if (ctxX) {
-      ctxX.addEventListener('click', () => Context.clearPin());
-    }
-
-    render();
-  }
-
-  /**
-   * Отписка.
-   */
-  function destroy() {
-    unsubs.forEach(u => {
-      try { u(); } catch (_) {}
-    });
-    unsubs = [];
-  }
-
-  return { init, destroy, render };
+  // TODO: реализация
 }, ['Store', 'Context', 'I18n', 'Utils', 'Config', 'EventBus', 'Influence', 'Provenance', 'Modal', 'NetService']);
 // ─── UI/FeedView ─── END ────────────────────────────────────────────────────
-
-// ─── UI/BaseView ─── START ──────────────────────────────────────────────────
-/**
- * База: статистика по visibility, поиск, сортировка по notes.
- */
-DI.register('BaseView', function (Store, DB, I18n, Utils, Config, bus) {
-  let listEl, statsTotal, statsOpen, statsPriv, qEl, sortEl;
-  let unsubs = [];
-  let rafPending = false;
-
-  /**
-   * Привязка к DOM.
-   */
-  function bind() {
-    listEl = document.getElementById('base-list');
-    statsTotal = document.getElementById('bs-total');
-    statsOpen = document.getElementById('bs-open');
-    statsPriv = document.getElementById('bs-priv');
-    qEl = document.getElementById('base-q');
-    sortEl = document.getElementById('base-sort');
-  }
-
-  /**
-   * Коалесценция рендеров.
-   */
-  function scheduleRender() {
-    if (rafPending) return;
-    rafPending = true;
-    requestAnimationFrame(() => {
-      rafPending = false;
-      render();
-    });
-  }
-
-  /**
-   * Рендер (только при view === 'base').
-   */
-  function render() {
-    if (!listEl) return;
-
-    const view = Store.get('view');
-    if (view !== 'base') return;
-
-    const q = (qEl && qEl.value || '').trim().toLowerCase();
-    const sort = (sortEl && sortEl.value) || 'new';
-
-    DB.allNotes().then(notes => {
-      let arr = notes.slice();
-
-      if (q) arr = arr.filter(n => (n.text || '').toLowerCase().includes(q));
-
-      if (sort === 'old') {
-        arr.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
-      } else if (sort === 'az') {
-        arr.sort((a, b) => (a.text || '').localeCompare(b.text || '', I18n.getLang() === 'en' ? 'en' : 'ru'));
-      } else {
-        arr.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-      }
-
-      const publicCount = notes.filter(n => n.visibility === 'public').length;
-
-      if (statsTotal) statsTotal.textContent = notes.length;
-      if (statsOpen) statsOpen.textContent = publicCount;
-      if (statsPriv) statsPriv.textContent = notes.length - publicCount;
-
-      listEl.innerHTML = '';
-
-      if (!arr.length) {
-        const empty = document.createElement('div');
-        empty.className = 'note';
-        empty.style.cursor = 'default';
-        empty.textContent = q ? I18n.t('empty.base.empty') : I18n.t('empty.base.t');
-        listEl.appendChild(empty);
-        return;
-      }
-
-      const frag = document.createDocumentFragment();
-      arr.forEach(n => frag.appendChild(row(n)));
-      listEl.appendChild(frag);
-    }).catch(() => {});
-  }
-
-  /**
-   * @param {Object} n - Своя заметка.
-   * @returns {HTMLDivElement}
-   */
-  function row(n) {
-    const el = document.createElement('div');
-    el.className = 'bi';
-    el.dataset.uid = n.uid;
-
-    const t = document.createElement('div');
-    t.className = 'bi-t';
-    t.textContent = n.text || '';
-    el.appendChild(t);
-
-    const f = document.createElement('div');
-    f.className = 'bi-f';
-
-    const tag = document.createElement('span');
-    tag.className = 'note-tag ' + (n.visibility === 'public' ? 'world' : 'priv');
-    tag.textContent = n.visibility === 'public' ? I18n.t('base.tag.shared') : I18n.t('base.tag.private');
-    f.appendChild(tag);
-
-    const date = document.createElement('span');
-    date.textContent = Utils.fmtDate(n.updatedAt || n.createdAt, I18n.getLang());
-    f.appendChild(date);
-
-    el.appendChild(f);
-    el.addEventListener('click', () => {
-      try { bus.emit('note:open', { uid: n.uid }); } catch (_) {}
-    });
-
-    return el;
-  }
-
-  /**
-   * Инициализация.
-   */
-  function init() {
-    bind();
-    if (!listEl) return;
-
-    const debouncedRender = Utils.debounce(scheduleRender, Config.get('baseSearchDebounce', 200));
-
-    if (qEl) qEl.addEventListener('input', debouncedRender);
-    if (sortEl) sortEl.addEventListener('change', scheduleRender);
-
-    unsubs.push(bus.on('db:change', scheduleRender));
-    unsubs.push(bus.on('view:changed', scheduleRender));
-    unsubs.push(bus.on('i18n:change', scheduleRender));
-
-    render();
-  }
-
-  /**
-   * Отписка.
-   */
-  function destroy() {
-    unsubs.forEach(u => {
-      try { u(); } catch (_) {}
-    });
-    unsubs = [];
-  }
-
-  return { init, destroy, render };
-}, ['Store', 'DB', 'I18n', 'Utils', 'Config', 'EventBus']);
-// ─── UI/BaseView ─── END ────────────────────────────────────────────────────
 
 // ─── UI/NoteView ─── START ──────────────────────────────────────────────────
 /**
  * Полноэкранный просмотр: свои (удалить/видимость/пин/правка),
- * чужие (просмотр/пин). Lookup: notes → mirror.
+ * чужие (просмотр/пин). open(uid): notes → mirror.
+ *
+ * ИЗМЕНЕНИЯ v1.0:
+ * - render принимает ts (updatedAt||createdAt|mirror.ts) — дата заметки,
+ *   не Date.now(). (H-02)
+ * - pinAndClose: guard !vector → тост 'toast.pin.novector', не пинует. (H-03)
+ * - saveEdit: Notes.edit reject → тост + кнопка восстанавливается
+ *   (спиннер не застревает). (B-02)
+ * - Редактирование публичных — как в v0.9.9 (разрешено; ключ
+ *   note.public.noedit из словарей удаляем как рудимент).
  */
 DI.register('NoteView', function (DB, Notes, NoteActions, I18n, Utils, Toast, bus) {
-  let root = null;
-  let currentUid = null;
-  let currentNote = null;
-  let escHandler = null;
-  let editMode = false;
-  let editTextarea = null;
-  let i18nUnsub = null;
-
-  /**
-   * Ленивая привязка к DOM.
-   */
-  function ensureRoot() {
-    if (!root) root = document.getElementById('noteview');
-    return root;
-  }
-
-  /**
-   * Закрыть.
-   */
-  function close() {
-    const r = ensureRoot();
-    if (r) {
-      r.classList.remove('on');
-      r.innerHTML = '';
-    }
-
-    if (escHandler) {
-      document.removeEventListener('keydown', escHandler);
-      escHandler = null;
-    }
-
-    currentUid = null;
-    currentNote = null;
-    editMode = false;
-    editTextarea = null;
-  }
-
-  /**
-   * Открыть по uid: notes → mirror.
-   * @param {string} uid
-   */
-  function open(uid) {
-    if (!uid) return;
-
-    DB.getNote(uid).then(note => {
-      if (note) {
-        render({
-          uid: note.uid,
-          owner: null,
-          text: note.text,
-          vector: note.vector,
-          visibility: note.visibility,
-          isOwn: true,
-        });
-        return;
-      }
-
-      DB.getMirror(uid).then(m => {
-        if (m) {
-          render({
-            uid: m.uid,
-            owner: m.owner,
-            text: m.text,
-            vector: m.vec,
-            visibility: m.visibility,
-            isOwn: false,
-          });
-        }
-      });
-    }).catch(() => {});
-  }
-
-  /**
-   * @param {Object} note - {uid, owner, text, vector, visibility, isOwn}
-   * @param {HTMLButtonElement} editBtn
-   */
-  function enterEditMode(note, editBtn) {
-    if (editMode) return;
-
-    editMode = true;
-    const r = ensureRoot();
-    if (!r) return;
-
-    const txt = r.querySelector('.nv-text');
-
-    if (txt) {
-      const ta = document.createElement('textarea');
-      ta.className = 'nv-text-edit';
-      ta.value = note.text || '';
-      ta.placeholder = I18n.t('note.edit.placeholder');
-      txt.replaceWith(ta);
-      editTextarea = ta;
-      ta.focus();
-    }
-
-    if (editBtn) {
-      editBtn.textContent = I18n.t('btn.save');
-    }
-  }
-
-  /**
-   * @param {Object} note
-   */
-  function saveEdit(note) {
-    if (!editMode || !editTextarea) return;
-
-    const newText = editTextarea.value.trim();
-
-    if (!newText) {
-      Toast.show('warn', I18n.t('toast.empty'));
-      return;
-    }
-
-    const editBtn = document.querySelector('[data-role="edit"]');
-
-    if (editBtn) {
-      editBtn.disabled = true;
-      editBtn.innerHTML = '<span class="btn-spinner"></span>';
-    }
-
-    Notes.edit(note.uid, newText).then(updated => {
-      if (!updated) {
-        Toast.show('err', I18n.t('toast.copy.fail'));
-        return;
-      }
-
-      Toast.show('ok', I18n.t('toast.edit.saved'));
-      currentNote.text = updated.text;
-      currentNote.vector = updated.vector;
-      currentNote.visibility = updated.visibility;
-      render(currentNote);
-    }).catch(() => {
-      Toast.show('err', I18n.t('toast.copy.fail'));
-
-      if (editBtn) {
-        editBtn.disabled = false;
-        editBtn.textContent = I18n.t('btn.save');
-      }
-    });
-  }
-
-  /**
-   * Пин текущей + закрытие.
-   */
-  function pinAndClose() {
-    if (!currentNote) {
-      close();
-      return;
-    }
-
-    try {
-      bus.emit('note:pin', {
-        uid: currentNote.uid,
-        owner: currentNote.owner,
-        text: currentNote.text,
-        vector: currentNote.vector,
-      });
-      Toast.show('ok', I18n.t('toast.pinned'));
-    } catch (_) {}
-
-    close();
-  }
-
-  /**
-   * @param {Object} note - {uid, owner, text, vector, visibility, isOwn}
-   */
-  function render(note) {
-    const r = ensureRoot();
-    if (!r) return;
-
-    currentUid = note.uid;
-    currentNote = note;
-    r.innerHTML = '';
-    r.classList.add('on');
-    editMode = false;
-    editTextarea = null;
-
-    const top = document.createElement('div');
-    top.className = 'nv-f';
-
-    if (note.isOwn) {
-      const del = document.createElement('button');
-      del.className = 'nv-act danger';
-      del.textContent = I18n.t('btn.del');
-      del.addEventListener('click', () => {
-        NoteActions.remove(note.uid);
-        close();
-      });
-      top.appendChild(del);
-
-      const tog = document.createElement('button');
-      tog.className = 'nv-act';
-      tog.textContent = note.visibility === 'public'
-        ? I18n.t('btn.toggle.priv')
-        : I18n.t('btn.toggle.pub');
-      tog.addEventListener('click', () => {
-        NoteActions.toggle(note.uid);
-        close();
-      });
-      top.appendChild(tog);
-    }
-
-    const pinBtn = document.createElement('button');
-    pinBtn.className = 'nv-act';
-    pinBtn.textContent = '◈ ' + I18n.t('btn.pin');
-    pinBtn.title = I18n.t('btn.pin.aria');
-    pinBtn.setAttribute('aria-label', I18n.t('btn.pin.aria'));
-    pinBtn.addEventListener('click', pinAndClose);
-    top.appendChild(pinBtn);
-
-    if (note.isOwn) {
-      const edit = document.createElement('button');
-      edit.className = 'nv-act';
-      edit.setAttribute('data-role', 'edit');
-      edit.textContent = I18n.t('btn.edit');
-
-      edit.addEventListener('click', () => {
-        if (editMode) {
-          saveEdit(note);
-        } else {
-          enterEditMode(note, edit);
-        }
-      });
-
-      top.appendChild(edit);
-    }
-
-    r.appendChild(top);
-
-    const body = document.createElement('div');
-    body.className = 'nv-b';
-
-    const info = document.createElement('div');
-    info.className = 'note-meta';
-    info.style.marginBottom = '12px';
-
-    const tag = document.createElement('span');
-
-    if (note.isOwn) {
-      tag.className = 'note-tag ' + (note.visibility === 'public' ? 'world' : 'priv');
-      tag.textContent = note.visibility === 'public' ? I18n.t('base.tag.shared') : I18n.t('base.tag.private');
-    } else {
-      tag.className = 'note-tag world';
-      tag.textContent = '· ' + Utils.shortPk(note.owner || '');
-    }
-
-    info.appendChild(tag);
-
-    const now = Date.now();
-    const date = document.createElement('span');
-    date.textContent = Utils.fmtDate(now, I18n.getLang()) + ' ' + Utils.fmtTime(now, I18n.getLang());
-    info.appendChild(date);
-    body.appendChild(info);
-
-    const txt = document.createElement('div');
-    txt.className = 'nv-text';
-    txt.textContent = note.text || '';
-    body.appendChild(txt);
-
-    r.appendChild(body);
-
-    const bottom = document.createElement('div');
-    bottom.className = 'nv-f-bottom';
-
-    const closeBtn = document.createElement('button');
-    closeBtn.className = 'nv-act';
-    closeBtn.textContent = I18n.t('btn.close');
-    closeBtn.addEventListener('click', close);
-    bottom.appendChild(closeBtn);
-
-    r.appendChild(bottom);
-
-    if (escHandler) document.removeEventListener('keydown', escHandler);
-    escHandler = e => {
-      if (e.key === 'Escape') close();
-    };
-    document.addEventListener('keydown', escHandler);
-  }
-
-  /**
-   * Инициализация.
-   */
-  function init() {
-    const r = ensureRoot();
-    if (!r) return;
-
-    r.addEventListener('click', e => {
-      if (e.target === r) close();
-    });
-
-    bus.on('note:open', p => {
-      if (p && p.uid) open(p.uid);
-    });
-
-    i18nUnsub = bus.on('i18n:change', () => {
-      if (currentNote && !editMode && root && root.classList.contains('on')) {
-        render(currentNote);
-      }
-    });
-  }
-
-  /**
-   * Закрытие + отписка.
-   */
-  function destroy() {
-    if (i18nUnsub) {
-      try { i18nUnsub(); } catch (_) {}
-      i18nUnsub = null;
-    }
-    close();
-  }
-
-  return { init, destroy, open, close };
+  // TODO: реализация
 }, ['DB', 'Notes', 'NoteActions', 'I18n', 'Utils', 'Toast', 'EventBus']);
 // ─── UI/NoteView ─── END ────────────────────────────────────────────────────
 
+// ─── UI/NoteActions ─── START ───────────────────────────────────────────────
+/**
+ * ПЕРЕЕХАЛ в UI-слой (был DOMAIN — инверсия). remove (confirm) /
+ * toggle / copy (clipboard + execCommand-fallback). Тексты ошибок
+ * раздельные: 'toast.save.fail' для сохранения, 'toast.copy.fail'
+ * только для копирования. (старый копипаст-баг текстов)
+ */
+DI.register('NoteActions', function (Notes, Modal, Toast, I18n) {
+  // TODO: реализация
+}, ['Notes', 'Modal', 'Toast', 'I18n']);
+// ─── UI/NoteActions ─── END ─────────────────────────────────────────────────
+
+// ─── UI/BaseView ─── START ──────────────────────────────────────────────────
+/**
+ * База: статистика, поиск (substring), сортировка. Рендер только при
+ * view==='base'. ИЗМЕНЕНИЕ v1.0: подписка Store.subscribe(s=>s.view)
+ * вместо bus 'view:changed' (событие-призрак удалён).
+ */
+DI.register('BaseView', function (Store, DB, I18n, Utils, Config, bus) {
+  // TODO: реализация
+}, ['Store', 'DB', 'I18n', 'Utils', 'Config', 'EventBus']);
+// ─── UI/BaseView ─── END ────────────────────────────────────────────────────
+
 // ─── UI/AccountView ─── START ───────────────────────────────────────────────
 /**
- * Экран аккаунта: ключ, вход, данные (экспорт/импорт), синк.
+ * Экран аккаунта: ключ (показ с автокопией — кнопка блокируется на
+ * время async), вход, экспорт/импорт (downloadText + clipboard),
+ * sync-строка (paint по sync:status полного цикла: active/idle/off).
  */
 DI.register('AccountView', function (Account, Modal, Toast, I18n, Config, bus) {
-  let unsubs = [];
-
-  /**
-   * @param {string} text
-   * @param {Function} onClick
-   * @returns {HTMLButtonElement}
-   */
-  function actionBtn(text, onClick) {
-    const b = document.createElement('button');
-    b.className = 'nv-act';
-    b.style.cssText = 'flex:1;min-width:100px;font-size:12px;';
-    b.textContent = text;
-    b.addEventListener('click', onClick);
-    return b;
-  }
-
-  /**
-   * @param {string} text
-   * @returns {Promise<boolean>}
-   */
-  async function copyText(text) {
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      try {
-        await navigator.clipboard.writeText(text || '');
-        return true;
-      } catch (_) {
-        return false;
-      }
-    }
-    return false;
-  }
-
-  /**
-   * @returns {Promise<string|null>}
-   */
-  async function readClipboard() {
-    if (navigator.clipboard && navigator.clipboard.readText) {
-      try {
-        return await navigator.clipboard.readText();
-      } catch (_) {
-        return null;
-      }
-    }
-    return null;
-  }
-
-  /**
-   * Модалка показа ключа.
-   */
-  async function openShowKey() {
-    const wrapAvailable = await Account.canWrapKey().catch(() => false);
-
-    const body = document.createElement('div');
-    body.className = 'acc-body';
-
-    let pwInput = null;
-
-    if (wrapAvailable) {
-      const pwField = document.createElement('div');
-      pwField.className = 'field';
-
-      const pwLabel = document.createElement('span');
-      pwLabel.className = 'field-label';
-      pwLabel.textContent = I18n.t('account.password.set');
-      pwField.appendChild(pwLabel);
-
-      pwInput = document.createElement('input');
-      pwInput.type = 'password';
-      pwInput.className = 'field-input';
-      pwInput.placeholder = I18n.t('account.password.hint');
-      pwField.appendChild(pwInput);
-
-      body.appendChild(pwField);
-    }
-
-    const hint = document.createElement('div');
-    hint.className = 'field-hint';
-    hint.textContent = I18n.t('account.nsec.hint');
-    body.appendChild(hint);
-
-    const keyBox = document.createElement('div');
-    keyBox.className = 'key-box masked';
-    keyBox.textContent = I18n.t('account.nsec.masked');
-    body.appendChild(keyBox);
-
-    const reveal = () => {
-      keyBox.textContent = '…';
-      Account.getWrappedKey(wrapAvailable && pwInput ? pwInput.value : '').then(wrapped => {
-        if (!wrapped) {
-          keyBox.textContent = I18n.t('account.nsec.masked');
-          Toast.show('err', I18n.t('toast.copy.fail'));
-          return;
-        }
-        keyBox.textContent = wrapped;
-        keyBox.classList.remove('masked');
-        keyBox.classList.add('focused');
-        copyText(wrapped);
-        Toast.show('ok', I18n.t('toast.key.copied'));
-      });
-    };
-
-    Modal.open({
-      title: I18n.t('account.identity'),
-      body,
-      buttons: [
-        { text: I18n.t('btn.show'), primary: true, onClick: reveal },
-        { text: I18n.t('btn.close'), onClick: () => Modal.close() },
-      ],
-    });
-  }
-
-  /**
-   * Модалка входа по ключу.
-   */
-  function openEnterKey() {
-    const body = document.createElement('div');
-    body.className = 'acc-body';
-
-    const desc = document.createElement('div');
-    desc.className = 'acc-desc';
-    desc.textContent = I18n.t('account.enter.desc');
-    body.appendChild(desc);
-
-    const keyField = document.createElement('div');
-    keyField.className = 'field';
-
-    const keyLabel = document.createElement('span');
-    keyLabel.className = 'field-label';
-    keyLabel.textContent = I18n.t('account.enter.title');
-    keyField.appendChild(keyLabel);
-
-    const keyInput = document.createElement('input');
-    keyInput.type = 'text';
-    keyInput.className = 'field-input mono';
-    keyInput.placeholder = I18n.t('account.enter.placeholder');
-    keyInput.autocomplete = 'off';
-    keyInput.spellcheck = false;
-    keyField.appendChild(keyInput);
-    body.appendChild(keyField);
-
-    const pwField = document.createElement('div');
-    pwField.className = 'field';
-    pwField.style.display = 'none';
-
-    const pwLabel = document.createElement('span');
-    pwLabel.className = 'field-label';
-    pwLabel.textContent = I18n.t('account.password.set');
-    pwField.appendChild(pwLabel);
-
-    const pwInput = document.createElement('input');
-    pwInput.type = 'password';
-    pwInput.className = 'field-input';
-    pwField.appendChild(pwInput);
-    body.appendChild(pwField);
-
-    keyInput.addEventListener('input', () => {
-      const v = keyInput.value.trim();
-      pwField.style.display = v.startsWith('ncryptsec1') ? '' : 'none';
-    });
-
-    const hint = document.createElement('div');
-    hint.className = 'field-hint';
-    hint.textContent = I18n.t('account.nsec.hint');
-    body.appendChild(hint);
-
-    const submit = () => {
-      const raw = keyInput.value.trim();
-      if (!raw) return;
-
-      Modal.confirm(
-        I18n.t('account.enter.confirm'),
-        I18n.t('account.enter.confirm.d'),
-        async () => {
-          const res = await Account.enterKey(raw, pwInput.value);
-          if (res.ok) {
-            Toast.show('ok', I18n.t('account.enter.done'));
-          } else {
-            Toast.show('err', I18n.t(res.error === 'bad'
-              ? 'account.enter.bad'
-              : 'toast.copy.fail'));
-          }
-        },
-        I18n.t('btn.confirm')
-      );
-    };
-
-    Modal.open({
-      title: I18n.t('account.enter.title'),
-      body,
-      buttons: [
-        { text: I18n.t('btn.cancel'), onClick: () => Modal.close() },
-        { text: I18n.t('btn.confirm'), primary: true, onClick: submit },
-      ],
-    });
-  }
-
-  /**
-   * Модалка экспорта.
-   */
-  async function openExport() {
-    const wrapAvailable = await Account.canWrapKey().catch(() => false);
-
-    const body = document.createElement('div');
-    body.className = 'acc-body';
-
-    const desc = document.createElement('div');
-    desc.className = 'acc-desc';
-    desc.textContent = I18n.t('account.export.desc');
-    body.appendChild(desc);
-
-    let withKey = false;
-
-    const displayGroup = document.createElement('div');
-    displayGroup.className = 'range-display';
-
-    const lbl = document.createElement('span');
-    lbl.className = 'range-display-lbl';
-    lbl.textContent = I18n.t('account.export.withkey');
-    displayGroup.appendChild(lbl);
-
-    const btnsWrap = document.createElement('div');
-    btnsWrap.className = 'range-display-btns';
-
-    /** @type {Array<HTMLButtonElement>} */
-    const btns = [];
-
-    function paint() {
-      btns.forEach(b => {
-        const mode = b.getAttribute('data-key-mode') === 'on';
-        b.classList.toggle('selected', mode === withKey);
-      });
-    }
-
-    [['off', false], ['on', true]].forEach(([mode, val]) => {
-      const btn = document.createElement('button');
-      btn.className = 'nv-act';
-      btn.setAttribute('data-key-mode', mode);
-      btn.style.cssText = 'flex:1;font-size:12px;';
-      btn.textContent = I18n.t(mode === 'on' ? 'btn.on' : 'btn.off');
-
-      btn.addEventListener('click', () => {
-        withKey = val;
-        paint();
-        if (pwField) pwField.style.display = (withKey && wrapAvailable) ? '' : 'none';
-      });
-
-      btns.push(btn);
-      btnsWrap.appendChild(btn);
-    });
-
-    paint();
-    displayGroup.appendChild(btnsWrap);
-    body.appendChild(displayGroup);
-
-    const withKeyHint = document.createElement('div');
-    withKeyHint.className = 'field-hint';
-    withKeyHint.textContent = I18n.t('account.export.withkey.hint');
-    body.appendChild(withKeyHint);
-
-    let pwInput = null;
-    let pwField = null;
-
-    if (wrapAvailable) {
-      pwField = document.createElement('div');
-      pwField.className = 'field';
-      pwField.style.display = 'none';
-
-      const pwLabel = document.createElement('span');
-      pwLabel.className = 'field-label';
-      pwLabel.textContent = I18n.t('account.password.set');
-      pwField.appendChild(pwLabel);
-
-      pwInput = document.createElement('input');
-      pwInput.type = 'password';
-      pwInput.className = 'field-input';
-      pwField.appendChild(pwInput);
-      body.appendChild(pwField);
-    }
-
-    const run = async () => {
-      const res = await Account.exportArchive(withKey, withKey && wrapAvailable && pwInput ? pwInput.value : '');
-      if (!res) {
-        Toast.show('err', I18n.t('toast.copy.fail'));
-        return;
-      }
-      Modal.close();
-      downloadText(res.json, res.filename);
-      Toast.show('ok', I18n.t('account.export.title'));
-    };
-
-    const runCopy = async () => {
-      const res = await Account.exportArchive(withKey, withKey && wrapAvailable && pwInput ? pwInput.value : '');
-      if (!res) {
-        Toast.show('err', I18n.t('toast.copy.fail'));
-        return;
-      }
-      const ok = await copyText(res.json);
-      Toast.show(ok ? 'ok' : 'err', I18n.t(ok ? 'toast.json.copied' : 'toast.clip.bad'));
-    };
-
-    Modal.open({
-      title: I18n.t('account.export.title'),
-      body,
-      buttons: [
-        { text: I18n.t('btn.cancel'), onClick: () => Modal.close() },
-        { text: I18n.t('btn.copy'), onClick: runCopy },
-        { text: I18n.t('btn.download'), primary: true, onClick: run },
-      ],
-    });
-  }
-
-  /**
-   * @param {string} text
-   * @param {string} filename
-   */
-  function downloadText(text, filename) {
-    try {
-      const blob = new Blob([text], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = filename;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      setTimeout(() => { try { URL.revokeObjectURL(url); } catch (_) {} }, 1000);
-    } catch (e) {
-      Toast.show('err', I18n.t('toast.copy.fail'));
-    }
-  }
-
-  /**
-   * Модалка импорта.
-   */
-  function openImport() {
-    const body = document.createElement('div');
-    body.className = 'acc-body';
-
-    const desc = document.createElement('div');
-    desc.className = 'acc-desc';
-    desc.textContent = I18n.t('account.import.desc');
-    body.appendChild(desc);
-
-    const actions = document.createElement('div');
-    actions.className = 'acc-actions';
-    actions.appendChild(actionBtn(I18n.t('account.import.file'), importFromFile));
-    actions.appendChild(actionBtn(I18n.t('account.import.clip'), importFromClipboard));
-    body.appendChild(actions);
-
-    Modal.open({
-      title: I18n.t('account.import.title'),
-      body,
-      buttons: [{ text: I18n.t('btn.close'), onClick: () => Modal.close() }],
-    });
-  }
-
-  /**
-   * Импорт из файла.
-   */
-  function importFromFile() {
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.accept = 'application/json,.json';
-    input.style.display = 'none';
-    document.body.appendChild(input);
-
-    input.addEventListener('change', () => {
-      const file = input.files && input.files[0];
-      input.remove();
-
-      if (!file) return;
-
-      const reader = new FileReader();
-      reader.onload = () => {
-        const parsed = Account.parseArchive(String(reader.result || ''));
-        if (!parsed.ok) {
-          Toast.show('err', I18n.t('account.import.bad'));
-          return;
-        }
-        Modal.close();
-        confirmImport(parsed.archive);
-      };
-      reader.onerror = () => {
-        Toast.show('err', I18n.t('account.import.bad'));
-      };
-      reader.readAsText(file);
-    });
-
-    input.click();
-  }
-
-  /**
-   * Импорт из буфера.
-   */
-  async function importFromClipboard() {
-    const clip = await readClipboard();
-
-    if (clip && clip.trim()) {
-      const parsed = Account.parseArchive(clip);
-      if (parsed.ok) {
-        Modal.close();
-        confirmImport(parsed.archive);
-        return;
-      }
-      Toast.show('err', I18n.t('account.import.bad'));
-      return;
-    }
-
-    const body = document.createElement('div');
-    body.className = 'acc-body';
-
-    const field = document.createElement('div');
-    field.className = 'field';
-
-    const label = document.createElement('span');
-    label.className = 'field-label';
-    label.textContent = I18n.t('account.import.clip');
-    field.appendChild(label);
-
-    const ta = document.createElement('textarea');
-    ta.className = 'field-input mono';
-    ta.style.cssText = 'min-height:80px;resize:vertical;';
-    ta.placeholder = I18n.t('account.import.clip.ph');
-    field.appendChild(ta);
-    body.appendChild(field);
-
-    Modal.open({
-      title: I18n.t('account.import.title'),
-      body,
-      buttons: [
-        { text: I18n.t('btn.cancel'), onClick: () => Modal.close() },
-        {
-          text: I18n.t('btn.import'),
-          primary: true,
-          onClick: () => {
-            const parsed = Account.parseArchive(ta.value);
-            if (!parsed.ok) {
-              Toast.show('err', I18n.t('account.import.clip.empty'));
-              return;
-            }
-            Modal.close();
-            confirmImport(parsed.archive);
-          },
-        },
-      ],
-    });
-  }
-
-  /**
-   * @param {Object} archive
-   */
-  function confirmImport(archive) {
-    const apply = async (password) => {
-      if (archive.ncryptsec && archive.pubkey) {
-        let currentPk = null;
-        try {
-          currentPk = (await Account.getAccountInfo()).pubkey;
-        } catch (_) {}
-
-        if (currentPk !== archive.pubkey) {
-          const enter = await Account.enterKey(archive.ncryptsec, password);
-          if (!enter.ok) {
-            Toast.show('err', I18n.t('account.enter.bad'));
-            return;
-          }
-          Toast.show('ok', I18n.t('account.enter.done'));
-        }
-      }
-
-      const count = await Account.importArchive(archive);
-      Toast.show('ok', I18n.t('account.import.done', { count }));
-    };
-
-    if (!archive.ncryptsec) {
-      Modal.confirm(
-        I18n.t('account.import.confirm'),
-        I18n.t('account.import.desc') + ' (' + archive.noteCount + ')',
-        () => { apply(''); },
-        I18n.t('btn.import')
-      );
-      return;
-    }
-
-    if (archive.ncryptsec.startsWith('ncryptsec1')) {
-      const body = document.createElement('div');
-      body.className = 'acc-body';
-
-      const desc = document.createElement('div');
-      desc.className = 'acc-desc';
-      desc.textContent = I18n.t('account.import.desc') + ' (' + archive.noteCount + ')';
-      body.appendChild(desc);
-
-      const pwField = document.createElement('div');
-      pwField.className = 'field';
-
-      const pwLabel = document.createElement('span');
-      pwLabel.className = 'field-label';
-      pwLabel.textContent = I18n.t('account.password.set');
-      pwField.appendChild(pwLabel);
-
-      const pwInput = document.createElement('input');
-      pwInput.type = 'password';
-      pwInput.className = 'field-input';
-      pwField.appendChild(pwInput);
-      body.appendChild(pwField);
-
-      Modal.open({
-        title: I18n.t('account.import.confirm'),
-        body,
-        buttons: [
-          { text: I18n.t('btn.cancel'), onClick: () => Modal.close() },
-          {
-            text: I18n.t('btn.import'),
-            primary: true,
-            onClick: () => {
-              Modal.close();
-              apply(pwInput.value);
-            },
-          },
-        ],
-      });
-      return;
-    }
-
-    Modal.confirm(
-      I18n.t('account.import.confirm'),
-      I18n.t('account.import.desc') + ' (' + archive.noteCount + ')',
-      () => { apply(''); },
-      I18n.t('btn.import')
-    );
-  }
-
-  /**
-   * @param {string} phase
-   */
-  function paintSyncStatus(phase) {
-    const wrap = document.querySelector('.acc-sync');
-    if (!wrap) return;
-
-    const dot = wrap.querySelector('.dot');
-    const txt = wrap.querySelector('.acc-sync-txt');
-    if (!dot || !txt) return;
-
-    dot.className = 'dot '
-      + (phase === 'off' ? 'err'
-        : phase === 'active' ? 'load'
-        : 'ok');
-    txt.textContent = phase === 'off' ? I18n.t('account.sync.off')
-      : phase === 'active' ? I18n.t('account.sync.running')
-      : I18n.t('account.sync.on');
-  }
-
-  /**
-   * @returns {HTMLDivElement}
-   */
-  function buildSyncRow() {
-    const row = document.createElement('div');
-    row.className = 'acc-section';
-
-    const title = document.createElement('span');
-    title.className = 'acc-title';
-    title.textContent = I18n.t('account.sync.status');
-    row.appendChild(title);
-
-    const hint = document.createElement('div');
-    hint.className = 'acc-desc';
-    hint.textContent = I18n.t('account.sync.hint');
-    row.appendChild(hint);
-
-    const syncLine = document.createElement('div');
-    syncLine.className = 'acc-sync';
-
-    const dot = document.createElement('span');
-    dot.className = 'dot';
-    syncLine.appendChild(dot);
-
-    const statusTxt = document.createElement('span');
-    statusTxt.className = 'acc-sync-txt';
-    syncLine.appendChild(statusTxt);
-
-    const toggleBtn = document.createElement('button');
-    toggleBtn.className = 'nv-act';
-    toggleBtn.style.cssText = 'flex:1;font-size:12px;';
-
-    function paint() {
-      const enabled = Config.get('syncEnabled', true);
-      toggleBtn.textContent = enabled ? I18n.t('account.sync.on') : I18n.t('account.sync.off');
-      toggleBtn.classList.toggle('danger', !enabled);
-    }
-
-    toggleBtn.addEventListener('click', () => {
-      const next = !Config.get('syncEnabled', true);
-      Account.setSyncEnabled(next);
-      Toast.show('ok', I18n.t(next ? 'toast.sync.enabled' : 'toast.sync.disabled'));
-      paint();
-      paintSyncStatus(next ? 'idle' : 'off');
-    });
-
-    syncLine.appendChild(toggleBtn);
-    row.appendChild(syncLine);
-
-    const nowHint = document.createElement('div');
-    nowHint.className = 'acc-desc';
-    nowHint.textContent = I18n.t('account.sync.now.hint');
-    row.appendChild(nowHint);
-
-    const nowActions = document.createElement('div');
-    nowActions.className = 'acc-actions';
-    nowActions.appendChild(actionBtn(I18n.t('account.sync.now'), () => {
-      Toast.show('info', I18n.t('toast.sync.now'));
-      try {
-        DI.resolve('NetService').resync();
-      } catch (_) {}
-    }));
-    row.appendChild(nowActions);
-
-    paint();
-
-    const phase = Config.get('syncEnabled', true) ? 'idle' : 'off';
-    dot.className = 'dot ' + (phase === 'off' ? 'err' : phase === 'active' ? 'load' : 'ok');
-    statusTxt.textContent = phase === 'off' ? I18n.t('account.sync.off') : I18n.t('account.sync.on');
-
-    return row;
-  }
-
-  /**
-   * Открыть экран аккаунта.
-   */
-  function open() {
-    const body = document.createElement('div');
-    body.className = 'acc-body';
-
-    Account.getNpub().then(npub => {
-      if (!npub) return;
-
-      const sec = document.createElement('div');
-      sec.className = 'acc-section';
-
-      const t = document.createElement('span');
-      t.className = 'acc-title';
-      t.textContent = I18n.t('account.npub');
-      sec.appendChild(t);
-
-      const box = document.createElement('div');
-      box.className = 'key-box';
-      box.textContent = npub;
-      sec.appendChild(box);
-
-      const actions = document.createElement('div');
-      actions.className = 'acc-actions';
-      actions.appendChild(actionBtn(I18n.t('btn.copy'), () => {
-        copyText(npub);
-        Toast.show('ok', I18n.t('toast.copied'));
-      }));
-      sec.appendChild(actions);
-
-      body.insertBefore(sec, body.firstChild);
-    }).catch(() => {});
-
-    const desc = document.createElement('div');
-    desc.className = 'acc-desc';
-    desc.textContent = I18n.t('account.identity.desc');
-    body.appendChild(desc);
-
-    const keySec = document.createElement('div');
-    keySec.className = 'acc-section';
-
-    const keyTitle = document.createElement('span');
-    keyTitle.className = 'acc-title';
-    keyTitle.textContent = I18n.t('account.identity');
-    keySec.appendChild(keyTitle);
-
-    const keyHint = document.createElement('div');
-    keyHint.className = 'acc-desc';
-    keyHint.textContent = I18n.t('account.nsec.hint');
-    keySec.appendChild(keyHint);
-
-    const keyActions = document.createElement('div');
-    keyActions.className = 'acc-actions';
-    keyActions.appendChild(actionBtn(I18n.t('btn.show'), () => { openShowKey(); }));
-    keyActions.appendChild(actionBtn(I18n.t('account.enter.title'), openEnterKey));
-    keySec.appendChild(keyActions);
-
-    body.appendChild(keySec);
-
-    const dataSec = document.createElement('div');
-    dataSec.className = 'acc-section';
-
-    const dataTitle = document.createElement('span');
-    dataTitle.className = 'acc-title';
-    dataTitle.textContent = I18n.t('account.data.section');
-    dataSec.appendChild(dataTitle);
-
-    const dataDesc = document.createElement('div');
-    dataDesc.className = 'acc-desc';
-    dataDesc.textContent = I18n.t('account.data.desc');
-    dataSec.appendChild(dataDesc);
-
-    const dataActions = document.createElement('div');
-    dataActions.className = 'acc-actions';
-    dataActions.appendChild(actionBtn(I18n.t('account.export.title'), openExport));
-    dataActions.appendChild(actionBtn(I18n.t('account.import.title'), openImport));
-    dataSec.appendChild(dataActions);
-
-    body.appendChild(dataSec);
-
-    body.appendChild(buildSyncRow());
-
-    Modal.open({
-      title: I18n.t('account.title'),
-      body,
-      buttons: [{ text: I18n.t('btn.close'), onClick: () => Modal.close() }],
-    });
-  }
-
-  /**
-   * Инициализация.
-   */
-  function init() {
-    unsubs.push(bus.on('sync:status', e => {
-      if (e && e.phase) paintSyncStatus(e.phase);
-    }));
-
-    unsubs.push(bus.on('account:changed', () => {
-      const overlay = document.getElementById('overlay');
-      if (overlay && overlay.classList.contains('on')) {
-        open();
-      }
-    }));
-  }
-
-  /**
-   * Отписка.
-   */
-  function destroy() {
-    unsubs.forEach(u => {
-      try { u(); } catch (_) {}
-    });
-    unsubs = [];
-  }
-
-  return { init, destroy, open };
+  // TODO: реализация
 }, ['Account', 'Modal', 'Toast', 'I18n', 'Config', 'EventBus']);
 // ─── UI/AccountView ─── END ─────────────────────────────────────────────────
 
 // ─── UI/MenuView ─── START ──────────────────────────────────────────────────
 /**
- * Меню: тема, язык, ранжирование, аккаунт, wipe, полный сброс.
+ * Меню: помощь, тема, язык, ранжирование (слайдеры+превью), аккаунт,
+ * «Стереть базу» (wipe:request), «Полный сброс», версия.
+ *
+ * ИЗМЕНЕНИЯ v1.0:
+ * - applyView — подписчик Store.subscribe(s=>s.view): DOM-переключение
+ *   .hidden для ctx-banner/seg/feed-wrap/btn-history/composer + #base.on
+ *   + btn-base.active. Единая точка; setView API больше не нужен.
+ * - fullReset (порядок ОБЯЗАТЕЛЕН): publishWipeAll → NetService.stop(true)
+ *   → Nostr.close() → DB.ready() → db.close() → пауза 150мс →
+ *   deleteDatabase(все) → localStorage/sessionStorage.clear →
+ *   caches.delete(все) → SW CLEAR_CACHE → тост → reload 1500мс. (B-03)
+ * - Стиль: тело fullReset держим в Account/отдельном сервисе, меню
+ *   вызывает (реализация — по договорённости, см. TODO).
  */
-DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboarding, Nostr) {
-  let unsubs = [];
-
-  /**
-   * @param {string} theme
-   */
-  function applyTheme(theme) {
-    document.body.setAttribute('data-theme', theme);
-    Config.set('theme', theme);
-  }
-
-  /**
-   * @param {string} [theme]
-   * @returns {string}
-   */
-  function themeGlyph(theme) {
-    const t = theme || Config.get('theme', 'dark');
-    return t === 'dark' ? '◐' : '○';
-  }
-
-  /**
-   * @param {string} view
-   */
-  function setView(view) {
-    Store.setState({ view });
-
-    const isBase = view === 'base';
-
-    ['ctx-banner', 'seg', 'feed-wrap', 'btn-history', 'composer'].forEach(id => {
-      const el = document.getElementById(id);
-      if (el) el.classList.toggle('hidden', isBase);
-    });
-
-    const base = document.getElementById('base');
-    if (base) base.classList.toggle('on', isBase);
-
-    try { bus.emit('view:changed', { view }); } catch (_) {}
-  }
-
-  /**
-   * Синхронизация состояния кнопок.
-   */
-  function viewSync() {
-    const view = Store.get('view');
-
-    const bb = document.getElementById('btn-base');
-    if (bb) bb.classList.toggle('active', view === 'base');
-  }
-
-  /**
-   * @param {string} label
-   * @param {string} [val]
-   * @param {Function} onClick
-   * @param {boolean} [danger]
-   * @returns {HTMLButtonElement}
-   */
-  function menuRow(label, val, onClick, danger) {
-    const row = document.createElement('button');
-    row.className = 'menu-row' + (danger ? ' danger' : '');
-    row.addEventListener('click', onClick);
-
-    const lbl = document.createElement('span');
-    lbl.textContent = label;
-    row.appendChild(lbl);
-
-    if (val) {
-      const v = document.createElement('span');
-      v.className = 'menu-row-val';
-      v.textContent = val;
-      row.appendChild(v);
-    }
-
-    return row;
-  }
-
-  /**
-   * Настройки ранжирования.
-   */
-  function openRankingSettings() {
-    const body = document.createElement('div');
-    body.className = 'range-body';
-
-    const sliders = [
-      {
-        key: 'threshold',
-        min: 0.50,
-        max: 0.95,
-        step: 0.01,
-        label: I18n.t('ranking.threshold'),
-        hint: I18n.t('ranking.threshold.hint'),
-        color: 'amber',
-      },
-      {
-        key: 'serendipity',
-        min: 0.05,
-        max: 0.30,
-        step: 0.01,
-        label: I18n.t('ranking.serendipity'),
-        hint: I18n.t('ranking.serendipity.hint'),
-        color: 'teal',
-      },
-      {
-        key: 'duplicateThreshold',
-        min: 0.88,
-        max: 0.99,
-        step: 0.01,
-        label: I18n.t('ranking.similarity'),
-        hint: I18n.t('ranking.similarity.hint'),
-        color: 'rose',
-      },
-    ];
-
-    /** @type {Object<string, {slider: HTMLInputElement, val: HTMLSpanElement}>} */
-    const valueEls = {};
-
-    sliders.forEach(cfg => {
-      const current = Number(Config.get(cfg.key, cfg.min));
-      const safe = Number.isFinite(current) ? current : cfg.min;
-
-      const group = document.createElement('div');
-      group.className = 'range-group';
-
-      const labelRow = document.createElement('div');
-      labelRow.className = 'range-head';
-
-      const lbl = document.createElement('span');
-      lbl.className = 'range-lbl';
-      lbl.textContent = cfg.label;
-
-      const val = document.createElement('span');
-      val.className = 'range-val ' + cfg.color;
-      val.textContent = safe.toFixed(2);
-
-      labelRow.appendChild(lbl);
-      labelRow.appendChild(val);
-
-      const slider = document.createElement('input');
-      slider.type = 'range';
-      slider.min = String(cfg.min);
-      slider.max = String(cfg.max);
-      slider.step = String(cfg.step);
-      slider.value = String(safe);
-      slider.className = 'no-range ' + cfg.color;
-
-      const hintEl = document.createElement('div');
-      hintEl.className = 'range-hint';
-      hintEl.textContent = cfg.hint;
-
-      slider.addEventListener('input', () => {
-        const v = parseFloat(slider.value);
-        val.textContent = Number.isFinite(v) ? v.toFixed(2) : cfg.min.toFixed(2);
-      });
-
-      valueEls[cfg.key] = { slider, val };
-
-      group.appendChild(labelRow);
-      group.appendChild(slider);
-      group.appendChild(hintEl);
-      body.appendChild(group);
-    });
-
-    const previewEl = document.createElement('div');
-    previewEl.className = 'range-preview';
-
-    const pvRelevant = document.createElement('div');
-    const pvSeren = document.createElement('div');
-    const pvHidden = document.createElement('div');
-    previewEl.appendChild(pvRelevant);
-    previewEl.appendChild(pvSeren);
-    previewEl.appendChild(pvHidden);
-
-    function updatePreview() {
-      const threshold = parseFloat(valueEls['threshold'].slider.value);
-      const serendipity = parseFloat(valueEls['serendipity'].slider.value);
-      const lowerBound = threshold - serendipity;
-
-      pvRelevant.textContent = I18n.t('preview.relevant', { lo: Math.round(threshold * 100) });
-      pvSeren.textContent = I18n.t('preview.seren', { lo: Math.round(lowerBound * 100), hi: Math.round(threshold * 100) });
-      pvHidden.textContent = I18n.t('preview.hidden', { lo: Math.round(lowerBound * 100) });
-    }
-
-    updatePreview();
-    body.appendChild(previewEl);
-
-    valueEls['threshold'].slider.addEventListener('input', updatePreview);
-    valueEls['serendipity'].slider.addEventListener('input', updatePreview);
-
-    let pendingDisplay = Config.get('similarityDisplay', 'signal');
-    if (pendingDisplay !== 'signal' && pendingDisplay !== 'percent') {
-      pendingDisplay = 'signal';
-    }
-
-    const displayGroup = document.createElement('div');
-    displayGroup.className = 'range-display';
-
-    const displayLabel = document.createElement('span');
-    displayLabel.className = 'range-display-lbl';
-    displayLabel.textContent = I18n.t('ranking.display');
-
-    const displayToggle = document.createElement('div');
-    displayToggle.className = 'range-display-btns';
-
-    /** @type {Array<HTMLButtonElement>} */
-    const displayBtns = [];
-
-    function paintDisplayButtons() {
-      displayBtns.forEach(btn => {
-        btn.classList.toggle('selected', btn.getAttribute('data-display-mode') === pendingDisplay);
-      });
-    }
-
-    ['signal', 'percent'].forEach(mode => {
-      const btn = document.createElement('button');
-      btn.className = 'nv-act';
-      btn.setAttribute('data-display-mode', mode);
-      btn.textContent = I18n.t('ranking.display.' + mode);
-
-      btn.addEventListener('click', () => {
-        pendingDisplay = mode;
-        paintDisplayButtons();
-      });
-
-      displayBtns.push(btn);
-      displayToggle.appendChild(btn);
-    });
-
-    paintDisplayButtons();
-
-    displayGroup.appendChild(displayLabel);
-    displayGroup.appendChild(displayToggle);
-    body.appendChild(displayGroup);
-
-    Modal.open({
-      title: I18n.t('menu.ranking'),
-      body,
-      buttons: [
-        {
-          text: I18n.t('btn.cancel'),
-          onClick: () => Modal.close(),
-        },
-        {
-          text: I18n.t('btn.save'),
-          primary: true,
-          onClick: () => {
-            sliders.forEach(cfg => {
-              const v = parseFloat(valueEls[cfg.key].slider.value);
-              if (Number.isFinite(v)) Config.set(cfg.key, v);
-            });
-
-            Config.set('similarityDisplay', pendingDisplay);
-
-            try { bus.emit('db:change'); } catch (_) {}
-
-            Toast.show('ok', I18n.t('ranking.saved'));
-            Modal.close();
-          },
-        },
-        {
-          text: I18n.t('ranking.reset'),
-          danger: true,
-          onClick: () => {
-            const d = Config.defaults();
-
-            sliders.forEach(cfg => {
-              const def = Number(d[cfg.key]);
-              const safe = Number.isFinite(def) ? def : cfg.min;
-
-              Config.set(cfg.key, safe);
-              valueEls[cfg.key].slider.value = String(safe);
-              valueEls[cfg.key].val.textContent = safe.toFixed(2);
-            });
-
-            pendingDisplay = d.similarityDisplay === 'percent' ? 'percent' : 'signal';
-            Config.set('similarityDisplay', pendingDisplay);
-            paintDisplayButtons();
-            updatePreview();
-
-            try { bus.emit('db:change'); } catch (_) {}
-
-            Toast.show('ok', I18n.t('ranking.reset'));
-          },
-        },
-      ],
-    });
-  }
-
-  /**
-   * Полный сброс.
-   */
-  function fullReset() {
-    Modal.confirm(
-      I18n.t('menu.fullreset'),
-      I18n.t('menu.fullreset.confirm'),
-      () => {
-        let wipePromise = Promise.resolve();
-        try {
-          const NetService = DI.resolve('NetService');
-          wipePromise = NetService.publishWipeAll().catch(() => {});
-        } catch (_) {}
-
-        wipePromise.finally(() => {
-          try { Nostr.close(); } catch (_) {}
-
-          if (window.indexedDB && typeof indexedDB.databases === 'function') {
-            indexedDB.databases().then(dbs => {
-              dbs.forEach(dbInfo => {
-                if (dbInfo.name) {
-                  indexedDB.deleteDatabase(dbInfo.name);
-                }
-              });
-            }).catch(() => {});
-          } else if (window.indexedDB) {
-            try {
-              indexedDB.deleteDatabase(Config.get('dbName', 'noomium_v3'));
-            } catch (_) {}
-          }
-
-          try { localStorage.clear(); } catch (_) {}
-          try { sessionStorage.clear(); } catch (_) {}
-
-          if (window.caches) {
-            caches.keys().then(names => {
-              names.forEach(name => caches.delete(name));
-            }).catch(() => {});
-          }
-
-          if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
-            try {
-              navigator.serviceWorker.controller.postMessage('CLEAR_CACHE');
-            } catch (_) {}
-          }
-
-          Toast.show('ok', I18n.t('menu.fullreset.done'));
-
-          setTimeout(() => {
-            window.location.reload();
-          }, 1500);
-        });
-      }
-    );
-  }
-
-  /**
-   * Открыть меню.
-   */
-  function openMenu() {
-    const body = document.createElement('div');
-    body.className = 'menu-list';
-
-    body.appendChild(menuRow(I18n.t('menu.help'), '', () => {
-      Modal.close();
-      Onboarding.showHelp(false);
-    }));
-
-    const themeVal = themeGlyph() + ' ' + I18n.t(Config.get('theme', 'dark') === 'dark' ? 'theme.dark' : 'theme.light');
-    body.appendChild(menuRow(I18n.t('menu.theme'), themeVal, () => {
-      const next = Config.get('theme', 'dark') === 'dark' ? 'light' : 'dark';
-      applyTheme(next);
-      Config.set('userThemeOverride', true);
-      Modal.close();
-      Toast.show('ok', I18n.t('menu.theme') + ': ' + themeGlyph(next) + ' ' + I18n.t(next === 'dark' ? 'theme.dark' : 'theme.light'));
-    }));
-
-    body.appendChild(menuRow(I18n.t('menu.lang'), I18n.getLang().toUpperCase(), () => {
-      I18n.setLang(I18n.getLang() === 'ru' ? 'en' : 'ru');
-      Modal.close();
-    }));
-
-    body.appendChild(menuRow(I18n.t('menu.ranking'), '', () => {
-      Modal.close();
-      openRankingSettings();
-    }));
-
-    body.appendChild(menuRow(I18n.t('menu.account'), '', () => {
-      Modal.close();
-      DI.resolve('AccountView').open();
-    }));
-
-    body.appendChild(menuRow(I18n.t('base.wipe'), '', () => {
-      Modal.close();
-      Modal.confirm(I18n.t('base.wipe'), I18n.t('base.wipe.confirm'), () => {
-        try { bus.emit('wipe:request'); } catch (_) {}
-      });
-    }, true));
-
-    body.appendChild(menuRow(I18n.t('menu.fullreset'), '', () => {
-      Modal.close();
-      fullReset();
-    }, true));
-
-    const version = document.createElement('div');
-    version.className = 'menu-version';
-    version.textContent = 'v' + APP_VERSION;
-    body.appendChild(version);
-
-    Modal.open({ title: I18n.t('menu.settings'), body });
-  }
-
-  /**
-   * Инициализация.
-   */
-  function init() {
-    applyTheme(Config.get('theme', 'dark'));
-
-    const menuBtn = document.getElementById('btn-menu');
-    if (menuBtn) menuBtn.addEventListener('click', openMenu);
-
-    const baseBtn = document.getElementById('btn-base');
-    if (baseBtn) {
-      baseBtn.addEventListener('click', () =>
-        setView(Store.get('view') === 'base' ? 'stream' : 'base')
-      );
-    }
-
-    unsubs.push(bus.on('view:set', p => {
-      if (p && p.view) setView(p.view);
-    }));
-
-    unsubs.push(Store.subscribe(s => s.view, viewSync));
-    unsubs.push(bus.on('i18n:change', viewSync));
-
-    viewSync();
-  }
-
-  /**
-   * Отписка.
-   */
-  function destroy() {
-    unsubs.forEach(u => {
-      try { u(); } catch (_) {}
-    });
-    unsubs = [];
-  }
-
-  return { init, destroy, setView, openMenu };
-}, ['Store', 'Config', 'Modal', 'Toast', 'I18n', 'EventBus', 'Onboarding', 'Nostr']);
+DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboarding, Nostr, DB, NetService) {
+  // TODO: реализация
+}, ['Store', 'Config', 'Modal', 'Toast', 'I18n', 'EventBus', 'Onboarding', 'Nostr', 'DB', 'NetService']);
 // ─── UI/MenuView ─── END ────────────────────────────────────────────────────
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// СЛОЙ: PLATFORM
-// ═══════════════════════════════════════════════════════════════════════════════
+// ═══ СЛОЙ: PLATFORM ═══════════════════════════════════════════════════════════
 
 // ─── PLATFORM/TelegramAdapter ─── START ─────────────────────────────────────
 /**
- * Telegram Mini Apps: тема, haptic, нативные диалоги.
+ * Telegram Mini Apps. ИЗМЕНЕНИЕ v1.0 (B-05): init() НЕ сдаётся, если
+ * window.Telegram ещё не загрузился: слушает DOM-событие 'tg:ready'
+ * (эмитит onload в index.html) + таймаут-ретрай 3с. activate() —
+ * прежняя логика (ready/expand/тема/haptic).
  */
 DI.register('TelegramAdapter', function (Config, bus, Logger) {
-  /** @type {Object|null} */
-  let tg = null;
-  /** @type {boolean} */
-  let isActive = false;
-
-  /**
-   * Инициализация.
-   */
-  function init() {
-    if (!window.Telegram || !window.Telegram.WebApp) {
-      Logger.info('TelegramAdapter: не в Telegram, пропускаем');
-      return;
-    }
-
-    tg = window.Telegram.WebApp;
-
-    try {
-      tg.ready();
-      tg.expand();
-      isActive = true;
-      Logger.info('TelegramAdapter: активирован');
-    } catch (e) {
-      Logger.warn('TelegramAdapter: ошибка инициализации', String(e));
-      return;
-    }
-
-    applyTheme();
-
-    tg.onEvent('themeChanged', () => {
-      applyTheme();
-    });
-
-    try {
-      tg.setHeaderColor(tg.colorScheme === 'dark' ? '#0a0a0b' : '#fafafa');
-      tg.setBackgroundColor(tg.colorScheme === 'dark' ? '#0a0a0b' : '#fafafa');
-    } catch (_) {}
-  }
-
-  /**
-   * Применение темы Telegram.
-   */
-  function applyTheme() {
-    if (!tg) return;
-
-    if (Config.get('userThemeOverride', false)) {
-      return;
-    }
-
-    const scheme = tg.colorScheme || 'dark';
-    document.body.setAttribute('data-theme', scheme);
-
-    try {
-      tg.setHeaderColor(scheme === 'dark' ? '#0a0a0b' : '#fafafa');
-      tg.setBackgroundColor(scheme === 'dark' ? '#0a0a0b' : '#fafafa');
-    } catch (_) {}
-
-    try {
-      bus.emit('telegram:theme', { scheme });
-    } catch (_) {}
-  }
-
-  /**
-   * @returns {boolean}
-   */
-  function isTelegram() {
-    return isActive;
-  }
-
-  /**
-   * @param {'success'|'error'|'light'} type
-   */
-  function hapticFeedback(type) {
-    if (!tg || !tg.HapticFeedback) return;
-
-    try {
-      if (type === 'success') {
-        tg.HapticFeedback.notificationOccurred('success');
-      } else if (type === 'error') {
-        tg.HapticFeedback.notificationOccurred('error');
-      } else {
-        tg.HapticFeedback.impactOccurred('light');
-      }
-    } catch (_) {}
-  }
-
-  /**
-   * @param {string} message
-   */
-  function showAlert(message) {
-    if (!tg) return;
-
-    try {
-      tg.showAlert(message);
-    } catch (_) {
-      alert(message);
-    }
-  }
-
-  /**
-   * @param {string} message
-   * @param {Function} callback
-   */
-  function showConfirm(message, callback) {
-    if (!tg) {
-      if (confirm(message)) callback();
-      return;
-    }
-
-    try {
-      tg.showConfirm(message, confirmed => {
-        if (confirmed) callback();
-      });
-    } catch (_) {
-      if (confirm(message)) callback();
-    }
-  }
-
-  return { init, isTelegram, hapticFeedback, showAlert, showConfirm };
+  // TODO: реализация
 }, ['Config', 'EventBus', 'Logger']);
 // ─── PLATFORM/TelegramAdapter ─── END ───────────────────────────────────────
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// СЛОЙ: BOOT
-// ═══════════════════════════════════════════════════════════════════════════════
-
-// ─── BOOT ─── START ─────────────────────────────────────────────────────────
-/**
- * Точка входа: порядок инициализации модели состояний v0.9.
- */
+// ═══ СЛОЙ: BOOT (реализован — это оркестрация каркаса) ══════════════════════
 DI.register('Boot', function () {
   function mount() {
     const Config = DI.resolve('Config');
     document.body.setAttribute('data-theme', Config.get('theme', 'dark'));
+
     DI.resolve('I18n').init();
 
+    // Индикаторы и домен — первыми, UI подписывается на их события.
     DI.resolve('Progress').init();
     DI.resolve('HeaderStatus').init();
     DI.resolve('Feed').init();
@@ -8088,7 +1585,6 @@ DI.register('Boot', function () {
     DI.resolve('Mirror').init();
 
     DI.resolve('TelegramAdapter').init();
-
     DI.resolve('Context').init();
 
     DI.resolve('Composer').init();
@@ -8104,36 +1600,41 @@ DI.register('Boot', function () {
     const I18n = DI.resolve('I18n');
     const NetService = DI.resolve('NetService');
 
-    bus.on('wipe:request', () => {
-      NetService.publishWipeAll()
-        .catch(() => {})
-        .finally(() => DB.reset())
-        .then(() => {
-          Toast.show('ok', I18n.t('toast.base.wiped'));
-          try { bus.emit('view:set', { view: 'stream' }); } catch (_) {}
-        });
+    // Модель догрузилась → доэмбеддить заметки, созданные без вектора.
+    bus.on('ai:ready', () => {
+      DI.resolve('Notes').backfill().catch(e => {
+        DI.resolve('Logger').warn('Boot: backfill', String(e));
+      });
+    });
+
+    // Локальная очистка базы + сетевой wipe (честный отчёт при офлайне).
+    bus.on('wipe:request', async () => {
+      const report = await NetService.publishWipeAll().catch(() => ({ published: 0, offline: true }));
+      try { await DB.reset(); } catch (_) {}
+      Toast.show(report && report.offline ? 'warn' : 'ok',
+        I18n.t(report && report.offline ? 'toast.wipe.offline' : 'toast.base.wiped'));
+      DI.resolve('Store').setState({ view: 'stream' });
     });
 
     document.body.classList.add('ready');
 
     DI.resolve('Embedder').load();
     NetService.start();
-
     DI.resolve('Onboarding').init();
   }
 
   return { mount };
 });
-// ─── BOOT ─── END ───────────────────────────────────────────────────────────
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// ЗАПУСК
-// ═══════════════════════════════════════════════════════════════════════════════
+// ═══ ЗАПУСК ═══════════════════════════════════════════════════════════════════
 window.DI = DI;
 
 try {
   DI.resolve('Boot').mount();
 } catch (e) {
   console.error('[NOOmium] запуск упал:', e);
-  document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100dvh;padding:20px;font:500 14px -apple-system,sans-serif;color:#fafafa;background:#0a0a0b;text-align:center">NOOmium не запустился. Обновите страницу.<br>Если повторится — пришлите скриншот консоли (F12).</div>';
+  document.body.innerHTML =
+    '<div style="display:flex;align-items:center;justify-content:center;height:100dvh;padding:20px;'
+    + 'font:500 14px -apple-system,sans-serif;color:#fafafa;background:#0a0a0b;text-align:center">'
+    + 'NOOmium не запустился. Обновите страницу.<br>Если повторится — пришлите скриншот консоли (F12).</div>';
 }
