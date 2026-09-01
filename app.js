@@ -31,7 +31,7 @@
 
 'use strict';
 
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.0.1';
 
 // ═══ РЕЕСТР СОБЫТИЙ ШИНЫ (полный контракт) ════════════════════════════════════
 //
@@ -1069,9 +1069,10 @@ DI.register('Config', function () {
  *   единый подписчик в MenuView.applyView.
  * - context всегда ЗАМЕНЯЕТСЯ новым объектом (Context.push), никогда
  *   не мутируется на месте — подписки Object.is/shallowEqual корректны.
- * - snapshot: копия верхнего уровня + freeze; вложенные объекты —
- *   по ссылке, только для чтения.
- * Логика v0.9.9 сохранена без изменений.
+ * - snapshot: замороженная копия верхнего уровня + защищённые копии
+ *   вложенных рабочих объектов (context — freeze, lists/feed —
+ *   свежие массивы). Слушатель не может мутировать живое состояние
+ *   через снапшот (v1.0.1: в v1.0.0 freeze был поверхностным).
  */
 DI.register('Store', function () {
   const state = {
@@ -1096,7 +1097,24 @@ DI.register('Store', function () {
     return true;
   }
 
-  const snapshot = () => Object.freeze(Object.assign({}, state));
+  /**
+   * Защищённый снапшот: верх заморожен; context — замороженная копия;
+   * lists/feed — копии массивов (push/pop из снапшота не трогает
+   * живые данные; сам объект lists тоже заморожен).
+   * Элементы массивов (карточки лент) остаются общими ссылками —
+   * только для чтения; DOM-модули рендерят их без мутаций.
+   */
+  const snapshot = () => Object.freeze(Object.assign(
+    {},
+    state,
+    { context: Object.freeze(Object.assign({}, state.context)) },
+    { lists: Object.freeze({
+        local: state.lists.local.slice(),
+        world: state.lists.world.slice(),
+        seren: state.lists.seren.slice(),
+      }) },
+    { feed: state.feed.slice() }
+  ));
 
   function notify() {
     const snap = snapshot();
@@ -4478,7 +4496,12 @@ DI.register('Mirror', function (DB, Protocol, Notes, bus, Nostr, Logger) {
  * - context всегда новый объект (подписки Object.is/shallowEqual
  *   корректны); embed недоступен → vector null (модель не готова —
  *   закон v1.0: не заменяем мусорными векторами).
- * - init(): подписка note:pin → setPin (прямая ссылка, без this).
+ * - init(): подписка note:pin → setPin.
+ *
+ * v1.0.1: функции фабрики объявлены локально (НЕ методами литерала) —
+ * подписка в init() держит легальную ссылку на замыкание. В v1.0.0
+ * ссылка на setPin внутри bus.on отсутствовала в скоупе → пин по
+ * кнопке из NoteView падал ReferenceError.
  */
 DI.register('Context', function (Store, Embedder, Config, Utils, bus) {
   /** @type {string} */
@@ -4555,78 +4578,94 @@ DI.register('Context', function (Store, Embedder, Config, Utils, bus) {
 
     Embedder.embed(t).then(v => {
       if (inputText.trim() === t) {
-        // v = null при неготовой модели — вектор контекста отсутствует,
-        // лента и запрос корректно ждут готовности.
         inputVector = v;
         push();
       }
     });
   }, Config.get('debounce', 350));
 
+  /**
+   * @param {string} text
+   */
+  function setInput(text) {
+    inputText = text || '';
+    if (!inputText.trim()) inputVector = null;
+    push();
+    debouncedEmbed();
+  }
+
+  /**
+   * @param {Object} note - Заметка с вектором (notes или mirror).
+   */
+  function setPin(note) {
+    if (!note || !note.vector) return;
+    pin = {
+      uid: note.uid,
+      owner: note.owner !== undefined ? note.owner : null,
+      text: note.text,
+      vector: note.vector,
+    };
+    push();
+  }
+
+  /**
+   * Снять пин (ввод не трогаем — дрейф закончится, ввод останется).
+   */
+  function clearPin() {
+    pin = null;
+    push();
+  }
+
+  /**
+   * Полная очистка (ввод + пин).
+   */
+  function clear() {
+    inputText = '';
+    inputVector = null;
+    pin = null;
+    debouncedEmbed.cancel();
+    push();
+  }
+
+  /**
+   * @returns {Float32Array|Array<number>|null}
+   */
+  function getVector() {
+    return activeContext().vector;
+  }
+
+  /**
+   * @returns {Object}
+   */
+  function getActive() {
+    return activeContext();
+  }
+
+  /**
+   * @returns {Object|null}
+   */
+  function getPin() {
+    return pin;
+  }
+
+  /**
+   * Инициализация: подписка на пин из UI (NoteView).
+   */
+  function init() {
+    bus.on('note:pin', note => {
+      if (note) setPin(note);
+    });
+  }
+
   return {
-    /**
-     * @param {string} text
-     */
-    setInput(text) {
-      inputText = text || '';
-      if (!inputText.trim()) inputVector = null;
-      push();
-      debouncedEmbed();
-    },
-
-    /**
-     * @param {Object} note - Заметка с вектором (notes или mirror).
-     */
-    setPin(note) {
-      if (!note || !note.vector) return;
-      pin = {
-        uid: note.uid,
-        owner: note.owner !== undefined ? note.owner : null,
-        text: note.text,
-        vector: note.vector,
-      };
-      push();
-    },
-
-    clearPin() {
-      pin = null;
-      push();
-    },
-
-    clear() {
-      inputText = '';
-      inputVector = null;
-      pin = null;
-      debouncedEmbed.cancel();
-      push();
-    },
-
-    /**
-     * @returns {Float32Array|Array<number>|null}
-     */
-    getVector() {
-      return activeContext().vector;
-    },
-
-    /**
-     * @returns {Object}
-     */
-    getActive() {
-      return activeContext();
-    },
-
-    /**
-     * @returns {Object|null}
-     */
-    getPin() {
-      return pin;
-    },
-
-    init() {
-      bus.on('note:pin', note => {
-        if (note) setPin(note);
-      });
-    },
+    setInput,
+    setPin,
+    clearPin,
+    clear,
+    getVector,
+    getActive,
+    getPin,
+    init,
   };
 }, ['Store', 'Embedder', 'Config', 'Utils', 'EventBus']);
 // ─── DOMAIN/Context ─── END ─────────────────────────────────────────────────
