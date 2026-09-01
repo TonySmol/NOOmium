@@ -25,7 +25,7 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 // ВЕРСИЯ ПРИЛОЖЕНИЯ
 // ═══════════════════════════════════════════════════════════════════════════════
-const APP_VERSION = '0.9.6';
+const APP_VERSION = '0.9.7';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CORE/DI — ПРЕАМБУЛА
@@ -4410,9 +4410,8 @@ DI.register('Feed', function (DB, Ranker, Store, bus, Logger) {
 // ─── DOMAIN/Provenance ─── START ────────────────────────────────────────────
 /**
  * Генеалогия по parent {uid, owner} через notes + mirror.
- * mirror-записи своих uid исключаются (дубли-защита, И2):
- * истина своей заметки — в notes. Резолв любого состояния
- * считается успешным; видимость решает UI.
+ * mirror-записи своих uid исключаются (дубли-защита).
+ * ancestors — с диагностическим трейсом (каждый шаг цикла).
  */
 DI.register('Provenance', function (DB, bus, Nostr) {
   /** @type {Map<string, {chain: Array, timestamp: number}>} */
@@ -4512,41 +4511,68 @@ DI.register('Provenance', function (DB, bus, Nostr) {
   }
 
   /**
-   * Цепочка предков до корня.
+   * Цепочка предков до корня с диагностическим трейсом.
    * @param {string} uid
    * @returns {Promise<Array<Object>>}
    */
-  function ancestors(uid) {
-    if (!uid) return Promise.resolve([]);
+  async function ancestors(uid) {
+    if (!uid) return [];
 
     const cached = cache.get(uid);
     if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
-      return Promise.resolve(cached.chain);
+      return cached.chain;
     }
 
-    return loadAll().then(all => {
-      const idx = buildIndex(all);
+    const all = await loadAll();
+    const idx = buildIndex(all);
 
-      let current = idx.byUid.get(uid) || null;
-      const chain = [];
-      const seen = new Set([uid]);
+    console.log('[prov] граф:', all.length, 'записей');
+    all.forEach(n => console.log('[prov]',
+      n.uid.slice(0, 12),
+      '| parent:', n.parent ? n.parent.uid.slice(0, 12) : 'НЕТ',
+      '| vis:', n.visibility,
+      '| own:', n.isOwn));
 
-      while (current && current.parent && current.parent.uid) {
-        if (seen.has(current.parent.uid)) break;
-        seen.add(current.parent.uid);
+    let current = idx.byUid.get(uid) || null;
+    console.log('[prov] старт:', current ? current.uid.slice(0, 12) : 'НЕ НАЙДЕН');
 
-        const parent = resolveParent(current, idx);
-        if (!parent) break;
+    const chain = [];
+    const seen = new Set([uid]);
 
-        chain.push(parent);
-        if (seen.has(parent.uid)) break;
-        seen.add(parent.uid);
-        current = parent;
+    while (current && current.parent && current.parent.uid) {
+      console.log('[prov] шаг: current', current.uid.slice(0, 12),
+        '→ parent', current.parent.uid.slice(0, 12),
+        '| в seen:', seen.has(current.parent.uid));
+
+      if (seen.has(current.parent.uid)) {
+        console.log('[prov] BREAK: parent в seen');
+        break;
+      }
+      seen.add(current.parent.uid);
+
+      const parent = resolveParent(current, idx);
+      console.log('[prov] resolveParent →', parent
+        ? parent.uid.slice(0, 12) + ' "' + (parent.text || '').slice(0, 12) + '"'
+        : 'NULL');
+
+      if (!parent) {
+        console.log('[prov] BREAK: parent не найден');
+        break;
       }
 
-      cache.set(uid, { chain, timestamp: Date.now() });
-      return chain;
-    });
+      chain.push(parent);
+      if (seen.has(parent.uid)) {
+        console.log('[prov] BREAK: chain в seen');
+        break;
+      }
+      seen.add(parent.uid);
+      current = parent;
+    }
+
+    console.log('[prov] итог:', chain.length);
+
+    cache.set(uid, { chain, timestamp: Date.now() });
+    return chain;
   }
 
   /**
