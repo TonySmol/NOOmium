@@ -25,7 +25,7 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 // ВЕРСИЯ ПРИЛОЖЕНИЯ
 // ═══════════════════════════════════════════════════════════════════════════════
-const APP_VERSION = '0.9.3';
+const APP_VERSION = '0.9.4';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CORE/DI — ПРЕАМБУЛА
@@ -1420,11 +1420,10 @@ DI.register('Vec', function () {
 
 // ─── DATA/DB ─── START ──────────────────────────────────────────────────────
 /**
- * Хранение: notes (свои, истина владельца, keyPath uid) и
- * mirror (зеркало чужих, keyPath uid, index owner).
- * upsertMirror — строгое сравнение версий: повторная доставка и
- * ретро-доставка безопасны, порядок обработки любых версий
- * сходится к последней (И3).
+ * Хранение: notes (свои) и mirror (чужие).
+ * upsertMirror — сходимость по version с мерджем полей: ранняя
+ * only-fact-версия не затирает позднюю полную той же версии
+ * (порядок доставки fact→full не должен терять parent/text).
  */
 DI.register('DB', function (Config, bus, Logger) {
   let db = null;
@@ -1460,7 +1459,6 @@ DI.register('DB', function (Config, bus, Logger) {
   }
 
   /**
-   * Открытие БД с построением индексов до резолва.
    * @returns {Promise<IDBDatabase|null>}
    */
   function open() {
@@ -1520,7 +1518,6 @@ DI.register('DB', function (Config, bus, Logger) {
   }
 
   /**
-   * Построение индексов ownUids/mirrorUids.
    * @returns {Promise<void>}
    */
   function buildIndexes() {
@@ -1563,11 +1560,8 @@ DI.register('DB', function (Config, bus, Logger) {
     });
   }
 
-  // ─── Свои заметки ─────────────────────────────────────────────────────────
-
   /**
-   * Запись своей заметки. Единственная точка записи — Notes.
-   * @param {Object} note - {uid, text, vector, visibility, parent, version, createdAt, updatedAt}
+   * @param {Object} note
    * @returns {Promise<string>}
    */
   function putNote(note) {
@@ -1633,13 +1627,12 @@ DI.register('DB', function (Config, bus, Logger) {
     return !!uid && ownUids.has(uid);
   }
 
-  // ─── Зеркало чужих ────────────────────────────────────────────────────────
-
   /**
-   * Upsert записи зеркала по version. Downgrade и повтор одной
-   * версии игнорируются — сходимость к последней версии (И3).
-   * @param {Object} entry - {uid, owner, version, visibility,
-   *   text?, vec?, parent?, deleted?}
+   * Upsert по version с мерджем: при равных версиях запись с
+   * полными полями (text/vec/parent) не затирается неполной
+   * (only-fact); при строго меньшей — новая поглощает старую,
+   * заимствуя недостающие поля.
+   * @param {Object} entry
    * @returns {Promise<boolean>} true — запись обновлена.
    */
   function upsertMirror(entry) {
@@ -1653,8 +1646,25 @@ DI.register('DB', function (Config, bus, Logger) {
       s => s.get(entry.uid),
       () => memMirror.get(entry.uid)
     ).then(existing => {
-      if (existing && existing.version >= entry.version) {
-        return false;
+      if (existing) {
+        if (existing.version > entry.version) {
+          return false;
+        }
+
+        if (existing.version === entry.version) {
+          const richer = hasRicherFields(entry, existing);
+          if (!richer) {
+            return false;
+          }
+        }
+
+        ['text', 'vec', 'parent'].forEach(k => {
+          if (entry[k] === undefined || entry[k] === null) {
+            if (existing[k] !== undefined && existing[k] !== null) {
+              entry[k] = existing[k];
+            }
+          }
+        });
       }
 
       return withStore(
@@ -1671,6 +1681,18 @@ DI.register('DB', function (Config, bus, Logger) {
       Logger.warn('DB: upsertMirror', String(e && e.message || e));
       return false;
     });
+  }
+
+  /**
+   * Новая запись полнее существующей той же версии?
+   * @param {Object} incoming
+   * @param {Object} existing
+   * @returns {boolean}
+   */
+  function hasRicherFields(incoming, existing) {
+    const incomingHas = !!(incoming.text || incoming.vec || incoming.parent);
+    const existingHas = !!(existing.text || existing.vec || existing.parent);
+    return incomingHas && !existingHas;
   }
 
   /**
@@ -1716,7 +1738,6 @@ DI.register('DB', function (Config, bus, Logger) {
   }
 
   /**
-   * Полная очистка хранилищ.
    * @returns {Promise<void>}
    */
   function reset() {
