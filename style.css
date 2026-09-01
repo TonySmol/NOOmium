@@ -1291,10 +1291,19 @@ body.ready #app { display: flex; }
    ═══════════════════════════════════════════════════════════════════════════════ */
 
 #notif-bar {
-  margin: 0 14px 10px;
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: calc(14px + var(--safe-bot));
+  width: min(420px, calc(100vw - 28px));
+  margin: 0;
   min-height: 0;
   flex-shrink: 0;
+  z-index: 1300;
+  pointer-events: none;
 }
+
+#toasts { pointer-events: auto; }
 
 #toasts {
   display: flex;
@@ -1387,6 +1396,26 @@ body.ready #app { display: flex; }
   background: linear-gradient(90deg, var(--amber-btn), var(--amber-hover));
   border-radius: 2px;
   transition: width 0.3s var(--ease);
+}
+
+.prog-skip {
+  margin-top: 14px;
+  padding: 9px 14px;
+  min-height: 40px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--line);
+  background: var(--surface-2);
+  color: var(--text-2);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.12s var(--ease), color 0.12s var(--ease), border-color 0.12s var(--ease);
+}
+
+.prog-skip:hover {
+  background: var(--surface-3);
+  color: var(--text);
+  border-color: var(--line-2);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════════
