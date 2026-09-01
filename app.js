@@ -2382,70 +2382,1606 @@ DI.register('Ranker', function (Vec, Config) {
 
 // ─── NET/Nostr ─── START ────────────────────────────────────────────────────
 /**
- * nostr-tools@2.7.2 (запиннена), SimplePool, ключ localStorage hex
- * (известный компромисс B-04 — изолирован здесь), init/setKey/sign/
- * publish (первый принявший, таймаут 30с)/subscribe/ensureRelay/close.
+ * Транспорт: nostr-tools@2.7.2 (версия запиннена), SimplePool, ключи.
+ *
+ * КОНТРАКТ v1.0:
+ * - init() → Promise<pubkey>; идемпотентен; при ошибке CDN —
+ *   net:status failed + throw (вызывающий решает, жить ли без сети).
+ * - Секретный ключ: localStorage hex (известный компромисс B-04,
+ *   изолирован здесь; смена хранилища — точечная правка load/saveKey).
+ * - publish: параллельно на все релеи, успех = первый принявший,
+ *   полный отказ = все упали, таймаут 30с. После таймаута событие
+ *   МОЖЕТ уйти позднее — это безопасно: повторная публикация той же
+ *   заметки даёт новый created_at при том же noteVersion в payload,
+ *   зеркала сходятся (см. NetService/DB).
+ * - setKey: замена аккаунта (валидация 32 байта).
  */
 DI.register('Nostr', function (Config, bus, Logger) {
-  // TODO: реализация (как в v0.9.9)
+  const CDN = 'https://cdn.jsdelivr.net/npm/nostr-tools@2.7.2/+esm';
+  const SK_KEY = 'noomium:sk';
+
+  /** @type {Object|null} */
+  let nostr = null;
+  /** @type {Object|null} */
+  let pool = null;
+  /** @type {Uint8Array|null} */
+  let sk = null;
+  /** @type {string|null} */
+  let pk = null;
+  /** @type {Promise|null} */
+  let initPromise = null;
+
+  /**
+   * @returns {Uint8Array|null}
+   */
+  function loadKey() {
+    try {
+      const hex = localStorage.getItem(SK_KEY);
+      if (hex && /^[0-9a-f]{64}$/i.test(hex)) {
+        return new Uint8Array(hex.match(/.{1,2}/g).map(b => parseInt(b, 16)));
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  /**
+   * @param {Uint8Array} key
+   */
+  function saveKey(key) {
+    try {
+      localStorage.setItem(
+        SK_KEY,
+        Array.from(key).map(b => b.toString(16).padStart(2, '0')).join('')
+      );
+    } catch (e) {
+      Logger.warn('Nostr: ключ не сохранён (storage?)', String(e));
+    }
+  }
+
+  /**
+   * Инициализация: загрузка библиотеки, восстановление/генерация
+   * ключа, создание пула. Идемпотентна.
+   * @returns {Promise<string>} Публичный ключ.
+   */
+  function init() {
+    if (initPromise) return initPromise;
+
+    initPromise = import(CDN).then(mod => {
+      nostr = (typeof mod.generateSecretKey === 'function')
+        ? mod
+        : (mod.default && typeof mod.default.generateSecretKey === 'function' ? mod.default : mod);
+
+      if (typeof nostr.generateSecretKey !== 'function') {
+        throw new Error('nostr-tools: несовместимый модуль');
+      }
+
+      sk = loadKey();
+      if (!sk) {
+        sk = nostr.generateSecretKey();
+        saveKey(sk);
+      }
+
+      pk = nostr.getPublicKey(sk);
+      pool = new nostr.SimplePool();
+
+      Logger.info('Nostr: готов, pubkey ' + pk.slice(0, 8) + '…');
+      return pk;
+    }).catch(err => {
+      initPromise = null;
+      Logger.error('Nostr: не загрузить nostr-tools', String(err && err.message || err));
+      try { bus.emit('net:status', { status: 'failed' }); } catch (_) {}
+      throw err;
+    });
+
+    return initPromise;
+  }
+
+  /**
+   * @returns {Object|null}
+   */
+  function lib() {
+    return nostr;
+  }
+
+  /**
+   * @returns {Uint8Array|null}
+   */
+  function getSecretKey() {
+    return sk;
+  }
+
+  /**
+   * @param {Uint8Array} newSk
+   * @returns {string} Новый pubkey.
+   * @throws {Error}
+   */
+  function setKey(newSk) {
+    if (!nostr) throw new Error('Nostr not ready');
+    if (!(newSk instanceof Uint8Array) || newSk.length !== 32) {
+      throw new Error('invalid secret key');
+    }
+
+    sk = newSk;
+    pk = nostr.getPublicKey(sk);
+    saveKey(sk);
+    Logger.info('Nostr: ключ заменён, pubkey ' + pk.slice(0, 8) + '…');
+    return pk;
+  }
+
+  /**
+   * @param {Object} template
+   * @returns {Object} Подписанное событие.
+   * @throws {Error}
+   */
+  function sign(template) {
+    if (!nostr || !sk) throw new Error('Nostr not ready');
+    return nostr.finalizeEvent(template, sk);
+  }
+
+  /**
+   * Публикация на все релеи; успех при первом принявшем.
+   * @param {Object} template
+   * @returns {Promise<Object>} Подписанное событие.
+   */
+  function publish(template) {
+    let ev;
+    try {
+      ev = sign(template);
+    } catch (e) {
+      return Promise.reject(e);
+    }
+
+    if (!pool) return Promise.reject(new Error('Nostr not ready'));
+
+    const urls = relays();
+    if (!urls.length) return Promise.reject(new Error('no relays configured'));
+
+    const PUBLISH_TIMEOUT = 30000;
+
+    const publishPromise = new Promise((resolve, reject) => {
+      let settled = false;
+      let failures = 0;
+
+      urls.forEach(url => {
+        pool.ensureRelay(url)
+          .then(relay => relay.publish(ev))
+          .then(() => {
+            if (!settled) {
+              settled = true;
+              resolve(ev);
+            }
+          })
+          .catch(err => {
+            failures++;
+            Logger.warn('Nostr: релей ' + url + ' не принял', String(err && err.message || err));
+
+            if (!settled && failures === urls.length) {
+              settled = true;
+              reject(new Error('no relay accepted'));
+            }
+          });
+      });
+    });
+
+    const timeoutPromise = new Promise((_, reject) => {
+      setTimeout(() => reject(new Error('publish timeout')), PUBLISH_TIMEOUT);
+    });
+
+    return Promise.race([publishPromise, timeoutPromise]);
+  }
+
+  /**
+   * @param {Array<Object>} filters
+   * @param {Object} handlers - {onevent, onclose}
+   * @returns {Object|null}
+   */
+  function subscribe(filters, handlers) {
+    if (!pool) return null;
+    return pool.subscribeMany(relays(), filters, handlers);
+  }
+
+  /**
+   * @returns {Array<string>}
+   */
+  function relays() {
+    return Config.get('relays', []);
+  }
+
+  /**
+   * @returns {string|null}
+   */
+  function getPubkey() {
+    return pk;
+  }
+
+  /**
+   * @returns {boolean}
+   */
+  function isReady() {
+    return !!(nostr && sk && pool);
+  }
+
+  function close() {
+    if (pool && typeof pool.close === 'function') {
+      try { pool.close(relays()); } catch (_) {}
+    }
+  }
+
+  return {
+    init,
+    sign,
+    publish,
+    subscribe,
+    ensureRelay(url) {
+      if (!pool) return Promise.reject(new Error('Nostr not ready'));
+      return pool.ensureRelay(url);
+    },
+    getPubkey,
+    getSecretKey,
+    setKey,
+    lib,
+    isReady,
+    relays,
+    close,
+  };
 }, ['Config', 'EventBus', 'Logger']);
 // ─── NET/Nostr ─── END ──────────────────────────────────────────────────────
 
 // ─── NET/Vault ─── START ────────────────────────────────────────────────────
 /**
- * NIP-44 v2 self-ECDH: seal(plaintext) / open(ciphertext).
+ * Шифрование приватного канона: NIP-44 v2, self-ECDH
+ * (conversation key из своего sk и своего pk). Единственная точка
+ * криптографии payload. Потеря sk = потеря приватного канона
+ * (страховка — экспорт ncryptsec в Account).
  */
 DI.register('Vault', function (Nostr) {
-  // TODO: реализация (как в v0.9.9)
+  /**
+   * @returns {Promise<Object>}
+   * @throws {Error}
+   */
+  async function lib() {
+    await Nostr.init();
+    const n = Nostr.lib();
+    if (!n) throw new Error('nostr-tools not loaded');
+    return n;
+  }
+
+  /**
+   * @param {string} plaintext - JSON payload.
+   * @returns {Promise<string>} Шифртекст.
+   * @throws {Error}
+   */
+  async function seal(plaintext) {
+    const n = await lib();
+    const nip44 = n.nip44 && n.nip44.v2;
+    if (!nip44 || !nip44.utils || typeof nip44.encrypt !== 'function') {
+      throw new Error('NIP-44 unavailable');
+    }
+
+    const sk = Nostr.getSecretKey();
+    const pk = Nostr.getPubkey();
+    if (!sk || !pk) throw new Error('no secret key');
+
+    const conversationKey = nip44.utils.getConversationKey(sk, pk);
+    return nip44.encrypt(plaintext, conversationKey);
+  }
+
+  /**
+   * @param {string} ciphertext
+   * @returns {Promise<string>} Открытый JSON payload.
+   * @throws {Error}
+   */
+  async function open(ciphertext) {
+    const n = await lib();
+    const nip44 = n.nip44 && n.nip44.v2;
+    if (!nip44 || !nip44.utils || typeof nip44.decrypt !== 'function') {
+      throw new Error('NIP-44 unavailable');
+    }
+
+    const sk = Nostr.getSecretKey();
+    const pk = Nostr.getPubkey();
+    if (!sk || !pk) throw new Error('no secret key');
+
+    const conversationKey = nip44.utils.getConversationKey(sk, pk);
+    return nip44.decrypt(ciphertext, conversationKey);
+  }
+
+  return { seal, open };
 }, ['Nostr']);
 // ─── NET/Vault ─── END ──────────────────────────────────────────────────────
 
 // ─── NET/Crypto ─── START ───────────────────────────────────────────────────
 /**
- * classifyKeyInput / decodeSecret / NIP-49 encryptKey, decryptKey /
- * nsecEncode / npubEncode. null-возвраты + Logger.warn.
+ * Криптография аккаунта: форматы ключей (nsec/npub/ncryptsec/hex),
+ * NIP-49. Все ошибки — null-возврат + Logger.warn (кроме decodeSecret
+ * на hex/nsec — тихий null: битый ввод юзера — штатный случай).
  */
 DI.register('Crypto', function (Nostr, Logger) {
-  // TODO: реализация (как в v0.9.9)
+  /**
+   * @returns {Promise<Object>}
+   * @throws {Error}
+   */
+  async function lib() {
+    await Nostr.init();
+    const n = Nostr.lib();
+    if (!n) throw new Error('nostr-tools not loaded');
+    return n;
+  }
+
+  /**
+   * @returns {Promise<boolean>}
+   */
+  async function hasNip49() {
+    try {
+      const n = await lib();
+      return !!(n.nip49 && typeof n.nip49.encrypt === 'function' && typeof n.nip49.decrypt === 'function');
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /**
+   * @param {*} input
+   * @returns {'nsec'|'ncryptsec'|'hex'|null}
+   */
+  function classifyKeyInput(input) {
+    const t = String(input || '').trim();
+    if (t.startsWith('ncryptsec1')) return 'ncryptsec';
+    if (t.startsWith('nsec1')) return 'nsec';
+    if (/^[0-9a-fA-F]{64}$/.test(t)) return 'hex';
+    return null;
+  }
+
+  /**
+   * @param {*} input
+   * @returns {Promise<Uint8Array|null>}
+   */
+  async function decodeSecret(input) {
+    const t = String(input || '').trim();
+    if (!t) return null;
+
+    if (/^[0-9a-fA-F]{64}$/.test(t)) {
+      return new Uint8Array(t.match(/.{2}/g).map(b => parseInt(b, 16)));
+    }
+
+    try {
+      const n = await lib();
+      if (t.startsWith('nsec1') && n.nip19 && typeof n.nip19.decode === 'function') {
+        const dec = n.nip19.decode(t);
+        if (dec && dec.type === 'nsec' && dec.data instanceof Uint8Array && dec.data.length === 32) {
+          return dec.data;
+        }
+      }
+    } catch (_) {}
+
+    return null;
+  }
+
+  /**
+   * @param {Uint8Array} sk
+   * @param {string} password
+   * @returns {Promise<string|null>} ncryptsec.
+   */
+  async function encryptKey(sk, password) {
+    try {
+      const n = await lib();
+      if (!n.nip49 || typeof n.nip49.encrypt !== 'function') return null;
+      return n.nip49.encrypt(sk, String(password || ''));
+    } catch (e) {
+      Logger.warn('Crypto: encryptKey', String(e && e.message || e));
+      return null;
+    }
+  }
+
+  /**
+   * @param {string} ncryptsec
+   * @param {string} password
+   * @returns {Promise<Uint8Array|null>}
+   */
+  async function decryptKey(ncryptsec, password) {
+    try {
+      const n = await lib();
+      if (!n.nip49 || typeof n.nip49.decrypt !== 'function') return null;
+
+      const res = n.nip49.decrypt(String(ncryptsec || '').trim(), String(password || ''));
+
+      if (res instanceof Uint8Array) return res.length === 32 ? res : null;
+      if (res && res.secretKey instanceof Uint8Array && res.secretKey.length === 32) return res.secretKey;
+      if (res && res.data instanceof Uint8Array && res.data.length === 32) return res.data;
+
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /**
+   * @param {Uint8Array} sk
+   * @returns {Promise<string|null>}
+   */
+  async function encodeNsec(sk) {
+    try {
+      const n = await lib();
+      return n.nip19 ? n.nip19.nsecEncode(sk) : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /**
+   * @param {string} pk
+   * @returns {Promise<string|null>}
+   */
+  async function encodeNpub(pk) {
+    try {
+      const n = await lib();
+      return n.nip19 ? n.nip19.npubEncode(pk) : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  return {
+    hasNip49,
+    classifyKeyInput,
+    decodeSecret,
+    encryptKey,
+    decryptKey,
+    encodeNsec,
+    encodeNpub,
+  };
 }, ['Nostr', 'Logger']);
 // ─── NET/Crypto ─── END ─────────────────────────────────────────────────────
 
 // ─── NET/Protocol ─── START ─────────────────────────────────────────────────
 /**
- * Кодек. Payload v2 (сетевой формат НЕ меняем — релеи уже хранят события).
+ * Кодек событий: канон состояний (kind 30078, replaceable, d = uid)
+ * и служебные (запрос 21000, ответ-ссылка 21001).
  *
- * canonPrivate/canonPublic(note) — payload {v:2, visibility, text, vec,
- *   parent, noteVersion, ts}; tags [d, client, t].
- * canonDeleted(uid, version) — НОВОЕ v1.0: payload несёт noteVersion,
- *   на момент удаления (для LWW эхо-удаления на других устройствах).
- * decodeCanon(ev) → {uid, owner, version, noteVersion?, visibility,
- *   text?, vec?, parent?, ts, deleted?} | null. Валидация как в v0.9.9.
- * queryEvent/answerEvent/decodeQuery/decodeAnswer — без изменений.
+ * Payload v2: {v, visibility, text?, vec?, parent?, noteVersion, ts}.
+ *   noteVersion — истина заметки (счётчик владельца); created_at
+ *   канона — секунда публикации (свежесть, не истина).
+ *   ВСЕ каноны, включая удаление, несут noteVersion.
+ *
+ * ИЗМЕНЕНИЯ v1.0 против v0.9.9:
+ * - canonDeleted(uid, version) — сигнатура с noteVersion; эхо-удаление
+ *   на других устройствах решается LWW по payload-версии, а не по
+ *   секунде публикации (быстрое «создал → удалил» больше не теряется).
+ * - decodeCanon: возвращает noteVersion и deleted для всех веток,
+ *   где они есть в payload.
+ * - decodeQuery: жёсткий кап длины вектора (1024) и конечность
+ *   значений — анти-спам (векторы продукта 384-мерные).
  */
 DI.register('Protocol', function (Config, Vec, Vault, Nostr) {
-  // TODO: реализация
+  /** @type {number} */
+  const MAX_CONTENT = 65536;
+  /** @type {number} */
+  const MAX_QUERY_DIM = 1024;
+
+  /**
+   * @param {Array} tags
+   * @param {string} name
+   * @returns {Array|null}
+   */
+  function findTag(tags, name) {
+    if (!Array.isArray(tags)) return null;
+    for (const t of tags) {
+      if (Array.isArray(t) && t[0] === name) return t;
+    }
+    return null;
+  }
+
+  /**
+   * Свежая секунда публикации.
+   * @returns {number}
+   */
+  function nowSec() {
+    return Math.floor(Date.now() / 1000);
+  }
+
+  /**
+   * Канон приватной версии (NIP-44).
+   * @param {Object} note - {uid, text, vector, parent, version, updatedAt}
+   * @returns {Promise<Object>}
+   * @throws {Error}
+   */
+  async function canonPrivate(note) {
+    const payload = {
+      v: 2,
+      visibility: 'private',
+      text: note.text || '',
+      vec: note.vector ? Vec.toB64(note.vector) : null,
+      parent: note.parent || null,
+      noteVersion: note.version,
+      ts: note.updatedAt || note.version,
+    };
+
+    const content = await Vault.seal(JSON.stringify(payload));
+
+    return {
+      kind: Config.get('kCanon', 30078),
+      created_at: nowSec(),
+      tags: [
+        ['d', note.uid],
+        ['client', 'noomium'],
+        ['t', Config.get('room', 'noomium-main')],
+      ],
+      content,
+    };
+  }
+
+  /**
+   * Канон публичной версии (открытый JSON).
+   * @param {Object} note
+   * @returns {Promise<Object>}
+   */
+  async function canonPublic(note) {
+    const payload = {
+      v: 2,
+      visibility: 'public',
+      text: note.text || '',
+      vec: note.vector ? Vec.toB64(note.vector) : null,
+      parent: note.parent || null,
+      noteVersion: note.version,
+      ts: note.updatedAt || note.version,
+    };
+
+    return {
+      kind: Config.get('kCanon', 30078),
+      created_at: nowSec(),
+      tags: [
+        ['d', note.uid],
+        ['client', 'noomium'],
+        ['t', Config.get('room', 'noomium-main')],
+      ],
+      content: JSON.stringify(payload),
+    };
+  }
+
+  /**
+   * Канон удаления — открытый факт с noteVersion на момент удаления.
+   * @param {string} uid
+   * @param {number} version - noteVersion удаляемой заметки.
+   * @returns {Promise<Object>}
+   */
+  async function canonDeleted(uid, version) {
+    return {
+      kind: Config.get('kCanon', 30078),
+      created_at: nowSec(),
+      tags: [
+        ['d', uid],
+        ['client', 'noomium'],
+        ['t', Config.get('room', 'noomium-main')],
+      ],
+      content: JSON.stringify({
+        v: 2,
+        visibility: 'deleted',
+        noteVersion: typeof version === 'number' ? version : 0,
+        ts: Date.now(),
+      }),
+    };
+  }
+
+  /**
+   * Декодирование канона.
+   * @param {Object} ev - Nostr-событие kind 30078.
+   * @returns {Promise<Object|null>} Формат записи mirror:
+   *   {uid, owner, version (created_at), noteVersion?, visibility,
+   *    text?, vec?, parent?, ts, deleted?}
+   */
+  async function decodeCanon(ev) {
+    if (!ev || ev.kind !== Config.get('kCanon', 30078)) return null;
+
+    const dTag = findTag(ev.tags, 'd');
+    if (!dTag || typeof dTag[1] !== 'string' || !dTag[1]) return null;
+    if (typeof ev.content !== 'string' || !ev.content) return null;
+    if (ev.content.length > MAX_CONTENT) return null;
+    if (!ev.created_at) return null;
+
+    const uid = dTag[1];
+    const owner = ev.pubkey;
+    const version = ev.created_at;
+
+    let data = null;
+    try {
+      data = JSON.parse(ev.content);
+    } catch (_) {
+      data = null;
+    }
+
+    if (!data || typeof data !== 'object') {
+      // Не JSON: возможно, наш NIP-44-канон.
+      if (owner === Nostr.getPubkey()) {
+        try {
+          data = JSON.parse(await Vault.open(ev.content));
+        } catch (_) {
+          return null;
+        }
+      } else {
+        // Чужой приватный канон: факт существования, без контента.
+        return { uid, owner, version, visibility: 'private', ts: version * 1000 };
+      }
+    }
+
+    if (!data || typeof data !== 'object') return null;
+
+    const visibility = data.visibility === 'public' ? 'public'
+      : data.visibility === 'deleted' ? 'deleted'
+      : 'private';
+
+    if (visibility === 'private' && owner !== Nostr.getPubkey()) {
+      return { uid, owner, version, visibility: 'private', ts: version * 1000 };
+    }
+
+    const noteVersion = typeof data.noteVersion === 'number' && data.noteVersion > 0
+      ? data.noteVersion
+      : undefined;
+
+    if (visibility === 'deleted') {
+      return { uid, owner, version, noteVersion, visibility, deleted: true,
+               ts: typeof data.ts === 'number' && data.ts > 0 ? data.ts : version * 1000 };
+    }
+
+    if (typeof data.text !== 'string') return null;
+    if (data.text.length > Config.get('maxNoteTextLength', 10000)) return null;
+
+    let vec = null;
+    if (typeof data.vec === 'string') {
+      const v = Vec.fromB64(data.vec);
+      if (v) vec = Array.from(v);
+    }
+
+    let parent = null;
+    if (data.parent && typeof data.parent === 'object' && typeof data.parent.uid === 'string' && data.parent.uid) {
+      parent = { uid: data.parent.uid, owner: data.parent.owner || null };
+    }
+
+    const ts = typeof data.ts === 'number' && data.ts > 0 ? data.ts : (version * 1000);
+
+    return { uid, owner, version, noteVersion, visibility, text: data.text, vec, parent, ts };
+  }
+
+  /**
+   * Событие запроса (публичный вектор — известный компромисс,
+   * отложен по консенсусу).
+   * @param {Float32Array|Array<number>} vector
+   * @param {number} maxResponses
+   * @param {number} window
+   * @returns {Object}
+   */
+  function queryEvent(vector, maxResponses, window) {
+    return {
+      kind: Config.get('kQuery', 21000),
+      created_at: Math.floor(Date.now() / 1000),
+      tags: [['t', Config.get('room', 'noomium-main')]],
+      content: JSON.stringify({ vector: Array.from(vector), maxResponses, window }),
+    };
+  }
+
+  /**
+   * @param {Object} ev
+   * @returns {Object|null}
+   */
+  function decodeQuery(ev) {
+    if (!ev || ev.kind !== Config.get('kQuery', 21000)) return null;
+
+    let data;
+    try {
+      data = JSON.parse(ev.content);
+    } catch (_) {
+      return null;
+    }
+
+    if (!data || !Array.isArray(data.vector) || !data.vector.length) return null;
+    if (data.vector.length > MAX_QUERY_DIM) return null;
+
+    for (const x of data.vector) {
+      if (typeof x !== 'number' || !isFinite(x)) return null;
+    }
+
+    return {
+      vector: data.vector,
+      maxResponses: typeof data.maxResponses === 'number' ? data.maxResponses : Config.get('maxResponses', 8),
+      window: typeof data.window === 'number' ? data.window : Config.get('responseWindow', 6000),
+      owner: ev.pubkey,
+      queryId: ev.id,
+    };
+  }
+
+  /**
+   * Ответ-ссылка: (uid) владельца заметки, не копия контента.
+   * @param {Object} note
+   * @param {number} score
+   * @param {string} queryId
+   * @returns {Object}
+   */
+  function answerEvent(note, score, queryId) {
+    return {
+      kind: Config.get('kAnswer', 21001),
+      created_at: Math.floor(Date.now() / 1000),
+      tags: [
+        ['t', Config.get('room', 'noomium-main')],
+        ['e', queryId],
+        ['uid', note.uid],
+      ],
+      content: JSON.stringify({ score }),
+    };
+  }
+
+  /**
+   * @param {Object} ev
+   * @returns {Object|null}
+   */
+  function decodeAnswer(ev) {
+    if (!ev || ev.kind !== Config.get('kAnswer', 21001)) return null;
+
+    const eTag = findTag(ev.tags, 'e');
+    const uidTag = findTag(ev.tags, 'uid');
+    if (!eTag || !uidTag || !uidTag[1]) return null;
+
+    let data = null;
+    try {
+      data = JSON.parse(ev.content);
+    } catch (_) {}
+
+    return {
+      queryId: eTag[1],
+      uid: uidTag[1],
+      owner: ev.pubkey,
+      score: data && typeof data.score === 'number' ? data.score : 0,
+    };
+  }
+
+  return {
+    canonPrivate,
+    canonPublic,
+    canonDeleted,
+    decodeCanon,
+    queryEvent,
+    decodeQuery,
+    answerEvent,
+    decodeAnswer,
+  };
 }, ['Config', 'Vec', 'Vault', 'Nostr']);
 // ─── NET/Protocol ─── END ───────────────────────────────────────────────────
 
 // ─── NET/NetService ─── START ───────────────────────────────────────────────
 /**
- * Движение: подписка на комнату (каноны без since; query/answer окном),
- * подписка на себя, очередь публикаций, ответы-ссылки, история, heartbeat.
+ * Движение: подписка на комнату (каноны — без since: replaceable
+ * отдаёт последнюю версию каждого канона; запросы/ответы — скользящим
+ * окном), подписка на себя, публикация канонов через очередь,
+ * ответы-ссылки на чужие запросы, запросы при контексте, история.
  *
- * ИЗМЕНЕНИЯ v1.0:
- * - Очередь localStorage {uids:[{uid,version}], deleted:[{uid,version}]}.
- *   flushQueue публикует только если note.version > publishedVersion;
- *   после успеха — DB.updatePublishState(uid, version) (тихо).
- *   Стартовая переочередка: только неопубликованные заметки (НЕ все).
- * - sync:status эмитит полный цикл: 'active' при начале flush/подписки,
- *   'idle' при покое, 'off' при выключенном синке. (M-06)
- * - publishWipeAll() → Promise<{published:number, offline:boolean}>.
- *   Офлайн: {published:0, offline:true} — вызывающий честно тостит. (H-04)
- * - deleted-каноны публикуются с version на момент удаления (см. Protocol).
- * - В остальном (эпохи, бэкофф, окна, центроиды, rate-limits) — как v0.9.9.
+ * ИЗМЕНЕНИЯ v1.0 против v0.9.9:
+ * 1. Очередь хранит версии: {uids: [{uid, version}], deleted:
+ *    [{uid, version}]}. flushQueue публикует живой канон только при
+ *    note.version > publishedVersion; после успеха — тихая запись
+ *    DB.updatePublishState. Стартовая переочередка — только
+ *    неопубликованные заметки (не все, как было).
+ * 2. sync:status — полный цикл: 'active' при публикации, 'idle' при
+ *    покое (синк включён, очередь пуста), 'off' при выключенном.
+ * 3. publishWipeAll() → Promise<{published, offline}>: офлайн честно
+ *    сообщается вызывающему (Boot тостит предупреждение).
+ * 4. canonDeleted публикуется с noteVersion на момент удаления —
+ *    эхо-удаление на других устройствах сходится по payload-версии.
+ * Остальное — поведение v0.9.9 без изменений (эпохи, бэкофф, окна,
+ * центроиды, rate-limits, heartbeat, seen-дедуп).
  */
 DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Config, Logger, bus) {
-  // TODO: реализация
+  let started = false;
+  let startPromise = null;
+  let subscription = null;
+  let selfSubscription = null;
+  let fetchSubscription = null;
+  let hbTimer = null;
+  let lastQueryVec = null;
+  let lastQueryTime = 0;
+  let centroids = [];
+  let contextUnsub = null;
+  let flushing = false;
+  let flushTimer = null;
+  let startRetryTimer = null;
+  let onlineListenerAdded = false;
+  let reconnectAttempts = 0;
+  let busUnsubs = [];
+
+  /** @type {Set<string>} */
+  const seen = new Set();
+  /** @type {Map<string, number>} */
+  const peerQueryTimes = new Map();
+
+  let currentWindow = Config.get('subWindow', 300);
+  let historyLoading = false;
+  let subEpoch = 0;
+
+  const QUEUE_KEY = 'noomium:queue';
+
+  /**
+   * Очередь: {uids: [{uid, version}], deleted: [{uid, version}]}.
+   * version для deleted — версия на момент удаления (заметки в DB
+   * уже нет, версия живёт только здесь). Для uids версия — справочная;
+   * flush читает актуальную из заметки.
+   * @returns {{uids: Array<{uid: string, version: number}>,
+   *   deleted: Array<{uid: string, version: number}>}}
+   */
+  function loadQueue() {
+    try {
+      const raw = localStorage.getItem(QUEUE_KEY);
+      if (raw) {
+        const q = JSON.parse(raw);
+        const norm = arr => (Array.isArray(arr) ? arr : [])
+          .filter(x => x && typeof x.uid === 'string' && x.uid)
+          .map(x => ({ uid: x.uid, version: typeof x.version === 'number' ? x.version : 0 }));
+        return { uids: norm(q.uids), deleted: norm(q.deleted) };
+      }
+    } catch (_) {}
+    return { uids: [], deleted: [] };
+  }
+
+  /**
+   * Сохранение очереди.
+   */
+  function saveQueue() {
+    try {
+      localStorage.setItem(QUEUE_KEY, JSON.stringify(queue));
+    } catch (e) {
+      Logger.warn('NetService: очередь не сохранена', String(e && e.message || e));
+    }
+  }
+
+  let queue = loadQueue();
+
+  const kCanon = () => Config.get('kCanon', 30078);
+  const kQuery = () => Config.get('kQuery', 21000);
+  const kAnswer = () => Config.get('kAnswer', 21001);
+  const room = () => Config.get('room', 'noomium-main');
+
+  /**
+   * @param {string} s
+   */
+  function setStatus(s) {
+    try { bus.emit('net:status', { status: s }); } catch (_) {}
+  }
+
+  /**
+   * @param {'off'|'active'|'idle'} phase
+   */
+  function emitSync(phase) {
+    try { bus.emit('sync:status', { phase }); } catch (_) {}
+  }
+
+  /**
+   * @returns {boolean}
+   */
+  function isOffline() {
+    return typeof navigator !== 'undefined' && navigator.onLine === false;
+  }
+
+  /**
+   * @returns {boolean}
+   */
+  function canPublish() {
+    return Nostr.isReady() && !isOffline();
+  }
+
+  /**
+   * Удаление из очереди по uid.
+   * @param {'uids'|'deleted'} list
+   * @param {string} uid
+   */
+  function removeFromQueue(list, uid) {
+    const i = queue[list].findIndex(x => x.uid === uid);
+    if (i > -1) {
+      queue[list].splice(i, 1);
+      saveQueue();
+    }
+  }
+
+  /**
+   * @param {string} uid
+   * @param {number} [version]
+   */
+  function queuePublish(uid, version) {
+    if (!uid) return;
+    const v = typeof version === 'number' ? version : 0;
+    const i = queue.uids.findIndex(x => x.uid === uid);
+    if (i > -1) queue.uids[i] = { uid, version: v };
+    else queue.uids.push({ uid, version: v });
+    saveQueue();
+    scheduleFlush();
+  }
+
+  /**
+   * @param {string} uid
+   * @param {number} [version]
+   */
+  function queueDeleted(uid, version) {
+    if (!uid) return;
+
+    removeFromQueue('uids', uid);
+
+    const v = typeof version === 'number' ? version : 0;
+    const i = queue.deleted.findIndex(x => x.uid === uid);
+    if (i > -1) queue.deleted[i] = { uid, version: v };
+    else queue.deleted.push({ uid, version: v });
+    saveQueue();
+    scheduleFlush();
+  }
+
+  /**
+   * @param {number} [delay]
+   */
+  function scheduleFlush(delay) {
+    if (flushTimer) return;
+
+    flushTimer = setTimeout(() => {
+      flushTimer = null;
+      flushQueue();
+    }, delay || 5000);
+  }
+
+  /**
+   * Сброс очереди: каноны живых (только непубликованные версии),
+   * затем deleted. После успеха — тихая запись publishedVersion.
+   * @returns {Promise<void>}
+   */
+  async function flushQueue() {
+    if (flushing) return;
+    if (!canPublish()) return;
+    if (!queue.uids.length && !queue.deleted.length) return;
+
+    flushing = true;
+    const syncing = Config.get('syncEnabled', true);
+
+    try {
+      if (syncing) {
+        emitSync('active');
+
+        for (const item of queue.uids.slice()) {
+          const note = await DB.getNote(item.uid).catch(() => null);
+          if (!note) {
+            removeFromQueue('uids', item.uid);
+            continue;
+          }
+
+          // Уже опубликовано этой или более новой версией — не дублируем.
+          if (typeof note.version === 'number'
+              && note.version <= (note.publishedVersion || 0)) {
+            removeFromQueue('uids', item.uid);
+            continue;
+          }
+
+          try {
+            const tpl = note.visibility === 'public'
+              ? await Protocol.canonPublic(note)
+              : await Protocol.canonPrivate(note);
+            await Nostr.publish(tpl);
+            await DB.updatePublishState(item.uid, note.version);
+            removeFromQueue('uids', item.uid);
+          } catch (_) {
+            // Релей не принял — останется в очереди, ретрай ниже.
+          }
+        }
+
+        for (const item of queue.deleted.slice()) {
+          try {
+            const tpl = await Protocol.canonDeleted(item.uid, item.version || 0);
+            await Nostr.publish(tpl);
+            removeFromQueue('deleted', item.uid);
+          } catch (_) {}
+        }
+      }
+    } catch (_) {} finally {
+      flushing = false;
+
+      const hasLeft = queue.uids.length || queue.deleted.length;
+      if (syncing) {
+        emitSync(hasLeft ? 'active' : 'idle');
+        if (hasLeft) scheduleFlush(10000);
+      }
+    }
+  }
+
+  /**
+   * Перестройка центроидов (prefilter для чужих запросов).
+   */
+  function rebuildCentroids() {
+    DB.allNotes().then(notes => {
+      const vecs = notes.filter(n => n.visibility === 'public' && n.vector).map(n => n.vector);
+      if (!vecs.length) {
+        centroids = [];
+        return;
+      }
+
+      centroids = Vec.kmeans(
+        vecs,
+        Math.min(Config.get('centroidCount', 12), vecs.length),
+        8
+      );
+    }).catch(() => {});
+  }
+
+  /**
+   * @param {Float32Array|Array<number>} queryVector
+   * @returns {boolean}
+   */
+  function passesPrefilter(queryVector) {
+    if (!centroids.length) return true;
+
+    const floor = Config.get('threshold', 0.81) - 0.20;
+    for (const c of centroids) {
+      if (Vec.cosine(queryVector, c) >= floor) return true;
+    }
+
+    return false;
+  }
+
+  /**
+   * @param {boolean} hard
+   */
+  function markConnected(hard) {
+    if (!started) return;
+
+    if (hard) {
+      reconnectAttempts = 0;
+    }
+
+    setStatus('connected');
+    flushQueue();
+  }
+
+  /**
+   * @param {Object} ev
+   */
+  function onEvent(ev) {
+    if (!ev) return;
+
+    markConnected(true);
+
+    if (seen.has(ev.id)) return;
+
+    if (ev.kind === kCanon()) {
+      seen.add(ev.id);
+      trimSeen();
+      try { bus.emit('net:canon', ev); } catch (_) {}
+      return;
+    }
+
+    if (ev.kind === kQuery()) {
+      seen.add(ev.id);
+      trimSeen();
+      handleIncomingQuery(ev);
+      return;
+    }
+
+    if (ev.kind === kAnswer()) {
+      seen.add(ev.id);
+      trimSeen();
+      try { bus.emit('net:answer', Protocol.decodeAnswer(ev)); } catch (_) {}
+      return;
+    }
+  }
+
+  /**
+   * Обрезка seen до половины лимита.
+   */
+  function trimSeen() {
+    const max = Config.get('seenMaxSize', 1000);
+    if (seen.size <= max) return;
+
+    const arr = Array.from(seen);
+    seen.clear();
+
+    for (let i = arr.length - Math.floor(max / 2); i < arr.length; i++) {
+      seen.add(arr[i]);
+    }
+  }
+
+  /**
+   * Чужой запрос: rate-limit → prefilter → топ-ответы-ссылки.
+   * @param {Object} ev
+   */
+  function handleIncomingQuery(ev) {
+    const q = Protocol.decodeQuery(ev);
+    if (!q) return;
+
+    if (q.owner === Nostr.getPubkey()) return;
+
+    const now = Date.now();
+    const last = peerQueryTimes.get(q.owner) || 0;
+
+    if (now - last < Config.get('queryRateLimit', 3000)) return;
+
+    peerQueryTimes.set(q.owner, now);
+
+    if (!passesPrefilter(q.vector)) return;
+
+    DB.allNotes().then(notes => {
+      const candidates = notes.filter(n => n.visibility === 'public' && n.vector);
+      if (!candidates.length) return null;
+
+      const byId = new Map(candidates.map(n => [n.uid, n]));
+      const items = candidates.map(n => ({ id: n.uid, vector: n.vector }));
+
+      return Ranker.cosineBatch(q.vector, items).then(scored => {
+        const top = scored
+          .filter(s => s.score >= Config.get('threshold', 0.81))
+          .slice(0, q.maxResponses || Config.get('maxResponses', 8));
+
+        top.forEach((s, i) => {
+          const note = byId.get(s.id);
+          if (!note) return;
+
+          setTimeout(() => {
+            Nostr.publish(Protocol.answerEvent(note, s.score, q.queryId))
+              .catch(e => Logger.warn('NetService: не отправить ответ', String(e && e.message || e)));
+          }, i * 250);
+        });
+      });
+    }).catch(e => Logger.warn('NetService: ошибка обработки запроса', String(e && e.message || e)));
+  }
+
+  /**
+   * Отправка запроса при изменении контекста (pin/drift).
+   */
+  function maybeSendQuery() {
+    const ctx = Store.get('context');
+
+    if ((ctx.source !== 'pin' && ctx.source !== 'drift') || !ctx.vector) {
+      lastQueryVec = null;
+      return;
+    }
+
+    if (!canPublish()) {
+      lastQueryVec = null;
+      return;
+    }
+
+    const now = Date.now();
+    if (now - lastQueryTime < Config.get('queryRateLimit', 3000)) return;
+
+    if (lastQueryVec && Ranker.isSimilar(lastQueryVec, ctx.vector)) return;
+
+    lastQueryVec = ctx.vector;
+    lastQueryTime = now;
+
+    const tpl = Protocol.queryEvent(
+      ctx.vector,
+      Config.get('maxResponses', 8),
+      Config.get('responseWindow', 6000)
+    );
+
+    Nostr.publish(tpl)
+      .then(ev => {
+        Logger.info('NetService: запрос ' + ev.id.slice(0, 8) + '…');
+      })
+      .catch(e => {
+        lastQueryVec = null;
+        lastQueryTime = 0;
+        Logger.warn('NetService: не отправить запрос', String(e && e.message || e));
+      });
+  }
+
+  /**
+   * Подписка на комнату: каноны без since (replaceable-семантика:
+   * релей хранит последнюю версию каждого канона по d-tag); запросы
+   * и ответы — со скользящим окном.
+   */
+  function subscribeToRoom() {
+    const filters = [
+      { kinds: [kCanon()], '#t': [room()] },
+      { kinds: [kQuery(), kAnswer()], '#t': [room()], since: Math.floor(Date.now() / 1000) - currentWindow },
+    ];
+
+    const myEpoch = ++subEpoch;
+
+    if (subscription && typeof subscription.close === 'function') {
+      try { subscription.close(); } catch (_) {}
+    }
+
+    subscription = Nostr.subscribe(filters, {
+      onevent: onEvent,
+      onclose: () => {
+        if (myEpoch !== subEpoch) return;
+
+        setStatus('reconnecting');
+
+        const maxAttempts = Config.get('reconnectMaxAttempts', 10);
+        const baseDelay = Config.get('reconnectBaseDelay', 1000);
+        const maxDelay = Config.get('reconnectMaxDelay', 60000);
+
+        reconnectAttempts++;
+
+        if (reconnectAttempts > maxAttempts) {
+          Logger.warn('NetService: ' + maxAttempts + ' неудачных подключений');
+          setStatus('failed');
+          return;
+        }
+
+        const delay = Math.min(baseDelay * Math.pow(2, reconnectAttempts - 1), maxDelay);
+        const jitter = delay * 0.25 * Math.random();
+
+        setTimeout(() => {
+          if (started && myEpoch === subEpoch && !isOffline()) {
+            subscribeToRoom();
+          }
+        }, delay + jitter);
+      },
+    });
+
+    if (subscription) {
+      setStatus('connecting');
+
+      setTimeout(() => {
+        if (myEpoch === subEpoch && started && !isOffline()) {
+          markConnected(false);
+        }
+      }, 5000);
+    }
+  }
+
+  /**
+   * Подписка на свои каноны (синк устройств).
+   */
+  function subscribeSelf() {
+    const pk = Nostr.getPubkey();
+    if (!pk) return;
+
+    if (selfSubscription && typeof selfSubscription.close === 'function') {
+      try { selfSubscription.close(); } catch (_) {}
+    }
+
+    selfSubscription = Nostr.subscribe(
+      [{ authors: [pk], kinds: [kCanon()] }],
+      {
+        onevent: ev => {
+          if (!ev || !ev.id) return;
+          try { bus.emit('net:canon', ev); } catch (_) {}
+        },
+        onclose: () => {
+          setTimeout(() => {
+            if (started && Config.get('syncEnabled', true)) subscribeSelf();
+          }, 5000);
+        },
+      }
+    );
+  }
+
+  /**
+   * Подтяжка цели по ответу-ссылке.
+   * @param {Object} p - {uid, owner}
+   */
+  function handleMirrorFetch(p) {
+    if (!p || !p.uid || !p.owner) return;
+    if (!Nostr.isReady()) return;
+
+    if (fetchSubscription && typeof fetchSubscription.close === 'function') {
+      try { fetchSubscription.close(); } catch (_) {}
+    }
+
+    fetchSubscription = Nostr.subscribe(
+      [{ authors: [p.owner], kinds: [kCanon()], '#d': [p.uid] }],
+      {
+        onevent: ev => {
+          if (!ev || !ev.id) return;
+          try { bus.emit('net:canon', ev); } catch (_) {}
+          if (fetchSubscription && typeof fetchSubscription.close === 'function') {
+            try { fetchSubscription.close(); } catch (_) {}
+            fetchSubscription = null;
+          }
+        },
+        onclose: () => {
+          setTimeout(() => {
+            if (fetchSubscription) {
+              try { fetchSubscription.close(); } catch (_) {}
+              fetchSubscription = null;
+            }
+          }, 10000);
+        },
+      }
+    );
+  }
+
+  /**
+   * Слушатели online/offline.
+   */
+  function ensureOnlineListener() {
+    if (onlineListenerAdded) return;
+    onlineListenerAdded = true;
+
+    window.addEventListener('online', () => {
+      if (!started) {
+        start();
+        return;
+      }
+
+      if (!isOffline()) {
+        if (!subscription) subscribeToRoom();
+        if (!selfSubscription) subscribeSelf();
+      }
+
+      flushQueue();
+    });
+
+    window.addEventListener('offline', () => {
+      if (!started) return;
+
+      setStatus('failed');
+
+      subEpoch++;
+
+      if (subscription && typeof subscription.close === 'function') {
+        try { subscription.close(); } catch (_) {}
+      }
+      subscription = null;
+    });
+  }
+
+  /**
+   * Heartbeat: чистка peerQueryTimes + seen.
+   */
+  function startHeartbeat() {
+    if (hbTimer) clearInterval(hbTimer);
+
+    hbTimer = setInterval(() => {
+      const now = Date.now();
+
+      peerQueryTimes.forEach((ts, pk) => {
+        if (now - ts > Config.get('peerTTL', 60000)) peerQueryTimes.delete(pk);
+      });
+
+      trimSeen();
+    }, Config.get('heartbeat', 30000));
+  }
+
+  /**
+   * Расширение окна истории (для запросов/ответов).
+   */
+  function loadHistory() {
+    if (!started || historyLoading) return;
+
+    const maxWindow = Config.get('historyMaxWindow', 2592000);
+    if (currentWindow >= maxWindow) {
+      emitHistoryDone(false);
+      return;
+    }
+
+    historyLoading = true;
+    emitHistoryDone(true);
+
+    currentWindow = Math.min(maxWindow, Math.max(currentWindow * 4, 86400));
+
+    try {
+      subscribeToRoom();
+      Logger.info('NetService: окно истории → ' + currentWindow + 's');
+    } finally {
+      setTimeout(() => {
+        historyLoading = false;
+        emitHistoryDone(false);
+      }, 1200);
+    }
+  }
+
+  /**
+   * @param {boolean} loading
+   */
+  function emitHistoryDone(loading) {
+    try { bus.emit('net:history', { loading: loading, window: currentWindow }); } catch (_) {}
+  }
+
+  /**
+   * Старт. Идемпотентен; при падении — retry 10с.
+   * @returns {Promise<void>}
+   */
+  function start() {
+    if (started) return Promise.resolve();
+    if (startPromise) return startPromise;
+
+    ensureOnlineListener();
+
+    startPromise = Nostr.init()
+      .then(() => DB.ready())
+      .then(() => {
+        const Notes = DI.resolve('Notes');
+        return Notes.init();
+      })
+      .then(() => {
+        started = true;
+        reconnectAttempts = 0;
+
+        busUnsubs.forEach(u => {
+          try { u(); } catch (_) {}
+        });
+        busUnsubs = [];
+
+        busUnsubs.push(bus.on('note:created', note => {
+          if (note && note.uid) queuePublish(note.uid, note.version);
+        }));
+
+        busUnsubs.push(bus.on('note:updated', note => {
+          if (note && note.uid) queuePublish(note.uid, note.version);
+        }));
+
+        busUnsubs.push(bus.on('note:deleted', p => {
+          if (p && p.uid) queueDeleted(p.uid, p.version);
+        }));
+
+        busUnsubs.push(bus.on('db:change', () => rebuildCentroids()));
+
+        busUnsubs.push(bus.on('account:changed', () => {
+          queue = { uids: [], deleted: [] };
+          saveQueue();
+          seen.clear();
+          peerQueryTimes.clear();
+        }));
+
+        busUnsubs.push(bus.on('sync:toggle', p => {
+          if (!p) return;
+          if (p.enabled) {
+            subscribeSelf();
+            flushQueue();
+          } else {
+            if (selfSubscription && typeof selfSubscription.close === 'function') {
+              try { selfSubscription.close(); } catch (_) {}
+            }
+            selfSubscription = null;
+            emitSync('off');
+          }
+        }));
+
+        busUnsubs.push(bus.on('mirror:fetch', handleMirrorFetch));
+
+        contextUnsub = Store.subscribe(s => s.context, () => maybeSendQuery());
+
+        startHeartbeat();
+        rebuildCentroids();
+
+        // Стартовая переочередка: только неопубликованные версии
+        // (publishedVersion отсутствует/меньше version — включая
+        // первое знакомство после v0.9).
+        DB.allNotes().then(notes => {
+          notes.forEach(n => {
+            if (n && n.uid
+                && typeof n.version === 'number'
+                && n.version > (n.publishedVersion || 0)) {
+              queuePublish(n.uid, n.version);
+            }
+          });
+          flushQueue();
+        }).catch(() => {});
+
+        if (isOffline()) {
+          setStatus('failed');
+          Logger.warn('NetService: офлайн, ожидаем появление сети');
+        } else {
+          subscribeToRoom();
+        }
+
+        subscribeSelf();
+
+        Logger.info('NetService: запущен, комната #' + room());
+      }).catch(e => {
+        Logger.error('NetService: не стартовать', String(e && e.message || e));
+        setStatus('failed');
+
+        if (startRetryTimer) clearTimeout(startRetryTimer);
+        startRetryTimer = setTimeout(() => {
+          if (!started) start();
+        }, 10000);
+      }).finally(() => {
+        startPromise = null;
+      });
+
+    return startPromise;
+  }
+
+  /**
+   * Полное переподключение.
+   */
+  function resync() {
+    if (!Nostr.isReady()) {
+      start();
+      return;
+    }
+
+    reconnectAttempts = 0;
+
+    if (!isOffline()) {
+      subscribeToRoom();
+      if (Config.get('syncEnabled', true)) subscribeSelf();
+    }
+
+    try { bus.emit('net:resync'); } catch (_) {}
+
+    flushQueue();
+  }
+
+  /**
+   * @param {boolean} full
+   */
+  function stop(full) {
+    started = false;
+
+    if (subscription && typeof subscription.close === 'function') {
+      try { subscription.close(); } catch (_) {}
+    }
+    subscription = null;
+
+    if (selfSubscription && typeof selfSubscription.close === 'function') {
+      try { selfSubscription.close(); } catch (_) {}
+    }
+    selfSubscription = null;
+
+    if (fetchSubscription && typeof fetchSubscription.close === 'function') {
+      try { fetchSubscription.close(); } catch (_) {}
+    }
+    fetchSubscription = null;
+
+    if (hbTimer) {
+      clearInterval(hbTimer);
+      hbTimer = null;
+    }
+
+    if (contextUnsub) {
+      try { contextUnsub(); } catch (_) {}
+      contextUnsub = null;
+    }
+
+    busUnsubs.forEach(u => {
+      try { u(); } catch (_) {}
+    });
+    busUnsubs = [];
+
+    if (flushTimer) {
+      clearTimeout(flushTimer);
+      flushTimer = null;
+    }
+
+    if (startRetryTimer) {
+      clearTimeout(startRetryTimer);
+      startRetryTimer = null;
+    }
+
+    lastQueryVec = null;
+    lastQueryTime = 0;
+    reconnectAttempts = 0;
+
+    if (full) {
+      seen.clear();
+      peerQueryTimes.clear();
+    }
+
+    setStatus('disconnected');
+  }
+
+  /**
+   * Публичный wipe: каноны deleted для всех своих заметок.
+   * @returns {Promise<{published: number, offline: boolean}>}
+   */
+  async function publishWipeAll() {
+    if (!canPublish()) {
+      return { published: 0, offline: true };
+    }
+
+    let published = 0;
+
+    try {
+      const notes = await DB.allNotes();
+
+      for (const n of notes) {
+        if (!n || !n.uid) continue;
+        try {
+          const tpl = await Protocol.canonDeleted(n.uid, n.version || 0);
+          await Nostr.publish(tpl);
+          published++;
+        } catch (_) {}
+      }
+    } catch (_) {}
+
+    return { published, offline: false };
+  }
+
+  return { start, stop, resync, loadHistory, publishWipeAll };
 }, ['Nostr', 'Protocol', 'DB', 'Ranker', 'Vec', 'Store', 'Config', 'Logger', 'EventBus']);
 // ─── NET/NetService ─── END ─────────────────────────────────────────────────
 
@@ -2453,63 +3989,798 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
 
 // ─── DOMAIN/Notes ─── START ─────────────────────────────────────────────────
 /**
- * Переходы состояний своих заметок. Модель записи:
- *   { uid, text, vector: Array|null, visibility, parent, version,
- *     publishedVersion, createdAt, updatedAt }
+ * Переходы состояний своих заметок. Единственная точка записи в notes.
+ * Каждая мутация = новая version + note:* на шину; публикацию дергает
+ * NetService через шину.
  *
- * ИЗМЕНЕНИЯ v1.0 (контракты):
- * - create(text, visibility, parent) → Promise<note>;
- *   REJECT'ит при ошибке БД (Закон 2). vector = null — легально
- *   (модель не готова): заметка сохраняется, backfill догонит.
- * - edit(uid, text) → Promise<note>; REJECT'ит; НЕ затирает вектор
- *   null'ом — если новый вектор недоступен, остаётся старый.
- * - remove(uid) → Promise<note> (удалённая); emit note:deleted {uid, version}.
- * - toggle(uid) → Promise<note>.
- * - init(): восстановление versionCounter; подписка notes:imported.
- * - backfill() — НОВОЕ v1.0: все заметки с vector===null → embed →
- *   putNote с новым version (emit note:updated). Вызывается из BOOT
- *   по ai:ready. Тихо пропускает заметки, чей embed снова null.
+ * Запись (модель v1.0):
+ *   {uid, text, vector: Array|null, visibility, parent, version,
+ *    publishedVersion, createdAt, updatedAt}
+ *
+ * КОНТРАКТ v1.0:
+ * - create/edit/remove/toggle REJECT'ят при ошибке (Закон 2): UI обязан
+ *   обработать reject — текст пользователя неприкосновенен.
+ * - vector = null легален (модель не готова): заметка сохраняется,
+ *   backfill() доэмбеддит после ai:ready.
+ * - КОНТРАКТ УТОЧНЁН (вместо «сохранять старый вектор»): edit и
+ *   applyOwnCanonical при недоступном эмбеддинге пишут vector = null.
+ *   Старый вектор соответствовал бы СТАРОМУ тексту — поиск по нему
+ *   возвращал бы ложные совпадения. null = «ещё не искается», backfill
+ *   лечит. Это та же логика, что у create (B-01: вектор без текста
+ *   не персистим никогда).
+ * - applyOwnCanonical/restoreFromCanonical ставят publishedVersion =
+ *   версии из сети (канон, пришедший с релея, по определению
+ *   опубликован) — замкнутый цикл «эхо → републикация» исключён.
  */
 DI.register('Notes', function (DB, Embedder, bus, Logger, Utils) {
-  // TODO: реализация
+  /** @type {number} */
+  let versionCounter = 0;
+
+  /**
+   * @param {string} event
+   * @param {*} payload
+   */
+  function emit(event, payload) {
+    try { bus.emit(event, payload); } catch (_) {}
+  }
+
+  /**
+   * Восстановление монотонности + подписка на notes:imported.
+   * @returns {Promise<void>}
+   */
+  async function init() {
+    try {
+      const notes = await DB.allNotes();
+      for (const n of notes) {
+        if (n && typeof n.version === 'number' && n.version > versionCounter) {
+          versionCounter = n.version;
+        }
+      }
+    } catch (_) {}
+
+    const now = Math.floor(Date.now() / 1000);
+    if (versionCounter < now) versionCounter = now;
+
+    bus.on('notes:imported', p => {
+      if (p && typeof p.maxVersion === 'number' && p.maxVersion > versionCounter) {
+        versionCounter = p.maxVersion;
+      }
+    });
+  }
+
+  /**
+   * @returns {number}
+   */
+  function nextVersion() {
+    const t = Math.floor(Date.now() / 1000);
+    if (t <= versionCounter) versionCounter = versionCounter + 1;
+    else versionCounter = t;
+    return versionCounter;
+  }
+
+  /**
+   * @param {string} text
+   * @param {string} visibility
+   * @param {Object|null} [parent] - {uid, owner}
+   * @returns {Promise<Object>} Созданная заметка.
+   * @throws {Error} 'empty' | 'db' | причина ошибки
+   */
+  async function create(text, visibility, parent) {
+    const t = (text || '').trim();
+    if (!t) throw new Error('empty');
+
+    // null при неготовой модели — легально, backfill догонит.
+    const vector = await Embedder.embed(t);
+
+    const now = Date.now();
+    const note = {
+      uid: Utils.uid('n'),
+      text: t,
+      vector: vector ? Array.from(vector) : null,
+      visibility: visibility === 'public' ? 'public' : 'private',
+      parent: parent && parent.uid ? { uid: parent.uid, owner: parent.owner || null } : null,
+      version: nextVersion(),
+      publishedVersion: 0,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    try {
+      await DB.putNote(note);
+    } catch (e) {
+      Logger.error('Notes: create — не записать', String(e && e.message || e));
+      throw e;
+    }
+
+    emit('note:created', note);
+    return note;
+  }
+
+  /**
+   * @param {string} uid
+   * @param {string} newText
+   * @returns {Promise<Object>}
+   * @throws {Error} 'empty' | 'not found' | причина ошибки
+   */
+  async function edit(uid, newText) {
+    const t = (newText || '').trim();
+    if (!t) throw new Error('empty');
+
+    const note = await DB.getNote(uid);
+    if (!note) throw new Error('not found');
+
+    // Эмбеддинг нового текста; null → vector null (см. контракт выше).
+    const vector = await Embedder.embed(t);
+    note.text = t;
+    note.vector = vector ? Array.from(vector) : null;
+    note.version = nextVersion();
+    note.updatedAt = Date.now();
+
+    try {
+      await DB.putNote(note);
+    } catch (e) {
+      Logger.error('Notes: edit — не записать', String(e && e.message || e));
+      throw e;
+    }
+
+    emit('note:updated', note);
+    return note;
+  }
+
+  /**
+   * @param {string} uid
+   * @returns {Promise<Object>} Удалённая заметка (для вызывающего).
+   * @throws {Error} 'not found' | причина ошибки
+   */
+  async function remove(uid) {
+    const note = await DB.getNote(uid);
+    if (!note) throw new Error('not found');
+
+    try {
+      await DB.delNote(uid);
+    } catch (e) {
+      Logger.error('Notes: remove — не удалить', String(e && e.message || e));
+      throw e;
+    }
+
+    // Версия на момент удаления — канон deleted опубликует её же.
+    emit('note:deleted', { uid, version: note.version });
+    return note;
+  }
+
+  /**
+   * @param {string} uid
+   * @returns {Promise<Object>}
+   * @throws {Error} 'not found' | причина ошибки
+   */
+  async function toggle(uid) {
+    const note = await DB.getNote(uid);
+    if (!note) throw new Error('not found');
+
+    note.visibility = note.visibility === 'public' ? 'private' : 'public';
+    note.version = nextVersion();
+    note.updatedAt = Date.now();
+
+    try {
+      await DB.putNote(note);
+    } catch (e) {
+      Logger.error('Notes: toggle — не записать', String(e && e.message || e));
+      throw e;
+    }
+
+    emit('note:updated', note);
+    return note;
+  }
+
+  /**
+   * @param {string} uid
+   * @returns {Promise<Object|undefined>}
+   */
+  function get(uid) {
+    return DB.getNote(uid);
+  }
+
+  /**
+   * Эффективная версия канона: noteVersion (payload, истина) с
+   * fallback на created_at (legacy-каноны v0.9).
+   * @param {Object} canonical
+   * @returns {number}
+   */
+  function effVersion(canonical) {
+    if (typeof canonical.noteVersion === 'number' && canonical.noteVersion > 0) {
+      return canonical.noteVersion;
+    }
+    return typeof canonical.version === 'number' ? canonical.version : 0;
+  }
+
+  /**
+   * Применение своего канона с другого устройства: LWW по
+   * noteVersion payload (не по created_at публикации).
+   * @param {Object} canonical
+   * @returns {Promise<boolean>} true — применено.
+   */
+  async function applyOwnCanonical(canonical) {
+    if (!canonical || !canonical.uid) return false;
+
+    const cur = await DB.getNote(canonical.uid);
+    if (!cur) return false;
+
+    const incoming = effVersion(canonical);
+    if (incoming <= cur.version) return false;
+
+    if (typeof canonical.text === 'string') cur.text = canonical.text;
+    cur.vector = canonical.vec || null; // null → backfill
+    if (canonical.visibility === 'public' || canonical.visibility === 'private') {
+      cur.visibility = canonical.visibility;
+    }
+    if (canonical.parent) cur.parent = canonical.parent;
+    cur.version = incoming;
+    // Канон пришёл из сети — эта версия опубликована.
+    cur.publishedVersion = Math.max(cur.publishedVersion || 0, incoming);
+    cur.updatedAt = Date.now();
+
+    try {
+      await DB.putNote(cur);
+    } catch (e) {
+      Logger.warn('Notes: applyOwnCanonical — не записать', String(e && e.message || e));
+      return false;
+    }
+
+    emit('note:updated', cur);
+    return true;
+  }
+
+  /**
+   * Восстановление отсутствующей заметки из своего канона
+   * (новое устройство / после сброса).
+   * @param {Object} canonical
+   * @returns {Promise<boolean>}
+   */
+  async function restoreFromCanonical(canonical) {
+    if (!canonical || !canonical.uid) return false;
+
+    const cur = await DB.getNote(canonical.uid);
+    if (cur) return applyOwnCanonical(canonical);
+
+    const version = effVersion(canonical);
+    const note = {
+      uid: canonical.uid,
+      text: canonical.text || '',
+      vector: canonical.vec || null,
+      visibility: canonical.visibility || 'private',
+      parent: canonical.parent || null,
+      version: version > 0 ? version : nextVersion(),
+      // Восстановлено из сети — эта версия уже опубликована.
+      publishedVersion: version > 0 ? version : 0,
+      createdAt: canonical.ts || (canonical.version * 1000) || Date.now(),
+      updatedAt: canonical.ts || Date.now(),
+    };
+
+    try {
+      await DB.putNote(note);
+    } catch (e) {
+      Logger.warn('Notes: restoreFromCanonical — не записать', String(e && e.message || e));
+      return false;
+    }
+
+    emit('note:created', note);
+    return true;
+  }
+
+  /**
+   * Доэмбеддинг заметок без вектора (созданных до готовности модели
+   * или отредактированных при её недоступности). Вызывается из BOOT
+   * по ai:ready. Каждая доэмбедденная заметка получает новую version
+   * и уходит в сеть штатным путём (note:updated → очередь).
+   * @returns {Promise<number>} Сколько заметок вылечено.
+   */
+  async function backfill() {
+    let notes;
+    try {
+      notes = await DB.allNotes();
+    } catch (_) {
+      return 0;
+    }
+
+    let count = 0;
+
+    for (const n of notes) {
+      if (!n || n.vector || !n.text) continue;
+
+      const v = await Embedder.embed(n.text);
+      if (!v) continue; // модель снова не ответила — лечим на следующем ai:ready
+
+      n.vector = Array.from(v);
+      n.version = nextVersion();
+      n.updatedAt = Date.now();
+
+      try {
+        await DB.putNote(n);
+        emit('note:updated', n);
+        count++;
+      } catch (e) {
+        Logger.warn('Notes: backfill — не записать ' + n.uid, String(e && e.message || e));
+      }
+    }
+
+    if (count) Logger.info('Notes: backfill — доэмбеджено ' + count);
+    return count;
+  }
+
+  return {
+    init,
+    create,
+    edit,
+    remove,
+    toggle,
+    get,
+    applyOwnCanonical,
+    restoreFromCanonical,
+    backfill,
+  };
 }, ['DB', 'Embedder', 'EventBus', 'Logger', 'Utils']);
 // ─── DOMAIN/Notes ─── END ───────────────────────────────────────────────────
 
 // ─── DOMAIN/Mirror ─── START ────────────────────────────────────────────────
 /**
  * Интерпретация входящих канонов: свой → notes (LWW по noteVersion;
- * deleted-канон с noteVersion > cur.version → удаление по эху),
- * чужой → DB.upsertMirror. purgeSelf при старте. fetchTarget по
- * net:answer (дедуп 500) → mirror:fetch.
+ * deleted-канон побеждает при >= — быстрое «создал → удалил»
+ * больше не теряется), чужой → mirror. Единственная точка записи в
+ * mirror. Свои записи в mirror невозможны (И2); purgeSelf вычищает
+ * исторические дубли. ts из payload — хронология ленты.
+ *
+ * net:answer → fetchTarget (дедуп 500) → mirror:fetch → NetService
+ * точечная подписка (authors + #d) — подтяжка цели по ссылке.
  */
 DI.register('Mirror', function (DB, Protocol, Notes, bus, Nostr, Logger) {
-  // TODO: реализация
+  /** @type {Set<string>} */
+  const fetched = new Set();
+
+  /**
+   * Эффективная версия канона: noteVersion payload, fallback —
+   * created_at (legacy-каноны v0.9 без noteVersion в payload).
+   * @param {Object} c
+   * @returns {number}
+   */
+  function effVersion(c) {
+    if (typeof c.noteVersion === 'number' && c.noteVersion > 0) {
+      return c.noteVersion;
+    }
+    return typeof c.version === 'number' ? c.version : 0;
+  }
+
+  /**
+   * Вычистка исторических mirror-дублей своего владельца.
+   * @returns {Promise<void>}
+   */
+  async function purgeSelf() {
+    try {
+      const pk = Nostr.getPubkey();
+      if (!pk) return;
+
+      const all = await DB.allMirror();
+      const mine = all.filter(m => m && m.owner === pk);
+
+      for (const m of mine) {
+        await DB.delMirror(m.uid).catch(() => {});
+      }
+
+      if (mine.length) {
+        Logger.info('Mirror: вычищено своих дублей — ' + mine.length);
+      }
+    } catch (_) {}
+  }
+
+  /**
+   * Инициализация: подписки, стартовая чистка.
+   */
+  function init() {
+    bus.on('net:canon', ev => {
+      if (ev) applyCanon(ev);
+    });
+
+    bus.on('net:answer', a => {
+      if (a && a.uid && a.owner) fetchTarget(a.uid, a.owner);
+    });
+
+    bus.on('net:resync', () => {
+      fetched.clear();
+    });
+
+    Nostr.init().then(purgeSelf).catch(() => {});
+  }
+
+  /**
+   * Применить входящее событие канона. Маршрутизация по владельцу.
+   * @param {Object} ev - Nostr-событие kind 30078.
+   * @returns {Promise<void>}
+   */
+  async function applyCanon(ev) {
+    try {
+      const canonical = await Protocol.decodeCanon(ev);
+      if (!canonical || !canonical.uid || !canonical.owner) return;
+
+      const myPk = Nostr.getPubkey();
+
+      // Чужой канон → зеркало (сходимость решает DB.upsertMirror).
+      if (!myPk || canonical.owner !== myPk) {
+        await DB.upsertMirror(canonical);
+        return;
+      }
+
+      // Свой канон: синк устройств / эхо удалений.
+      const cur = await DB.getNote(canonical.uid);
+
+      if (canonical.deleted) {
+        if (!cur) return;
+        // deleted побеждает при >= : удаление на той же версии —
+        // законная финальная операция; более ранняя — игнорируется.
+        if (effVersion(canonical) >= (typeof cur.version === 'number' ? cur.version : 0)) {
+          await DB.delNote(canonical.uid);
+          Logger.info('Mirror: удаление по эху v' + effVersion(canonical)
+            + ' ' + canonical.uid.slice(0, 6));
+        }
+        return;
+      }
+
+      if (cur) {
+        const applied = await Notes.applyOwnCanonical(canonical);
+        if (applied) {
+          Logger.info('Mirror: синк ' + canonical.uid.slice(0, 6) + ' v' + effVersion(canonical));
+        }
+        return;
+      }
+
+      const restored = await Notes.restoreFromCanonical(canonical);
+      if (restored) {
+        Logger.info('Mirror: restore ' + canonical.uid.slice(0, 6) + ' v' + effVersion(canonical));
+      }
+    } catch (e) {
+      Logger.warn('Mirror: applyCanon', String(e && e.message || e));
+    }
+  }
+
+  /**
+   * Подтяжка заметки по ответу-ссылке.
+   * @param {string} uid
+   * @param {string} owner
+   */
+  function fetchTarget(uid, owner) {
+    if (!uid || !owner) return;
+    if (DB.hasOwn(uid)) return;
+    if (fetched.has(uid)) return;
+
+    fetched.add(uid);
+    if (fetched.size > 500) {
+      const arr = Array.from(fetched);
+      fetched.clear();
+      for (let i = Math.floor(arr.length / 2); i < arr.length; i++) {
+        fetched.add(arr[i]);
+      }
+    }
+
+    try { bus.emit('mirror:fetch', { uid, owner }); } catch (_) {}
+  }
+
+  return { init, applyCanon, fetchTarget };
 }, ['DB', 'Protocol', 'Notes', 'EventBus', 'Nostr', 'Logger']);
 // ─── DOMAIN/Mirror ─── END ──────────────────────────────────────────────────
 
 // ─── DOMAIN/Context ─── START ───────────────────────────────────────────────
 /**
- * Контекст поиска: drift > pin > input. setInput (debounce 350,
- * гонка-гвард), setPin (требует vector — иначе тихо НЕ пинует и НЕ
- * меняет состояние), clearPin, clear. push → Store.setState({context}).
+ * Контекст поиска: пин/дрейф/ввод. Приоритет drift > pin > input.
+ * Пин несёт идентичность заметки {uid, owner} (И1) и вектор.
+ *
+ * КОНТРАКТ v1.0:
+ * - setPin требует вектор: без него тихо НЕ пинует и НЕ меняет
+ *   состояние (защита от fact-only и безвекторных записей; честный
+ *   тост показывают UI-модули до вызова).
+ * - context всегда новый объект (подписки Object.is/shallowEqual
+ *   корректны); embed недоступен → vector null (модель не готова —
+ *   закон v1.0: не заменяем мусорными векторами).
+ * - init(): подписка note:pin → setPin (прямая ссылка, без this).
  */
 DI.register('Context', function (Store, Embedder, Config, Utils, bus) {
-  // TODO: реализация
+  /** @type {string} */
+  let inputText = '';
+  /** @type {Float32Array|null} */
+  let inputVector = null;
+  /** @type {Object|null} */
+  let pin = null;
+
+  /**
+   * Вычисление активного контекста.
+   * @returns {Object}
+   */
+  function activeContext() {
+    const hasInput = !!inputText.trim();
+
+    if (pin && hasInput) {
+      return {
+        source: 'drift',
+        uid: pin.uid,
+        owner: pin.owner,
+        text: inputText.trim(),
+        vector: inputVector,
+        pinText: pin.text,
+      };
+    }
+
+    if (pin) {
+      return {
+        source: 'pin',
+        uid: pin.uid,
+        owner: pin.owner,
+        text: pin.text,
+        vector: pin.vector,
+      };
+    }
+
+    if (hasInput) {
+      return {
+        source: 'input',
+        uid: null,
+        owner: null,
+        text: inputText.trim(),
+        vector: inputVector,
+      };
+    }
+
+    return {
+      source: null,
+      uid: null,
+      owner: null,
+      text: '',
+      vector: null,
+    };
+  }
+
+  /**
+   * Пуш контекста в Store.
+   */
+  function push() {
+    Store.setState({ context: activeContext() });
+  }
+
+  /**
+   * Дебаунс эмбеддинга ввода с защитой от гонок (сверка текста).
+   */
+  const debouncedEmbed = Utils.debounce(() => {
+    const t = inputText.trim();
+    if (!t) {
+      inputVector = null;
+      push();
+      return;
+    }
+
+    Embedder.embed(t).then(v => {
+      if (inputText.trim() === t) {
+        // v = null при неготовой модели — вектор контекста отсутствует,
+        // лента и запрос корректно ждут готовности.
+        inputVector = v;
+        push();
+      }
+    });
+  }, Config.get('debounce', 350));
+
+  return {
+    /**
+     * @param {string} text
+     */
+    setInput(text) {
+      inputText = text || '';
+      if (!inputText.trim()) inputVector = null;
+      push();
+      debouncedEmbed();
+    },
+
+    /**
+     * @param {Object} note - Заметка с вектором (notes или mirror).
+     */
+    setPin(note) {
+      if (!note || !note.vector) return;
+      pin = {
+        uid: note.uid,
+        owner: note.owner !== undefined ? note.owner : null,
+        text: note.text,
+        vector: note.vector,
+      };
+      push();
+    },
+
+    clearPin() {
+      pin = null;
+      push();
+    },
+
+    clear() {
+      inputText = '';
+      inputVector = null;
+      pin = null;
+      debouncedEmbed.cancel();
+      push();
+    },
+
+    /**
+     * @returns {Float32Array|Array<number>|null}
+     */
+    getVector() {
+      return activeContext().vector;
+    },
+
+    /**
+     * @returns {Object}
+     */
+    getActive() {
+      return activeContext();
+    },
+
+    /**
+     * @returns {Object|null}
+     */
+    getPin() {
+      return pin;
+    },
+
+    init() {
+      bus.on('note:pin', note => {
+        if (note) setPin(note);
+      });
+    },
+  };
 }, ['Store', 'Embedder', 'Config', 'Utils', 'EventBus']);
 // ─── DOMAIN/Context ─── END ─────────────────────────────────────────────────
 
 // ─── DOMAIN/Feed ─── START ──────────────────────────────────────────────────
 /**
- * Сборка лент: без контекста — хронология feed; с контекстом —
- * lists.local/world/seren по cosineBatch+split. seq-guard.
+ * Сборка лент из notes (свои: все) и mirror (чужие: public).
+ * Свои private участвуют в поиске — ядро продукта.
+ * Хронология чужих — по ts из payload (время заметки), не по
+ * version (время публикации канона).
  *
- * ИЗМЕНЕНИЕ v1.0: подписки db:change/db:mirror — через debounce 120мс
- * (гасит шторм сканов при сетевом синке; логика не меняется).
+ * ИЗМЕНЕНИЕ v1.0: подписки db:change/db:mirror — через debounce
+ * 120мс (гасит шторм полных сканов при пакетном сетевом синке;
+ * seq-guard дополнительно отбрасывает устаревшие проходы).
+ * Ликая логика v0.9.9 сохранена.
  */
 DI.register('Feed', function (DB, Ranker, Store, bus, Logger, Utils, Config) {
-  // TODO: реализация
+  /** @type {number} */
+  let seq = 0;
+  /** @type {Array<Function>} */
+  let unsubs = [];
+
+  /**
+   * Пересборка лент (seq-guard).
+   * @returns {Promise<void>}
+   */
+  function refresh() {
+    const my = ++seq;
+    const ctx = Store.get('context');
+
+    return Promise.all([DB.allNotes(), DB.allMirror()]).then(([notes, mirror]) => {
+      if (my !== seq) return;
+
+      const ownUids = new Set();
+      notes.forEach(n => {
+        if (n) ownUids.add(n.uid);
+      });
+
+      const pinUid = ctx.uid || null;
+      const pinOwner = ctx.owner || null;
+
+      const ownNotes = notes
+        .filter(n => n && n.text)
+        .map(n => ({ uid: n.uid, owner: null, text: n.text, vector: n.vector,
+                     parent: n.parent, visibility: n.visibility,
+                     createdAt: n.createdAt, updatedAt: n.updatedAt,
+                     own: true }));
+
+      const foreignPublic = mirror
+        .filter(m => m && m.visibility === 'public' && m.text && !ownUids.has(m.uid))
+        .map(m => {
+          const ts = m.ts || (m.version * 1000);
+          return { uid: m.uid, owner: m.owner, text: m.text, vector: m.vec,
+                   parent: m.parent, visibility: 'public',
+                   createdAt: ts, updatedAt: ts,
+                   own: false };
+        });
+
+      if (!ctx.source) {
+        const merged = [...ownNotes, ...foreignPublic]
+          .filter(n => !isPin(n, pinUid, pinOwner))
+          .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+
+        Store.setState({
+          feed: merged,
+          lists: { local: [], world: [], seren: [] },
+        });
+
+        return;
+      }
+
+      if (!ctx.vector) return;
+
+      const all = [...ownNotes, ...foreignPublic]
+        .filter(n => !isPin(n, pinUid, pinOwner));
+
+      const items = [];
+      const dataMap = new Map();
+      const seenUids = new Set();
+
+      for (const n of all) {
+        if (!n.vector || seenUids.has(n.uid)) continue;
+        seenUids.add(n.uid);
+        items.push({ id: n.uid, vector: n.vector });
+        dataMap.set(n.uid, n);
+      }
+
+      return Ranker.cosineBatch(ctx.vector, items).then(scored => {
+        if (my !== seq) return;
+
+        const { relevant, seren } = Ranker.split(scored);
+
+        const toRes = s => {
+          const n = dataMap.get(s.id);
+          return n ? Object.assign({}, n, { score: s.score }) : null;
+        };
+
+        const rel = relevant.map(toRes).filter(Boolean);
+        const srn = seren.map(toRes).filter(Boolean);
+
+        Store.setState({
+          lists: {
+            local: rel.filter(n => n.own),
+            world: rel.filter(n => !n.own),
+            seren: srn,
+          },
+          feed: [],
+        });
+      });
+    }).catch(err => {
+      Logger.warn('Feed: ошибка refresh', String(err && err.message || err));
+    });
+  }
+
+  /**
+   * @param {Object} n
+   * @param {string|null} pinUid
+   * @param {string|null} pinOwner
+   * @returns {boolean}
+   */
+  function isPin(n, pinUid, pinOwner) {
+    if (!pinUid) return false;
+    if (n.uid !== pinUid) return false;
+    if (n.own && !pinOwner) return true;
+    if (!n.own && pinOwner && n.owner === pinOwner) return true;
+    return false;
+  }
+
+  /**
+   * Инициализация.
+   */
+  function init() {
+    const debouncedRefresh = Utils.debounce(refresh, 120);
+
+    unsubs.push(Store.subscribe(s => s.context, () => refresh(), Store.shallowEqual));
+    unsubs.push(bus.on('db:change', debouncedRefresh));
+    unsubs.push(bus.on('db:mirror', debouncedRefresh));
+
+    refresh();
+  }
+
+  /**
+   * Отписка.
+   */
+  function destroy() {
+    unsubs.forEach(u => {
+      try { u(); } catch (_) {}
+    });
+    unsubs = [];
+  }
+
+  return { init, destroy, refresh };
 }, ['DB', 'Ranker', 'Store', 'EventBus', 'Logger', 'Utils', 'Config']);
-// ─── DOMAIN/Feed ─── END ─────────────────────────═══════════════════════════
+// ─── DOMAIN/Feed ─── END ────────────────────────────────────────────────────
 
 // ─── DOMAIN/Provenance ─── START ────────────────────────────────────────────
 /**
