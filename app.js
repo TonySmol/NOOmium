@@ -25,7 +25,7 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 // ВЕРСИЯ ПРИЛОЖЕНИЯ
 // ═══════════════════════════════════════════════════════════════════════════════
-const APP_VERSION = '0.9.7';
+const APP_VERSION = '0.9.8';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CORE/DI — ПРЕАМБУЛА
@@ -4411,7 +4411,8 @@ DI.register('Feed', function (DB, Ranker, Store, bus, Logger) {
 /**
  * Генеалогия по parent {uid, owner} через notes + mirror.
  * mirror-записи своих uid исключаются (дубли-защита).
- * ancestors — с диагностическим трейсом (каждый шаг цикла).
+ * Цикл предков: seen содержит пройденные узлы; проверка на цикл
+ * выполняется до рекурсии (parent.uid не должен быть уже пройден).
  */
 DI.register('Provenance', function (DB, bus, Nostr) {
   /** @type {Map<string, {chain: Array, timestamp: number}>} */
@@ -4511,7 +4512,7 @@ DI.register('Provenance', function (DB, bus, Nostr) {
   }
 
   /**
-   * Цепочка предков до корня с диагностическим трейсом.
+   * Цепочка предков от заметки до корня.
    * @param {string} uid
    * @returns {Promise<Array<Object>>}
    */
@@ -4526,50 +4527,19 @@ DI.register('Provenance', function (DB, bus, Nostr) {
     const all = await loadAll();
     const idx = buildIndex(all);
 
-    console.log('[prov] граф:', all.length, 'записей');
-    all.forEach(n => console.log('[prov]',
-      n.uid.slice(0, 12),
-      '| parent:', n.parent ? n.parent.uid.slice(0, 12) : 'НЕТ',
-      '| vis:', n.visibility,
-      '| own:', n.isOwn));
-
     let current = idx.byUid.get(uid) || null;
-    console.log('[prov] старт:', current ? current.uid.slice(0, 12) : 'НЕ НАЙДЕН');
-
     const chain = [];
     const seen = new Set([uid]);
 
     while (current && current.parent && current.parent.uid) {
-      console.log('[prov] шаг: current', current.uid.slice(0, 12),
-        '→ parent', current.parent.uid.slice(0, 12),
-        '| в seen:', seen.has(current.parent.uid));
-
-      if (seen.has(current.parent.uid)) {
-        console.log('[prov] BREAK: parent в seen');
-        break;
-      }
-      seen.add(current.parent.uid);
-
       const parent = resolveParent(current, idx);
-      console.log('[prov] resolveParent →', parent
-        ? parent.uid.slice(0, 12) + ' "' + (parent.text || '').slice(0, 12) + '"'
-        : 'NULL');
+      if (!parent) break;
+      if (seen.has(parent.uid)) break;
 
-      if (!parent) {
-        console.log('[prov] BREAK: parent не найден');
-        break;
-      }
-
-      chain.push(parent);
-      if (seen.has(parent.uid)) {
-        console.log('[prov] BREAK: chain в seen');
-        break;
-      }
       seen.add(parent.uid);
+      chain.push(parent);
       current = parent;
     }
-
-    console.log('[prov] итог:', chain.length);
 
     cache.set(uid, { chain, timestamp: Date.now() });
     return chain;
