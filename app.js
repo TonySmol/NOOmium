@@ -25,7 +25,7 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 // ВЕРСИЯ ПРИЛОЖЕНИЯ
 // ═══════════════════════════════════════════════════════════════════════════════
-const APP_VERSION = '0.9.8';
+const APP_VERSION = '0.9.9';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CORE/DI — ПРЕАМБУЛА
@@ -2699,9 +2699,10 @@ DI.register('Crypto', function (Nostr, Logger) {
  * Кодек событий: канон состояний (kind 30078, replaceable, d = uid)
  * и служебные события (запрос 21000, ответ-ссылка 21001).
  *
- * created_at канона = секунда публикации (не создания заметки):
- * гарантирует попадание в скользящие since-окна подписок и
- * монотонность при переизданиях (время публикации строго растёт).
+ * created_at = секунда публикации (свежесть в since-окнах,
+ * монотонность при переизданиях).
+ * payload несёт noteVersion (истина заметки) и ts (время заметки
+ * — хронология для лент).
  */
 DI.register('Protocol', function (Config, Vec, Vault, Nostr) {
   /** @type {number} */
@@ -2721,7 +2722,7 @@ DI.register('Protocol', function (Config, Vec, Vault, Nostr) {
   }
 
   /**
-   * Свежая монотонная секунда публикации канона.
+   * Свежая монотонная секунда публикации.
    * @returns {number}
    */
   function nowSec() {
@@ -2730,7 +2731,7 @@ DI.register('Protocol', function (Config, Vec, Vault, Nostr) {
 
   /**
    * Канон приватной версии.
-   * @param {Object} note
+   * @param {Object} note - {uid, text, vector, parent, version, updatedAt}
    * @returns {Promise<Object>}
    * @throws {Error}
    */
@@ -2806,9 +2807,10 @@ DI.register('Protocol', function (Config, Vec, Vault, Nostr) {
   }
 
   /**
-   * Декодирование канона. version = created_at (секунда публикации).
-   * @param {Object} ev
-   * @returns {Promise<Object|null>}
+   * Декодирование канона.
+   * @param {Object} ev - Nostr-событие kind 30078.
+   * @returns {Promise<Object|null>} {uid, owner, version, visibility,
+   *   text?, vec?, parent?, ts, noteVersion}
    */
   async function decodeCanon(ev) {
     if (!ev || ev.kind !== Config.get('kCanon', 30078)) return null;
@@ -2838,7 +2840,7 @@ DI.register('Protocol', function (Config, Vec, Vault, Nostr) {
           return null;
         }
       } else {
-        return { uid, owner, version, visibility: 'private' };
+        return { uid, owner, version, visibility: 'private', ts: version * 1000 };
       }
     }
 
@@ -2849,7 +2851,7 @@ DI.register('Protocol', function (Config, Vec, Vault, Nostr) {
       : 'private';
 
     if (visibility === 'private' && owner !== Nostr.getPubkey()) {
-      return { uid, owner, version, visibility: 'private' };
+      return { uid, owner, version, visibility: 'private', ts: version * 1000 };
     }
 
     if (visibility === 'deleted') {
@@ -2870,7 +2872,10 @@ DI.register('Protocol', function (Config, Vec, Vault, Nostr) {
       parent = { uid: data.parent.uid, owner: data.parent.owner || null };
     }
 
-    return { uid, owner, version, visibility, text: data.text, vec, parent };
+    const ts = typeof data.ts === 'number' && data.ts > 0 ? data.ts : (version * 1000);
+    const noteVersion = typeof data.noteVersion === 'number' ? data.noteVersion : undefined;
+
+    return { uid, owner, version, visibility, text: data.text, vec, parent, ts, noteVersion };
   }
 
   /**
@@ -3987,10 +3992,11 @@ DI.register('Notes', function (DB, Embedder, bus, Logger, Utils) {
 
 // ─── DOMAIN/Mirror ─── START ────────────────────────────────────────────────
 /**
- * Интерпретация входящих канонов: свои — к notes, чужие — к mirror.
- * Deleted-эхо применяется только при строго большей версии —
- * старые deleted-события из истории релеев не могут удалять
- * восстановленные заметки (LWW для удалений).
+ * Интерпретация входящих канонов: свои — к notes (синк/restore/
+ * удаление по эху), чужие — к mirror. Единственная точка записи в
+ * mirror. Свои записи в mirror невозможны (И2).
+ * ts из payload (время заметки) пробрасывается в mirror — для
+ * хронологической сортировки ленты.
  */
 DI.register('Mirror', function (DB, Protocol, Notes, bus, Nostr, Logger) {
   /** @type {Set<string>} */
@@ -4019,7 +4025,7 @@ DI.register('Mirror', function (DB, Protocol, Notes, bus, Nostr, Logger) {
   }
 
   /**
-   * Инициализация.
+   * Инициализация: подписки, стартовая чистка.
    */
   function init() {
     bus.on('net:canon', ev => {
@@ -4038,9 +4044,8 @@ DI.register('Mirror', function (DB, Protocol, Notes, bus, Nostr, Logger) {
   }
 
   /**
-   * Применить входящее событие канона. Маршрутизация по владельцу.
-   * Все ветки для своих — строго по version (LWW): старые
-   * события (в т.ч. deleted) не затирают и не удаляют новое.
+   * Применить входящее событие канона. Маршрутизация по владельцу:
+   * свой — notes (LWW по version, удаление по эху), чужой — mirror.
    * @param {Object} ev - Nostr-событие kind 30078.
    * @returns {Promise<void>}
    */
@@ -4050,13 +4055,13 @@ DI.register('Mirror', function (DB, Protocol, Notes, bus, Nostr, Logger) {
       if (!canonical || !canonical.uid || !canonical.owner) return;
 
       const myPk = Nostr.getPubkey();
+
       if (!myPk || canonical.owner !== myPk) {
         await DB.upsertMirror(canonical);
         return;
       }
 
       const cur = await DB.getNote(canonical.uid);
-
       if (cur && canonical.version <= cur.version) {
         return;
       }
@@ -4064,7 +4069,7 @@ DI.register('Mirror', function (DB, Protocol, Notes, bus, Nostr, Logger) {
       if (canonical.deleted) {
         if (cur) {
           await DB.delNote(canonical.uid);
-          Logger.info('Mirror: удаление по эху (v' + canonical.version + ') ' + canonical.uid.slice(0, 6));
+          Logger.info('Mirror: удаление по эху v' + canonical.version + ' ' + canonical.uid.slice(0, 6));
         }
         return;
       }
@@ -4087,7 +4092,7 @@ DI.register('Mirror', function (DB, Protocol, Notes, bus, Nostr, Logger) {
   }
 
   /**
-   * Подтяжка по ответу-ссылке.
+   * Подтяжка заметки по ответу-ссылке.
    * @param {string} uid
    * @param {string} owner
    */
@@ -4268,10 +4273,10 @@ DI.register('Context', function (Store, Embedder, Config, Utils, bus) {
 
 // ─── DOMAIN/Feed ─── START ──────────────────────────────────────────────────
 /**
- * Сборка лент из notes (свои: все, public и private) и
- * mirror (чужие: только public). Свои private участвуют в поиске
- * (пин/ввод) — ядро продукта. Чужие private — только факт
- * существования, не рендерятся.
+ * Сборка лент из notes (свои: все) и mirror (чужие: public).
+ * Свои private участвуют в поиске — ядро продукта.
+ * Хронология чужих — по ts из payload (время заметки), не по
+ * version (время публикации канона).
  */
 DI.register('Feed', function (DB, Ranker, Store, bus, Logger) {
   /** @type {number} */
@@ -4307,10 +4312,13 @@ DI.register('Feed', function (DB, Ranker, Store, bus, Logger) {
 
       const foreignPublic = mirror
         .filter(m => m && m.visibility === 'public' && m.text && !ownUids.has(m.uid))
-        .map(m => ({ uid: m.uid, owner: m.owner, text: m.text, vector: m.vec,
-                     parent: m.parent, visibility: 'public',
-                     createdAt: m.version * 1000, updatedAt: m.version * 1000,
-                     own: false }));
+        .map(m => {
+          const ts = m.ts || (m.version * 1000);
+          return { uid: m.uid, owner: m.owner, text: m.text, vector: m.vec,
+                   parent: m.parent, visibility: 'public',
+                   createdAt: ts, updatedAt: ts,
+                   own: false };
+        });
 
       if (!ctx.source) {
         const merged = [...ownNotes, ...foreignPublic]
