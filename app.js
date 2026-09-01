@@ -1147,35 +1147,739 @@ DI.register('Store', function () {
 
 // ─── DATA/Vec ─── START ─────────────────────────────────────────────────────
 /**
- * toB64/fromB64 (квантование int16, fromB64 нормализует), cosine (dot по
- * min-длине, контракт нормализованных), normalize, sqDist, kmeans.
+ * Векторные операции: квантование base64 (int16), косинус (dot по
+ * min-длине — контракт: все векторы нормализованы), нормализация,
+ * sqDist, kmeans (farthest-first, детерминированный).
+ * Формат без изменений от v0.9.9 — round-trip с канонами на релеях.
  */
 DI.register('Vec', function () {
-  // TODO: реализация (как в v0.9.9)
+  /**
+   * @param {Float32Array|Array<number>} v
+   * @returns {Float32Array}
+   */
+  const f32 = v => (v instanceof Float32Array ? v : Float32Array.from(v || []));
+
+  /**
+   * Квантование в base64: clamp ±1 → int16 (×32767) → байты → btoa.
+   * Ненормализованный вход теряет точность выше ±1 — контракт:
+   * сохраняются только нормализованные векторы.
+   * @param {Float32Array|Array<number>} vec
+   * @returns {string}
+   */
+  function toB64(vec) {
+    const f = f32(vec);
+    const i16 = new Int16Array(f.length);
+
+    for (let i = 0; i < f.length; i++) {
+      let x = f[i];
+      if (x > 1) x = 1;
+      else if (x < -1) x = -1;
+      i16[i] = Math.round(x * 32767);
+    }
+
+    const bytes = new Uint8Array(i16.buffer, i16.byteOffset, i16.byteLength);
+    let bin = '';
+    for (let i = 0; i < bytes.length; i++) {
+      bin += String.fromCharCode(bytes[i]);
+    }
+
+    return btoa(bin);
+  }
+
+  /**
+   * Из base64: int16 → float (/32767) → нормализация.
+   * Нечётная/пустая строка, битый b64 → null.
+   * @param {string} b64
+   * @returns {Float32Array|null}
+   */
+  function fromB64(b64) {
+    try {
+      const bin = atob(String(b64 || ''));
+      if (!bin || bin.length < 2 || bin.length % 2 !== 0) return null;
+
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) {
+        bytes[i] = bin.charCodeAt(i);
+      }
+
+      const i16 = new Int16Array(bytes.buffer);
+      const out = new Float32Array(i16.length);
+      for (let i = 0; i < i16.length; i++) {
+        out[i] = i16[i] / 32767;
+      }
+
+      return normalize(out);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /**
+   * Косинус = dot product по min-длине (векторы нормализованы).
+   * Нулевые/пустые → 0.
+   * @param {Float32Array|Array<number>} a
+   * @param {Float32Array|Array<number>} b
+   * @returns {number}
+   */
+  function cosine(a, b) {
+    if (!a || !b) return 0;
+    const n = Math.min(a.length, b.length);
+    if (!n) return 0;
+
+    let s = 0;
+    for (let i = 0; i < n; i++) {
+      s += a[i] * b[i];
+    }
+
+    return s;
+  }
+
+  /**
+   * @param {Float32Array|Array<number>} v
+   * @returns {Float32Array} Нулевой вектор при нулевой норме.
+   */
+  function normalize(v) {
+    const f = f32(v);
+    let norm = 0;
+
+    for (let i = 0; i < f.length; i++) {
+      norm += f[i] * f[i];
+    }
+
+    norm = Math.sqrt(norm);
+    const out = new Float32Array(f.length);
+    if (!norm) return out;
+
+    for (let i = 0; i < f.length; i++) {
+      out[i] = f[i] / norm;
+    }
+
+    return out;
+  }
+
+  /**
+   * @param {Float32Array|Array<number>} a
+   * @param {Float32Array|Array<number>} b
+   * @returns {number}
+   */
+  function sqDist(a, b) {
+    const n = Math.min(a.length, b.length);
+    let s = 0;
+
+    for (let i = 0; i < n; i++) {
+      const d = a[i] - b[i];
+      s += d * d;
+    }
+
+    return s;
+  }
+
+  /**
+   * k-means: инициализация farthest-first (детерминированная),
+   * до `iterations` (по умолчанию 10) проходов.
+   * @param {Array} vectors
+   * @param {number} k
+   * @param {number} [iterations]
+   * @returns {Array<Float32Array>}
+   */
+  function kmeans(vectors, k, iterations) {
+    const iters = iterations || 10;
+    const n = vectors.length;
+
+    if (!n || !k) return [];
+    if (n <= k) return vectors.map(v => f32(v));
+
+    const dim = vectors[0].length;
+
+    const cents = [f32(vectors[0])];
+    while (cents.length < k) {
+      let bestI = 0, bestD = -1;
+
+      for (let i = 0; i < n; i++) {
+        let minD = Infinity;
+
+        for (const c of cents) {
+          const d = sqDist(vectors[i], c);
+          if (d < minD) minD = d;
+        }
+
+        if (minD > bestD) {
+          bestD = minD;
+          bestI = i;
+        }
+      }
+
+      cents.push(f32(vectors[bestI]));
+    }
+
+    for (let it = 0; it < iters; it++) {
+      const sums = Array.from({ length: k }, () => new Float32Array(dim));
+      const counts = new Array(k).fill(0);
+
+      for (let i = 0; i < n; i++) {
+        let best = 0, bestD = Infinity;
+
+        for (let c = 0; c < k; c++) {
+          const d = sqDist(vectors[i], cents[c]);
+          if (d < bestD) {
+            bestD = d;
+            best = c;
+          }
+        }
+
+        counts[best]++;
+        for (let d = 0; d < dim; d++) {
+          sums[best][d] += vectors[i][d];
+        }
+      }
+
+      for (let c = 0; c < k; c++) {
+        if (counts[c]) {
+          for (let d = 0; d < dim; d++) {
+            cents[c][d] = sums[c][d] / counts[c];
+          }
+        }
+      }
+    }
+
+    return cents;
+  }
+
+  return { toB64, fromB64, cosine, normalize, kmeans };
 }, []);
 // ─── DATA/Vec ─── END ───────────────────────────────────────────────────────
 
 // ─── DATA/DB ─── START ──────────────────────────────────────────────────────
 /**
- * IndexedDB noomium_v3: notes (keyPath uid), mirror (uid + индекс owner).
- * In-memory fallback. ready() → Promise<IDBDatabase|null>.
+ * Хранение: notes (свои) + mirror (чужие). IndexedDB noomium_v3
+ * (данные v0.9 читаются как есть). In-memory fallback при недоступности.
  *
- * Контракты:
- *   putNote(note) → Promise<uid>; эмитит db:change.
- *   getNote(uid), delNote(uid) (эмитит db:change), allNotes(), hasOwn(uid).
- *   upsertMirror(entry) → Promise<boolean>:
- *     сходимость по noteVersion (payload) с fallback на version (created_at);
- *     равные версии → мердж полей text/vec/parent (richer-wins);
- *     НОВОЕ v1.0: deleted-факт побеждает равную версию (см. Mirror).
- *   getMirror/allMirror/delMirror (эмитит db:mirror).
- *   reset() — очистка обоих сторов.
- *   updatePublishState(uid, version) — НОВОЕ v1.0: тихая запись
- *     publishedVersion, БЕЗ db:change (иначе цикл очередь→события→рендер).
- *   close() — НОВОЕ v1.0: закрывает соединение. Вызывать перед
- *     deleteDatabase (иначе blocked). После close модуль DB не используется.
+ * Формат mirror-записи = результат Protocol.decodeCanon:
+ *   {uid, owner, version (created_at канона, fallback-версия),
+ *    noteVersion? (истина заметки из payload — приоритетна),
+ *    visibility, text?, vec?, parent?, ts?, deleted?}
+ *
+ * Формат notes-записи (модель v1.0):
+ *   {uid, text, vector: Array|null, visibility, parent, version,
+ *    publishedVersion, createdAt, updatedAt}
+ *
+ * ИЗМЕНЕНИЯ v1.0 против v0.9.9:
+ * 1. upsertMirror — ОДНА readwrite-транзакция (get → решение → put):
+ *    конкурентные upsert одного uid сериализуются движком, TOCTOU-окна
+ *    нет. Сходимость: LWW по noteVersion (payload), fallback version
+ *    (created_at); равные → richer-wins + мердж недостающих полей;
+ *    deleted-факт побеждает равную версию (эхо-удаление).
+ * 2. updatePublishState(uid, version) — тихая запись publishedVersion
+ *    БЕЗ db:change (иначе цикл: публикация → событие → рендер).
+ * 3. close() — закрытие соединения для fullReset; после close все
+ *    операции тихо уходят в память, соединение НЕ переоткрывается.
+ * 4. onblocked: ждём до 10с, потом mem-fallback (вместо мгновенного
+ *    провала в память при мульти-табе).
  */
 DI.register('DB', function (Config, bus, Logger) {
-  // TODO: реализация
+  let db = null;
+  let memNotes = null;
+  let memMirror = null;
+  let openPromise = null;
+  let closed = false;
+
+  const NOTES = () => Config.get('notesStore', 'notes');
+  const MIRROR = () => Config.get('mirrorStore', 'mirror');
+
+  /** @type {Set<string>} */
+  const ownUids = new Set();
+  /** @type {Set<string>} */
+  const mirrorUids = new Set();
+
+  function emitChange() {
+    try { bus.emit('db:change'); } catch (_) {}
+  }
+
+  function emitMirror() {
+    try { bus.emit('db:mirror'); } catch (_) {}
+  }
+
+  /**
+   * @param {IDBRequest} req
+   * @returns {Promise<*>}
+   */
+  function reqPromise(req) {
+    return new Promise((res, rej) => {
+      req.onsuccess = () => res(req.result);
+      req.onerror = () => rej(req.error);
+    });
+  }
+
+  /**
+   * Открытие соединения. Кэшируется; после close() — всегда null (mem).
+   * @returns {Promise<IDBDatabase|null>}
+   */
+  function open() {
+    if (openPromise) return openPromise;
+    if (closed) return Promise.resolve(null);
+
+    openPromise = new Promise(resolve => {
+      if (!window.indexedDB) {
+        memNotes = new Map();
+        memMirror = new Map();
+        Logger.warn('DB: IndexedDB недоступен, in-memory fallback');
+        return resolve(null);
+      }
+
+      try {
+        const req = indexedDB.open(Config.get('dbName', 'noomium_v3'), 1);
+
+        req.onupgradeneeded = e => {
+          const d = e.target.result;
+
+          if (!d.objectStoreNames.contains(NOTES())) {
+            d.createObjectStore(NOTES(), { keyPath: 'uid' });
+          }
+
+          if (!d.objectStoreNames.contains(MIRROR())) {
+            const s = d.createObjectStore(MIRROR(), { keyPath: 'uid' });
+            s.createIndex('owner', 'owner', { unique: false });
+          }
+        };
+
+        req.onsuccess = e => {
+          db = e.target.result;
+          buildIndexes().then(() => resolve(db)).catch(() => resolve(db));
+        };
+
+        req.onerror = () => {
+          memNotes = new Map();
+          memMirror = new Map();
+          Logger.warn('DB: ошибка открытия, fallback');
+          resolve(null);
+        };
+
+        // Блокировано другой вкладкой: даём 10с на снятие блока,
+        // потом деградируем в память (а не мгновенно, как в v0.9.9).
+        req.onblocked = () => {
+          Logger.warn('DB: открытие заблокировано (другая вкладка?), жду 10с');
+          setTimeout(() => {
+            if (db) return; // блок снят, onsuccess уже отработал
+            memNotes = new Map();
+            memMirror = new Map();
+            Logger.warn('DB: блок не снят, fallback в память');
+            resolve(null);
+          }, 10000);
+        };
+      } catch (err) {
+        memNotes = new Map();
+        memMirror = new Map();
+        Logger.warn('DB: не поддерживается, fallback', String(err));
+        resolve(null);
+      }
+    });
+
+    return openPromise;
+  }
+
+  /**
+   * Индексы uid в памяти (быстрые hasOwn/проверки владения).
+   * @returns {Promise<void>}
+   */
+  function buildIndexes() {
+    const t = db.transaction([NOTES(), MIRROR()], 'readonly');
+
+    return Promise.all([
+      reqPromise(t.objectStore(NOTES()).getAllKeys()).catch(() => []),
+      reqPromise(t.objectStore(MIRROR()).getAllKeys()).catch(() => []),
+    ]).then(([nKeys, mKeys]) => {
+      ownUids.clear();
+      mirrorUids.clear();
+
+      (nKeys || []).forEach(k => ownUids.add(k));
+      (mKeys || []).forEach(k => mirrorUids.add(k));
+
+      Logger.info('DB: индексы (' + ownUids.size + ' своих, ' + mirrorUids.size + ' в зеркале)');
+    });
+  }
+
+  /**
+   * Обёртка транзакции. fn получает objectStore и возвращает IDBRequest.
+   * @param {string} store
+   * @param {string} mode
+   * @param {Function} fn
+   * @param {Function} memFn
+   * @returns {Promise<*>}
+   */
+  function withStore(store, mode, fn, memFn) {
+    return open().then(d => {
+      if (!d) return memFn();
+
+      return new Promise((res, rej) => {
+        try {
+          const r = fn(d.transaction(store, mode).objectStore(store));
+          r.onsuccess = () => res(r.result);
+          r.onerror = () => rej(r.error);
+        } catch (e) {
+          rej(e);
+        }
+      });
+    });
+  }
+
+  /**
+   * @param {Object} note
+   * @returns {Promise<string>}
+   */
+  function putNote(note) {
+    return withStore(
+      NOTES(),
+      'readwrite',
+      s => s.put(note),
+      () => { memNotes.set(note.uid, note); return note.uid; }
+    ).then(res => {
+      if (note && note.uid) ownUids.add(note.uid);
+      emitChange();
+      return res;
+    });
+  }
+
+  /**
+   * @param {string} uid
+   * @returns {Promise<Object|undefined>}
+   */
+  function getNote(uid) {
+    return withStore(
+      NOTES(),
+      'readonly',
+      s => s.get(uid),
+      () => memNotes.get(uid)
+    );
+  }
+
+  /**
+   * @param {string} uid
+   * @returns {Promise<*>}
+   */
+  function delNote(uid) {
+    return withStore(
+      NOTES(),
+      'readwrite',
+      s => s.delete(uid),
+      () => { memNotes.delete(uid); }
+    ).then(res => {
+      ownUids.delete(uid);
+      emitChange();
+      return res;
+    });
+  }
+
+  /**
+   * @returns {Promise<Array<Object>>}
+   */
+  function allNotes() {
+    return withStore(
+      NOTES(),
+      'readonly',
+      s => s.getAll(),
+      () => Array.from(memNotes.values())
+    );
+  }
+
+  /**
+   * @param {string} uid
+   * @returns {boolean}
+   */
+  function hasOwn(uid) {
+    return !!uid && ownUids.has(uid);
+  }
+
+  // ─── upsertMirror: сходимость зеркала ────────────────────────────────────
+
+  /**
+   * Эффективная версия записи: noteVersion (payload, истина заметки),
+   * fallback — version (created_at канона; legacy/fact-only записи).
+   * @param {Object} x
+   * @returns {number}
+   */
+  function effVersion(x) {
+    return typeof x.noteVersion === 'number' && x.noteVersion > 0
+      ? x.noteVersion
+      : (typeof x.version === 'number' ? x.version : 0);
+  }
+
+  /**
+   * Новая запись полнее существующей той же версии?
+   * @param {Object} incoming
+   * @param {Object} existing
+   * @returns {boolean}
+   */
+  function hasRicherFields(incoming, existing) {
+    const incomingHas = !!(incoming.text || incoming.vec || incoming.parent);
+    const existingHas = !!(existing.text || existing.vec || existing.parent);
+    return incomingHas && !existingHas;
+  }
+
+  /**
+   * Заимствование недостающих полей из существующей записи
+   * (fact-only не затирает полную; полная поглощает факт).
+   * @param {Object} entry
+   * @param {Object} existing
+   */
+  function borrowMissing(entry, existing) {
+    ['text', 'vec', 'parent', 'ts'].forEach(k => {
+      if (entry[k] === undefined || entry[k] === null) {
+        if (existing[k] !== undefined && existing[k] !== null) {
+          entry[k] = existing[k];
+        }
+      }
+    });
+  }
+
+  /**
+   * Решение о сходимости. Возвращает запись для put или null.
+   * Порядок правил:
+   *   - tombstone (deleted) побеждает при ev >= xv;
+   *   - живая запись воскрешает tombstone только при ev > xv;
+   *   - ev > xv → замена с заимствованием недостающих полей;
+   *   - ev < xv → отказ;
+   *   - равные → только если incoming «богаче» (richer-wins).
+   * @param {Object} entry
+   * @param {Object|undefined} existing
+   * @returns {Object|null}
+   */
+  function decideUpsert(entry, existing) {
+    if (!existing) return entry;
+
+    const ev = effVersion(entry);
+    const xv = effVersion(existing);
+
+    if (entry.deleted) {
+      return ev >= xv ? entry : null;
+    }
+
+    if (existing.deleted) {
+      return ev > xv ? entry : null;
+    }
+
+    if (ev > xv) {
+      borrowMissing(entry, existing);
+      return entry;
+    }
+
+    if (ev < xv) return null;
+
+    if (hasRicherFields(entry, existing)) {
+      borrowMissing(entry, existing);
+      return entry;
+    }
+
+    return null;
+  }
+
+  /**
+   * Upsert в mirror: ОДНА readwrite-транзакция (get → решение → put).
+   * Атомарно: конкурентные upsert сериализуются движком IDB.
+   * @param {Object} entry
+   * @returns {Promise<boolean>} true — запись обновлена.
+   */
+  function upsertMirror(entry) {
+    if (!entry || !entry.uid || typeof entry.version !== 'number') {
+      return Promise.resolve(false);
+    }
+
+    return open().then(d => {
+      // mem-путь: та же логика решения, без транзакции.
+      if (!d) {
+        const existing = memMirror.get(entry.uid);
+        const toPut = decideUpsert(entry, existing);
+        if (!toPut) return false;
+        memMirror.set(entry.uid, toPut);
+        mirrorUids.add(entry.uid);
+        emitMirror();
+        return true;
+      }
+
+      return new Promise(resolve => {
+        let result = false;
+
+        try {
+          const tx = d.transaction(MIRROR(), 'readwrite');
+          const store = tx.objectStore(MIRROR());
+
+          const req = store.get(entry.uid);
+          req.onsuccess = () => {
+            const toPut = decideUpsert(entry, req.result);
+            if (toPut) {
+              store.put(toPut);
+              result = true;
+            }
+            // решения null — tx завершится пусто, result=false
+          };
+
+          tx.oncomplete = () => {
+            if (result) {
+              mirrorUids.add(entry.uid);
+              emitMirror();
+            }
+            resolve(result);
+          };
+          tx.onerror = () => resolve(false);
+          tx.onabort = () => resolve(false);
+        } catch (e) {
+          Logger.warn('DB: upsertMirror', String(e && e.message || e));
+          resolve(false);
+        }
+      });
+    }).catch(e => {
+      Logger.warn('DB: upsertMirror', String(e && e.message || e));
+      return false;
+    });
+  }
+
+  /**
+   * @param {string} uid
+   * @returns {Promise<Object|undefined>}
+   */
+  function getMirror(uid) {
+    return withStore(
+      MIRROR(),
+      'readonly',
+      s => s.get(uid),
+      () => memMirror.get(uid)
+    );
+  }
+
+  /**
+   * @returns {Promise<Array<Object>>}
+   */
+  function allMirror() {
+    return withStore(
+      MIRROR(),
+      'readonly',
+      s => s.getAll(),
+      () => Array.from(memMirror.values())
+    );
+  }
+
+  /**
+   * @param {string} uid
+   * @returns {Promise<*>}
+   */
+  function delMirror(uid) {
+    return withStore(
+      MIRROR(),
+      'readwrite',
+      s => s.delete(uid),
+      () => { memMirror.delete(uid); }
+    ).then(res => {
+      mirrorUids.delete(uid);
+      emitMirror();
+      return res;
+    });
+  }
+
+  /**
+   * Тихая запись publishedVersion (после успешной публикации канона).
+   * БЕЗ db:change — иначе цикл публикация→событие→ререндер.
+   * undefined трактуется как 0 (не публиковалось).
+   * @param {string} uid
+   * @param {number} version
+   * @returns {Promise<void>}
+   */
+  function updatePublishState(uid, version) {
+    if (!uid || typeof version !== 'number') return Promise.resolve();
+
+    return open().then(d => {
+      if (!d) {
+        const n = memNotes.get(uid);
+        if (n && (n.publishedVersion || 0) < version) {
+          n.publishedVersion = version;
+        }
+        return;
+      }
+
+      return new Promise(resolve => {
+        try {
+          const tx = d.transaction(NOTES(), 'readwrite');
+          const store = tx.objectStore(NOTES());
+
+          const req = store.get(uid);
+          req.onsuccess = () => {
+            const n = req.result;
+            if (n && (n.publishedVersion || 0) < version) {
+              n.publishedVersion = version;
+              store.put(n);
+            }
+          };
+
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => resolve();
+          tx.onabort = () => resolve();
+        } catch (_) {
+          resolve();
+        }
+      });
+    }).catch(() => {});
+  }
+
+  /**
+   * Очистка обоих сторов (wipe локальной базы).
+   * @returns {Promise<void>}
+   */
+  function reset() {
+    return open().then(d => {
+      if (!d) {
+        memNotes.clear();
+        memMirror.clear();
+        return;
+      }
+
+      return new Promise((res, rej) => {
+        const t = d.transaction([NOTES(), MIRROR()], 'readwrite');
+        t.objectStore(NOTES()).clear();
+        t.objectStore(MIRROR()).clear();
+
+        t.oncomplete = () => res();
+        t.onerror = () => rej(t.error);
+      });
+    }).then(() => {
+      ownUids.clear();
+      mirrorUids.clear();
+      emitChange();
+      emitMirror();
+    });
+  }
+
+  /**
+   * Закрытие соединения (только перед deleteDatabase в fullReset).
+   * После close: все операции тихо идут в память; соединение НЕ
+   * переоткрывается — deleteDatabase не упадёт в blocked.
+   */
+  function close() {
+    closed = true;
+    if (db) {
+      try { db.close(); } catch (_) {}
+      db = null;
+    }
+    if (!memNotes) memNotes = new Map();
+    if (!memMirror) memMirror = new Map();
+    openPromise = Promise.resolve(null);
+  }
+
+  return {
+    putNote,
+    getNote,
+    delNote,
+    allNotes,
+    hasOwn,
+
+    upsertMirror,
+    getMirror,
+    allMirror,
+    delMirror,
+
+    updatePublishState,
+    reset,
+    close,
+
+    ready: open,
+  };
 }, ['Config', 'EventBus', 'Logger']);
 // ─── DATA/DB ─── END ────────────────────────────────────────────────────────
 
@@ -1183,33 +1887,494 @@ DI.register('DB', function (Config, bus, Logger) {
 
 // ─── AI/Embedder ─── START ──────────────────────────────────────────────────
 /**
- * Web Worker (Blob, module) + transformers.js, Granite q8, CLS-pooling.
+ * Эмбеддер Granite R2: Web Worker (Blob, module) + transformers.js,
+ * q8, CLS-pooling, normalize.
  *
- * ИЗМЕНЕНИЯ v1.0:
- * - Режимы ТОЛЬКО 'loading' | 'model'. Demo-режима и hashEmbed НЕТ.
- * - embed(text) → Promise<Float32Array|null>:
- *     null при !text, при mode==='loading', при таймауте 15с, при ошибке.
- *     Результат null НЕ кэшируется.
- * - load(onProgress?) → Promise<void>; resolve при model.
- * - При готовности — emit 'ai:ready' (однократно) + 'ai:status' {mode:'model'}.
- * - Кэш LRU 300 только настоящих векторов; при старте загрузки чистится.
- * - Таймаут загрузки 120с → mode остаётся 'loading', emit ai:status
- *   {mode:'loading', stalled:true}; HeaderStatus покажет «ии нет».
- *   Ретрай — только перезапуском приложения (как было).
- * - progressFns с возможностью отписки (load возвращает off-функцию).
+ * Режимы: 'loading' | 'model'. Demo/hash-fallback НЕТ.
+ *
+ * КОНТРАКТ v1.0:
+ * - embed(text) → Promise<Float32Array|null>. null — модель не готова
+ *   (loading/stalled/ошибка/таймаут/пустой текст). null НЕ кэшируется.
+ * - load() → Promise<void>, resolve при переходе в 'model'.
+ * - При готовности: ai:status {mode:'model'} + ai:ready (однократно).
+ * - Таймаут загрузки 120с: НЕ убивает воркер — stalled:true (воркер
+ *   докачивает в фоне; если добьётся — штатный переход в model).
+ *   Ретрай после фатальной ошибки — только перезапуском приложения.
+ * - Кэш LRU 300, только настоящие векторы, чистится при старте загрузки.
+ * - getState(): {mode, percent, stalled} — снимок для UI-инициализации.
  */
 DI.register('Embedder', function (Config, bus, Logger) {
-  // TODO: реализация
+  /** @type {string} */
+  const workerCode = `
+let extractor = null;
+let ready = false;
+let files = new Map();
+
+self.onmessage = async function (e) {
+  const msg = e.data;
+
+  if (msg.type === 'load') {
+    try {
+      const mod = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@latest');
+      mod.env.allowLocalModels = false;
+      mod.env.useBrowserCache = true;
+
+      extractor = await mod.pipeline('feature-extraction', msg.model, {
+        dtype: 'q8',
+        progress_callback: function (p) {
+          if (p.status === 'progress') {
+            const fileName = p.file || p.name || 'unknown';
+            files.set(fileName, {
+              loaded: p.loaded || 0,
+              total: p.total || 0,
+              file: fileName
+            });
+
+            let totalLoaded = 0, totalSize = 0;
+            files.forEach(f => {
+              totalLoaded += f.loaded;
+              if (f.total > 0) totalSize += f.total;
+            });
+
+            const pct = totalSize > 0 ? (totalLoaded / totalSize) * 100 : 0;
+            self.postMessage({
+              type: 'progress',
+              pct,
+              loadedMB: (totalLoaded / 1024 / 1024).toFixed(1),
+              totalMB: totalSize > 0 ? (totalSize / 1024 / 1024).toFixed(1) : null,
+              model: msg.model
+            });
+          }
+        }
+      });
+
+      ready = true;
+      self.postMessage({ type: 'ready' });
+    } catch (err) {
+      self.postMessage({
+        type: 'error',
+        id: null,
+        message: String(err && err.message || err)
+      });
+    }
+    return;
+  }
+
+  if (!ready) {
+    self.postMessage({ type: 'error', id: msg.id, message: 'model not loaded' });
+    return;
+  }
+
+  if (msg.type === 'embed') {
+    try {
+      const out = await extractor(msg.text, { pooling: 'cls', normalize: true });
+      self.postMessage({
+        type: 'result',
+        id: msg.id,
+        vector: Array.from(out.data)
+      });
+    } catch (err) {
+      self.postMessage({
+        type: 'error',
+        id: msg.id,
+        message: String(err && err.message || err)
+      });
+    }
+  }
+};
+`;
+
+  /** @type {Worker|null} */
+  let worker = null;
+  /** @type {string|null} */
+  let workerUrl = null;
+
+  /** @type {'loading'|'model'} */
+  let mode = 'loading';
+  /** @type {boolean} */
+  let stalled = false;
+  /** @type {number} */
+  let lastPct = 0;
+
+  let loadPromise = null;
+  let loadSettled = false;
+  let readyEmitted = false;
+  let nextId = 0;
+
+  /** @type {Map<number, {resolve: Function, timer: number}>} */
+  const pending = new Map();
+  /** @type {Array<Function>} */
+  const progressFns = [];
+  /** @type {Map<string, Float32Array>} */
+  const cache = new Map();
+
+  /**
+   * @param {Object} [extra]
+   */
+  function emitStatus(extra) {
+    try {
+      bus.emit('ai:status', Object.assign(
+        { mode, percent: lastPct, stalled },
+        extra || {}
+      ));
+    } catch (_) {}
+  }
+
+  /**
+   * LRU-чтение.
+   * @param {string} key
+   * @returns {Float32Array|undefined}
+   */
+  function cacheGet(key) {
+    if (!cache.has(key)) return undefined;
+    const v = cache.get(key);
+    cache.delete(key);
+    cache.set(key, v);
+    return v;
+  }
+
+  /**
+   * LRU-запись.
+   * @param {string} key
+   * @param {Float32Array} v
+   */
+  function cacheSet(key, v) {
+    if (cache.has(key)) {
+      cache.delete(key);
+    } else if (cache.size >= Config.get('aiCacheLimit', 300)) {
+      cache.delete(cache.keys().next().value);
+    }
+    cache.set(key, v);
+  }
+
+  /**
+   * Аварийная остановка: все pending разрешаются null, воркер убивается.
+   * Вызывается только при фатальной ошибке воркера (не при таймауте
+   * загрузки — там воркер жив и может докачать).
+   */
+  function cleanup() {
+    pending.forEach(p => {
+      clearTimeout(p.timer);
+      p.resolve(null);
+    });
+    pending.clear();
+
+    if (worker) {
+      try { worker.terminate(); } catch (_) {}
+      worker = null;
+    }
+
+    if (workerUrl) {
+      try { URL.revokeObjectURL(workerUrl); } catch (_) {}
+      workerUrl = null;
+    }
+  }
+
+  /**
+   * Фатальный отказ загрузки/воркера: остаёмся в loading+stalled.
+   * @param {string} reason
+   */
+  function stall(reason) {
+    if (mode === 'model') return;
+    stalled = true;
+    cleanup();
+    emitStatus();
+    Logger.warn('Embedder: ' + reason + ' — ии недоступно до перезапуска');
+  }
+
+  /**
+   * Загрузка модели.
+   * @returns {Promise<void>}
+   */
+  function doLoad() {
+    return new Promise(resolve => {
+      if (typeof Worker === 'undefined') {
+        stall('Worker не поддерживается браузером');
+        return resolve();
+      }
+
+      try {
+        const blob = new Blob([workerCode], { type: 'application/javascript' });
+        workerUrl = URL.createObjectURL(blob);
+        worker = new Worker(workerUrl, { type: 'module' });
+      } catch (err) {
+        stall('не создать Worker: ' + String(err && err.message || err));
+        return resolve();
+      }
+
+      // Таймаут загрузки: НЕ убиваем воркер — он докачивает в фоне.
+      // stalled прячет прогресс и переводит статус в «ии нет»;
+      // поздний 'ready' всё равно переведёт в model.
+      const LOAD_TIMEOUT = 120000;
+      const loadTimer = setTimeout(() => {
+        if (loadSettled || mode === 'model') return;
+        stalled = true;
+        emitStatus();
+        Logger.warn('Embedder: таймаут загрузки модели (120с), модель качается в фоне');
+        resolve();
+      }, LOAD_TIMEOUT);
+
+      worker.onerror = err => {
+        if (loadSettled) {
+          // краш после готовности: гасим только pending
+          pending.forEach(p => {
+            clearTimeout(p.timer);
+            p.resolve(null);
+          });
+          pending.clear();
+          Logger.warn('Embedder: воркер упал после загрузки', String(err && err.message || err));
+          return;
+        }
+        clearTimeout(loadTimer);
+        stall('ошибка Worker: ' + String(err && err.message || err));
+        resolve();
+      };
+
+      worker.onmessage = e => {
+        const msg = e.data;
+
+        if (msg.type === 'progress') {
+          lastPct = msg.pct;
+          stalled = false;
+
+          for (const fn of progressFns.slice()) {
+            try { fn(msg); } catch (_) {}
+          }
+          try { bus.emit('ai:progress', msg); } catch (_) {}
+          emitStatus({ loadedMB: msg.loadedMB, totalMB: msg.totalMB, model: msg.model });
+        }
+        else if (msg.type === 'ready') {
+          if (mode === 'model') return;
+          clearTimeout(loadTimer);
+
+          mode = 'model';
+          stalled = false;
+          lastPct = 100;
+          emitStatus();
+
+          if (!readyEmitted) {
+            readyEmitted = true;
+            try { bus.emit('ai:ready'); } catch (_) {}
+          }
+
+          Logger.info('Embedder: модель готова');
+          resolve();
+        }
+        else if (msg.type === 'error' && msg.id === null) {
+          if (mode === 'model') return;
+          clearTimeout(loadTimer);
+          stall('ошибка загрузки модели: ' + String(msg.message));
+          resolve();
+        }
+        else if (msg.type === 'result') {
+          const p = pending.get(msg.id);
+          if (p) {
+            clearTimeout(p.timer);
+            pending.delete(msg.id);
+            const vec = Float32Array.from(msg.vector);
+            cacheSet(p.text, vec);
+            p.resolve(vec);
+          }
+        }
+        else if (msg.type === 'error' && msg.id != null) {
+          const p = pending.get(msg.id);
+          if (p) {
+            clearTimeout(p.timer);
+            pending.delete(msg.id);
+            Logger.warn('Embedder: ошибка embed', String(msg.message));
+            p.resolve(null);
+          }
+        }
+      };
+
+      worker.postMessage({
+        type: 'load',
+        model: Config.get('model', 'onnx-community/granite-embedding-97m-multilingual-r2-ONNX'),
+      });
+    });
+  }
+
+  return {
+    /**
+     * Запуск загрузки. Идемпотентен.
+     * @param {Function} [onProgress] - подписка на прогресс (снимается
+     *   после завершения загрузки).
+     * @returns {Promise<void>}
+     */
+    load(onProgress) {
+      let off = null;
+      if (typeof onProgress === 'function') {
+        progressFns.push(onProgress);
+        off = () => {
+          const i = progressFns.indexOf(onProgress);
+          if (i > -1) progressFns.splice(i, 1);
+        };
+      }
+
+      if (mode === 'model') {
+        if (off) off();
+        return Promise.resolve();
+      }
+
+      if (loadPromise) return loadPromise;
+
+      cache.clear();
+      mode = 'loading';
+      stalled = false;
+      lastPct = 0;
+      emitStatus();
+
+      loadPromise = doLoad().then(() => {
+        loadSettled = true;
+        loadPromise = null;
+        if (off) off();
+      });
+
+      return loadPromise;
+    },
+
+    /**
+     * @param {string} text
+     * @returns {Promise<Float32Array|null>}
+     */
+    embed(text) {
+      const t = (text || '').trim();
+      if (!t) return Promise.resolve(null);
+
+      if (mode !== 'model' || !worker) {
+        return Promise.resolve(null);
+      }
+
+      const cached = cacheGet(t);
+      if (cached) return Promise.resolve(cached);
+
+      const id = nextId++;
+      return new Promise(resolve => {
+        const timer = setTimeout(() => {
+          if (pending.delete(id)) {
+            Logger.warn('Embedder: таймаут embed');
+            resolve(null);
+          }
+        }, Config.get('aiEmbedTimeout', 15000));
+
+        pending.set(id, { resolve, timer, text: t });
+        worker.postMessage({ type: 'embed', id, text: t });
+      });
+    },
+
+    /**
+     * @returns {boolean}
+     */
+    ready() {
+      return mode === 'model';
+    },
+
+    /**
+     * @returns {'loading'|'model'}
+     */
+    getMode() {
+      return mode;
+    },
+
+    /**
+     * Снимок состояния для UI-инициализации.
+     * @returns {{mode: string, percent: number, stalled: boolean}}
+     */
+    getState() {
+      return { mode, percent: lastPct, stalled };
+    },
+
+    /**
+     * Подписка на прогресс с отпиской.
+     * @param {Function} fn
+     * @returns {Function} off
+     */
+    onProgress(fn) {
+      if (typeof fn !== 'function') return () => {};
+      progressFns.push(fn);
+      return () => {
+        const i = progressFns.indexOf(fn);
+        if (i > -1) progressFns.splice(i, 1);
+      };
+    },
+  };
 }, ['Config', 'EventBus', 'Logger']);
 // ─── AI/Embedder ─── END ────────────────────────────────────────────────────
 
 // ─── AI/Ranker ─── START ────────────────────────────────────────────────────
 /**
- * cosineBatch (линейный, AbortSignal), split (relevant/seren по
- * Config threshold/serendipity на каждом вызове), isSimilar.
+ * Ранжирование: пакетный косинус, пороги relevant/seren, дубликаты.
+ * Пороги читаются из Config при каждом вызове — настройки применяются
+ * без перезагрузки.
  */
 DI.register('Ranker', function (Vec, Config) {
-  // TODO: реализация (как в v0.9.9)
+  /**
+   * @param {Float32Array|number[]} queryVector
+   * @param {Array<{id: string, vector: Array|Float32Array}>} items
+   * @param {AbortSignal} [signal]
+   * @returns {Promise<Array<{id: string, score: number}>>} По убыванию score.
+   */
+  function cosineBatch(queryVector, items, signal) {
+    if (!queryVector || !items || !items.length) {
+      return Promise.resolve([]);
+    }
+
+    if (signal && signal.aborted) {
+      return Promise.reject(new Error('aborted'));
+    }
+
+    const out = [];
+    for (const it of items) {
+      if (signal && signal.aborted) {
+        return Promise.reject(new Error('aborted'));
+      }
+      out.push({ id: it.id, score: Vec.cosine(queryVector, it.vector) });
+    }
+
+    out.sort((a, b) => b.score - a.score);
+    return Promise.resolve(out);
+  }
+
+  /**
+   * relevant: score >= threshold. seren: [threshold - serendipity, threshold).
+   * Ниже lowerBound — отброс.
+   * @param {Array<{id: string, score: number}>} scored
+   * @returns {{relevant: Array, seren: Array}}
+   */
+  function split(scored) {
+    const threshold = Config.get('threshold', 0.81);
+    const serendipity = Config.get('serendipity', 0.07);
+
+    const lowerBound = threshold - serendipity;
+
+    const relevant = [];
+    const seren = [];
+
+    for (const s of scored) {
+      if (s.score < lowerBound) {
+        continue;
+      }
+
+      if (s.score >= threshold) {
+        relevant.push(s);
+      } else {
+        seren.push(s);
+      }
+    }
+
+    return { relevant, seren };
+  }
+
+  /**
+   * @param {Float32Array|number[]} a
+   * @param {Float32Array|number[]} b
+   * @returns {boolean}
+   */
+  function isSimilar(a, b) {
+    return Vec.cosine(a, b) >= Config.get('duplicateThreshold', 0.88);
+  }
+
+  return { cosineBatch, split, isSimilar };
 }, ['Vec', 'Config']);
 // ─── AI/Ranker ─── END ──────────────────────────────────────────────────────
 
