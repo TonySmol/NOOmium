@@ -864,7 +864,7 @@ body.ready #app { display: flex; }
 
 #ed-ta {
   width: 100%;
-  min-height: 26px;
+  min-height: 44px;
   max-height: 120px;
   resize: none;
   font: 15px / 1.55 var(--font);
