@@ -864,7 +864,7 @@ body.ready #app { display: flex; }
 
 #ed-ta {
   width: 100%;
-  min-height: 44px;
+  min-height: 26px;
   max-height: 120px;
   resize: none;
   font: 15px / 1.55 var(--font);
@@ -1056,7 +1056,8 @@ body.ready #app { display: flex; }
 }
 
 #base-ctrls {
-  display: flex;
+  display: grid;
+  grid-template-columns: 2fr 1fr;
   gap: 6px;
 }
 
