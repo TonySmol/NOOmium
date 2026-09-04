@@ -31,7 +31,7 @@
 
 'use strict';
 
-const APP_VERSION = '1.0.2';
+const APP_VERSION = '1.0.3';
 
 // ═══ РЕЕСТР СОБЫТИЙ ШИНЫ (полный контракт) ════════════════════════════════════
 //
@@ -6269,6 +6269,8 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
 
     if (!ta) return;
 
+    ta.style.height = '44px';   // стартовая высота: одна строка
+    
     ensureSendIcon();
 
     if (iconTimer) clearTimeout(iconTimer);
