@@ -31,7 +31,7 @@
 
 'use strict';
 
-const APP_VERSION = '1.0.3';
+const APP_VERSION = '1.0.2';
 
 // ═══ РЕЕСТР СОБЫТИЙ ШИНЫ (полный контракт) ════════════════════════════════════
 //
@@ -8692,25 +8692,25 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboar
 
 // ─── UI/FirstRunGate ─── START ──────────────────────────────────────────────
 /**
- * Гейт первого запуска: блокирующий экран идентичности.
+ * Гейт первого запуска. v4 — каноническая версия.
  *
- * v1.0.2 → v3 (исправление): маркер первого запуска — ТОЛЬКО
- * firstRunDone (полный сброс стирает его). «Наличие ключа» маркером
- * быть не может: приложение генерирует ключ при любом старте,
- * поэтому проверка hasStoredKey всегда видела «уже есть» и гейт
- * не показывался даже после вайпа. Решение принимается синхронно,
- * до Nostr.init — гонок нет. Экран ждёт Nostr.init внутри ветки
- * «Показать» (кнопка disabled, ключ приходит мгновениями позже).
+ * Маркер первого запуска — ТОЛЬКО firstRunDone (полный сброс стирает
+ * localStorage → гейт возвращается). Наличие ключа маркером не является:
+ * приложение генерирует ключ при любом старте.
+ *
+ * Гарантии записи флага:
+ * - при входе по ключу: флаг ставится ДО finish() — синхронно;
+ * - при показе ключа: флаг ставится сразу после reveal;
+ * - при «Я сохранил»: дубль записи (идемпотентно).
+ * Гейт не зависит от порядка вызовов Boot (решение синхронно, DOM
+ * строится сразу; Nostr.init нужен только для reveal ключа — кнопка
+ * честно ждёт, ключ приходит из параллельного NetService.start).
  */
 DI.register('FirstRunGate', function (Config, Nostr, Account, Crypto, Toast, I18n, bus) {
   let root = null;
 
-  /**
-   * Ленивое построение DOM гейта.
-   */
   function ensureRoot() {
     if (root) return root;
-
     root = document.createElement('div');
     root.id = 'gate';
     document.body.appendChild(root);
@@ -8718,9 +8718,20 @@ DI.register('FirstRunGate', function (Config, Nostr, Account, Crypto, Toast, I18
   }
 
   /**
-   * @param {string} text
-   * @returns {Promise<boolean>}
+   * Гейт пройден: флаг + закрытие. Флаг — первым делом, синхронно.
    */
+  function passGate() {
+    Config.set('firstRunDone', true);
+    if (root) {
+      root.classList.remove('on');
+      setTimeout(() => {
+        try { root.remove(); } catch (_) {}
+        root = null;
+      }, 300);
+    }
+    try { bus.emit('gate:done', {}); } catch (_) {}
+  }
+
   async function copyText(text) {
     if (navigator.clipboard && navigator.clipboard.writeText) {
       try {
@@ -8734,9 +8745,7 @@ DI.register('FirstRunGate', function (Config, Nostr, Account, Crypto, Toast, I18
   }
 
   /**
-   * Ждать готовности Nostr (ключ). Nostr.init идемпотентен; Boot
-   * вызывает NetService.start() параллельно — оба вызова сходятся
-   * в один и тот же промис.
+   * Ждать ключ (Nostr.init идемпотентен, сходится с NetService.start).
    * @returns {Promise<boolean>}
    */
   async function nostrReady() {
@@ -8750,9 +8759,6 @@ DI.register('FirstRunGate', function (Config, Nostr, Account, Crypto, Toast, I18
 
   // ─── Экран 1: выбор ───────────────────────────────────────────────────────
 
-  /**
-   * Стартовый экран: логотип, описание, два выбора.
-   */
   function renderChoice() {
     const r = ensureRoot();
     r.innerHTML = '';
@@ -8806,9 +8812,6 @@ DI.register('FirstRunGate', function (Config, Nostr, Account, Crypto, Toast, I18
 
   // ─── Экран 2: новый ключ ──────────────────────────────────────────────────
 
-  /**
-   * Показ сгенерированного ключа (nsec) с копированием и подтверждением.
-   */
   function renderNewKey() {
     const r = ensureRoot();
     r.innerHTML = '';
@@ -8843,18 +8846,8 @@ DI.register('FirstRunGate', function (Config, Nostr, Account, Crypto, Toast, I18
       showBtn.disabled = true;
       box.textContent = '…';
 
-      // Ключ мог ещё не сгенерироваться (Nostr.init идёт параллельно
-      // в NetService.start) — ждём здесь, кнопка честно занята.
-      const ok1 = await nostrReady();
-      if (!ok1) {
-        revealed = false;
-        box.textContent = I18n.t('account.nsec.masked');
-        showBtn.disabled = false;
-        Toast.show('err', I18n.t('toast.save.fail'));
-        return;
-      }
-
-      const nsec = await Crypto.encodeNsec(Nostr.getSecretKey());
+      const ready = await nostrReady();
+      const nsec = ready ? await Crypto.encodeNsec(Nostr.getSecretKey()) : null;
       showBtn.disabled = false;
 
       if (!nsec) {
@@ -8868,7 +8861,7 @@ DI.register('FirstRunGate', function (Config, Nostr, Account, Crypto, Toast, I18
       box.classList.remove('masked');
       box.classList.add('focused');
 
-      // Флаг сразу: юзер увидел ключ — приложение «его».
+      // Флаг — сразу: юзер увидел ключ, гейт не вернётся.
       Config.set('firstRunDone', true);
       Config.set('keyExported', true);
 
@@ -8895,10 +8888,7 @@ DI.register('FirstRunGate', function (Config, Nostr, Account, Crypto, Toast, I18
     const done = document.createElement('button');
     done.className = 'nv-act gate-primary';
     done.textContent = I18n.t('gate.saved');
-    done.addEventListener('click', () => {
-      Config.set('firstRunDone', true);
-      finish();
-    });
+    done.addEventListener('click', passGate);
     actions.appendChild(done);
 
     const back = document.createElement('button');
@@ -8913,9 +8903,6 @@ DI.register('FirstRunGate', function (Config, Nostr, Account, Crypto, Toast, I18
 
   // ─── Экран 3: вход по ключу ───────────────────────────────────────────────
 
-  /**
-   * Вход с существующим ключом (nsec / ncryptsec + пароль).
-   */
   function renderEnterKey() {
     const r = ensureRoot();
     r.innerHTML = '';
@@ -8998,9 +8985,8 @@ DI.register('FirstRunGate', function (Config, Nostr, Account, Crypto, Toast, I18
       submitting = false;
 
       if (res.ok) {
-        Config.set('firstRunDone', true);
+        passGate();   // флаг — синхронно, первым делом
         Toast.show('ok', I18n.t('account.enter.done'));
-        finish();
         return;
       }
 
@@ -9019,22 +9005,8 @@ DI.register('FirstRunGate', function (Config, Nostr, Account, Crypto, Toast, I18
   }
 
   /**
-   * Закрыть гейт.
-   */
-  function finish() {
-    if (root) {
-      root.classList.remove('on');
-      setTimeout(() => {
-        try { root.remove(); } catch (_) {}
-        root = null;
-      }, 300);
-    }
-    try { bus.emit('gate:done', {}); } catch (_) {}
-  }
-
-  /**
    * Инициализация: единственный маркер — firstRunDone.
-   * Решение синхронно, до Nostr.init — гонок нет.
+   * Синхронно, без гонок с Nostr.
    */
   function init() {
     if (Config.get('firstRunDone', false)) return;
