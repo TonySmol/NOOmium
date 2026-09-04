@@ -86,17 +86,14 @@
       </div>
     </div>
 
-    <!-- Блок уведомлений (внизу: между лентой и кнопкой истории) -->
+    <!-- Блок уведомлений (fixed, поверх всего — см. style.css) -->
     <div id="notif-bar">
       <div id="toasts"></div>
     </div>
 
-    <!-- Кнопка загрузки истории -->
-    <button id="btn-history" class="hist-btn" data-i18n="net.loadmore">Загрузить ещё</button>
-
     <!-- Композер (иконка отправки вставляется из Composer.init) -->
     <div id="composer">
-      <textarea id="ed-ta" data-i18n-ph="ed.placeholder" aria-label="Текст заметки"></textarea>
+      <textarea id="ed-ta" rows="1" data-i18n-ph="ed.placeholder" aria-label="Текст заметки"></textarea>
       <div id="ed-foot">
         <span id="ed-cnt">0 <span data-i18n="ed.chars">симв.</span></span>
         <div id="ed-acts">
@@ -158,19 +155,19 @@
 <!-- ПРОГРЕСС -->
 <div id="progress" role="alert" aria-live="polite">
   <div class="prog-c">
-    <div style="font:600 17px var(--display);letter-spacing:-0.01em" data-i18n="progress.title">Загружаем модель</div>
-    <div id="prog-info" style="font-size:12px;color:var(--text-3);margin-top:4px;font-family:var(--mono)"></div>
+    <div class="prog-title" data-i18n="progress.title">Загружаем модель</div>
+    <div class="prog-sub" id="prog-info"></div>
     <div class="prog-bar">
       <div class="prog-fill" id="prog-fill"></div>
     </div>
-    <div id="prog-pct" style="font:500 12px var(--mono);color:var(--text-2)">0%</div>
+    <div class="prog-pct" id="prog-pct">0%</div>
   </div>
 </div>
 
 <!-- ПРОСМОТР ЗАМЕТКИ -->
 <div id="noteview" role="dialog" aria-modal="true"></div>
 
-<!-- ═══ РЕГИСТРАЦИЯ SERVICE WORKER (отдельно от модуля, чтобы работал всегда) ═══ -->
+<!-- ═══ РЕГИСТРАЦИЯ SERVICE WORKER ═══ -->
 <script>
   if ('serviceWorker' in navigator) {
     window.addEventListener('load', () => {
