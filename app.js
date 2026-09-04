@@ -31,7 +31,7 @@
 
 'use strict';
 
-const APP_VERSION = '1.0.3';
+const APP_VERSION = '1.0.2';
 
 // ═══ РЕЕСТР СОБЫТИЙ ШИНЫ (полный контракт) ════════════════════════════════════
 //
@@ -6201,7 +6201,7 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
       sending = false;
       setSendingUI(false);
       ta.value = '';
-      ta.style.height = 'auto';
+      ta.style.height = '23';
       Context.setInput('');
       updateCounter();
     };
@@ -6268,8 +6268,6 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
     footEl = document.getElementById('ed-foot');
 
     if (!ta) return;
-
-    ta.style.height = '44px';   // стартовая высота: одна строка
     
     ensureSendIcon();
 
@@ -6280,7 +6278,7 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
 
     ta.addEventListener('input', () => {
       ta.style.height = 'auto';
-      ta.style.height = Math.min(ta.scrollHeight, 120) + 'px';
+      ta.style.height = Math.min(ta.scrollHeight, 115) + 'px';
 
       updateCounter();
       Context.setInput(ta.value);
