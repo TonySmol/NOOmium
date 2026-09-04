@@ -31,7 +31,7 @@
 
 'use strict';
 
-const APP_VERSION = '1.0.1';
+const APP_VERSION = '1.0.2';
 
 // ═══ РЕЕСТР СОБЫТИЙ ШИНЫ (полный контракт) ════════════════════════════════════
 //
@@ -349,15 +349,8 @@ DI.register('Utils', function () {
  * applyToDOM: data-i18n / data-i18n-ph / data-i18n-aria.
  * setLang: persist в Config + applyToDOM + onChange + bus 'i18n:change'.
  *
- * ИЗМЕНЕНИЯ v1.0 против v0.9.9 (словари):
- * + 'st.ai.off' (вместо 'st.ai.demo' — demo-режима больше нет)
- * + 'progress.skip' — кнопка «Продолжить без ИИ» на оверлее загрузки
- * + 'ai.pending' — подсказка композера, пока модель учится
- * + 'toast.save.fail' — ошибка сохранения (B-02)
- * + 'toast.wipe.offline' — честный офлайн-вайп (H-04)
- * + 'toast.pin.novector' — пин без вектора (H-03)
- * ~ 'ranking.threshold.hint' — диапазон исправлен на 50%–95% (H-06)
- * − 'note.public.noedit' — рудимент (M-05, консенсус)
+ * v1.0.2: +gate.* (гейт первого запуска); −net.loadmore/net.loading
+ * (кнопка истории удалена).
  */
 DI.register('I18n', function (Config, bus) {
   const dicts = Object.create(null);
@@ -405,7 +398,7 @@ DI.register('I18n', function (Config, bus) {
         const key = el.getAttribute('data-i18n-aria');
         if (key) el.setAttribute('aria-label', t(key));
       });
-    } catch (_) {} // DOM-элементы недоступны до body.ready — не критично
+    } catch (_) {} // DOM недоступен до body.ready — не критично
   }
 
   function setLang(lang) {
@@ -559,9 +552,6 @@ DI.register('I18n', function (Config, bus) {
 
     'del.confirm': 'Удалить эту заметку навсегда?',
 
-    'net.loadmore': 'Загрузить ещё',
-    'net.loading': 'Загружаю…',
-
     'note.edit.placeholder': 'Текст заметки',
 
     'account.title': 'Аккаунт и ключ',
@@ -631,6 +621,22 @@ DI.register('I18n', function (Config, bus) {
     'onb.key.d': 'Твой ключ — это твой аккаунт. Сохрани его в «Настройки → Аккаунт»: с ним любая мысль вернётся на новое устройство автоматически.',
     'onb.delete.t': 'Удаление',
     'onb.delete.d': 'Удаление в Nostr — это просьба к релеям удалить заметку. Большинство рэлеев её выполнят, но те, кто уже увидел заметку, могут её сохранить. Полное удаление возможно только на своём релее.',
+
+    'gate.title': 'Добро пожаловать',
+    'gate.sub': 'NOOmium — соцсеть смыслов. Чтобы твои мысли возвращались на любое устройство, тебе нужен ключ.',
+    'gate.new': 'Я здесь впервые',
+    'gate.new.d': 'Создать новый ключ и сохранить его',
+    'gate.have': 'У меня есть ключ',
+    'gate.have.d': 'Войти с существующего устройства',
+    'gate.newkey.title': 'Твой ключ',
+    'gate.newkey.sub': 'Это твой аккаунт. Скопируй и сохрани его в надёжном месте — менеджер паролей, записная книжка. С этим ключом мысли вернутся на новое устройство.',
+    'gate.newkey.warn': 'Ключ нельзя восстановить. Потеряешь — потеряешь все мысли навсегда. Никому не показывай: кто получит ключ — станет тобой.',
+    'gate.copied': 'скопировано',
+    'gate.saved': 'Я сохранил ключ',
+    'gate.enter.title': 'Вход по ключу',
+    'gate.enter.sub': 'Вставьте ключ (nsec… или ncryptsec…) с другого устройства.',
+    'gate.enter.wrong': 'Ключ не распознан',
+    'gate.enter.ok': 'Войти',
 
     'time.now': 'только что',
     'time.min.one': 'минуту назад',
@@ -778,9 +784,6 @@ DI.register('I18n', function (Config, bus) {
 
     'del.confirm': 'Delete this note forever?',
 
-    'net.loadmore': 'Load more',
-    'net.loading': 'Loading…',
-
     'note.edit.placeholder': 'Note text',
 
     'account.title': 'Account & key',
@@ -850,6 +853,22 @@ DI.register('I18n', function (Config, bus) {
     'onb.key.d': 'Your key is your account. Save it in "Settings → Account": with it, every thought returns to a new device automatically.',
     'onb.delete.t': 'Deletion',
     'onb.delete.d': 'Deletion in Nostr is a request to relays to delete a note. Most relays will honor it, but those who already saw the note may keep it. Full deletion is only possible on your own relay.',
+
+    'gate.title': 'Welcome',
+    'gate.sub': 'NOOmium is a social network of meaning. To keep your thoughts returning to any device, you need a key.',
+    'gate.new': "I'm new here",
+    'gate.new.d': 'Create a new key and save it',
+    'gate.have': 'I have a key',
+    'gate.have.d': 'Sign in from an existing device',
+    'gate.newkey.title': 'Your key',
+    'gate.newkey.sub': 'This is your account. Copy it and keep it somewhere safe — a password manager, a notebook. With this key your thoughts return to a new device.',
+    'gate.newkey.warn': 'The key cannot be recovered. Lose it — lose all your thoughts forever. Never show it to anyone: whoever gets the key becomes you.',
+    'gate.copied': 'copied',
+    'gate.saved': 'I saved the key',
+    'gate.enter.title': 'Sign in with key',
+    'gate.enter.sub': 'Paste a key (nsec… or ncryptsec…) from another device.',
+    'gate.enter.wrong': 'Key not recognized',
+    'gate.enter.ok': 'Sign in',
 
     'time.now': 'just now',
     'time.min.one': 'min ago',
@@ -3166,24 +3185,14 @@ DI.register('Protocol', function (Config, Vec, Vault, Nostr) {
 // ─── NET/NetService ─── START ───────────────────────────────────────────────
 /**
  * Движение: подписка на комнату (каноны — без since: replaceable
- * отдаёт последнюю версию каждого канона; запросы/ответы — скользящим
- * окном), подписка на себя, публикация канонов через очередь,
- * ответы-ссылки на чужие запросы, запросы при контексте, история.
+ * отдаёт последнюю версию каждого; запросы/ответы — скользящим
+ * окном), подписка на себя, публикация через очередь, ответы-ссылки,
+ * запросы при контексте, heartbeat.
  *
- * ИЗМЕНЕНИЯ v1.0 против v0.9.9:
- * 1. Очередь хранит версии: {uids: [{uid, version}], deleted:
- *    [{uid, version}]}. flushQueue публикует живой канон только при
- *    note.version > publishedVersion; после успеха — тихая запись
- *    DB.updatePublishState. Стартовая переочередка — только
- *    неопубликованные заметки (не все, как было).
- * 2. sync:status — полный цикл: 'active' при публикации, 'idle' при
- *    покое (синк включён, очередь пуста), 'off' при выключенном.
- * 3. publishWipeAll() → Promise<{published, offline}>: офлайн честно
- *    сообщается вызывающему (Boot тостит предупреждение).
- * 4. canonDeleted публикуется с noteVersion на момент удаления —
- *    эхо-удаление на других устройствах сходится по payload-версии.
- * Остальное — поведение v0.9.9 без изменений (эпохи, бэкофф, окна,
- * центроиды, rate-limits, heartbeat, seen-дедуп).
+ * v1.0.2: −loadHistory/emitHistoryDone (кнопка «Загрузить ещё»
+ * удалена — лента живёт свежим срезом, глубина нужна только поиску).
+ * Остальное — контракт v1.0: версионированная очередь c
+ * publishedVersion, полный цикл sync:status, wipe-отчёт.
  */
 DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Config, Logger, bus) {
   let started = false;
@@ -3209,16 +3218,12 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   const peerQueryTimes = new Map();
 
   let currentWindow = Config.get('subWindow', 300);
-  let historyLoading = false;
   let subEpoch = 0;
 
   const QUEUE_KEY = 'noomium:queue';
 
   /**
    * Очередь: {uids: [{uid, version}], deleted: [{uid, version}]}.
-   * version для deleted — версия на момент удаления (заметки в DB
-   * уже нет, версия живёт только здесь). Для uids версия — справочная;
-   * flush читает актуальную из заметки.
    * @returns {{uids: Array<{uid: string, version: number}>,
    *   deleted: Array<{uid: string, version: number}>}}
    */
@@ -3581,9 +3586,8 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   }
 
   /**
-   * Подписка на комнату: каноны без since (replaceable-семантика:
-   * релей хранит последнюю версию каждого канона по d-tag); запросы
-   * и ответы — со скользящим окном.
+   * Подписка на комнату: каноны без since (replaceable-семантика);
+   * запросы и ответы — со скользящим окном.
    */
   function subscribeToRoom() {
     const filters = [
@@ -3753,41 +3757,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   }
 
   /**
-   * Расширение окна истории (для запросов/ответов).
-   */
-  function loadHistory() {
-    if (!started || historyLoading) return;
-
-    const maxWindow = Config.get('historyMaxWindow', 2592000);
-    if (currentWindow >= maxWindow) {
-      emitHistoryDone(false);
-      return;
-    }
-
-    historyLoading = true;
-    emitHistoryDone(true);
-
-    currentWindow = Math.min(maxWindow, Math.max(currentWindow * 4, 86400));
-
-    try {
-      subscribeToRoom();
-      Logger.info('NetService: окно истории → ' + currentWindow + 's');
-    } finally {
-      setTimeout(() => {
-        historyLoading = false;
-        emitHistoryDone(false);
-      }, 1200);
-    }
-  }
-
-  /**
-   * @param {boolean} loading
-   */
-  function emitHistoryDone(loading) {
-    try { bus.emit('net:history', { loading: loading, window: currentWindow }); } catch (_) {}
-  }
-
-  /**
    * Старт. Идемпотентен; при падении — retry 10с.
    * @returns {Promise<void>}
    */
@@ -3854,9 +3823,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
         startHeartbeat();
         rebuildCentroids();
 
-        // Стартовая переочередка: только неопубликованные версии
-        // (publishedVersion отсутствует/меньше version — включая
-        // первое знакомство после v0.9).
+        // Стартовая переочередка: только неопубликованные версии.
         DB.allNotes().then(notes => {
           notes.forEach(n => {
             if (n && n.uid
@@ -3999,7 +3966,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     return { published, offline: false };
   }
 
-  return { start, stop, resync, loadHistory, publishWipeAll };
+  return { start, stop, resync, publishWipeAll };
 }, ['Nostr', 'Protocol', 'DB', 'Ranker', 'Vec', 'Store', 'Config', 'Logger', 'EventBus']);
 // ─── NET/NetService ─── END ─────────────────────────────────────────────────
 
@@ -4824,14 +4791,12 @@ DI.register('Feed', function (DB, Ranker, Store, bus, Logger, Utils, Config) {
 // ─── DOMAIN/Provenance ─── START ────────────────────────────────────────────
 /**
  * Генеалогия по parent {uid, owner} через notes + mirror.
- * mirror-записи своих uid и deleted исключаются (дубли/мусор).
- * Цикл-защита: seen до рекурсии/спуска.
+ * mirror-записи своих uid и deleted исключаются. Цикл-защита.
  *
- * ИЗМЕНЕНИЕ v1.0 (безопасное): descendants — BFS по предпостроенному
- * индексу parent→children вместо полного скана базы на каждый уровень
- * (O(N) вместо O(уровни×N)); семантика идентична, включая циклы и
- * ромбы. ancestors — кэш ограничен 100 записями (раньше рос
- * неограниченно за длинную сессию).
+ * v1.0.2: descendants() возвращает {note, gen} — gen = поколение
+ * от исходной заметки (1 = прямые дети, 2 = внуки, …). BFS идёт
+ * уровнями, gen присваивается естественно. Структура note без
+ * изменений — старые потребители видят те же поля.
  */
 DI.register('Provenance', function (DB, bus, Nostr) {
   /** @type {Map<string, {chain: Array, timestamp: number}>} */
@@ -4899,9 +4864,11 @@ DI.register('Provenance', function (DB, bus, Nostr) {
   }
 
   /**
-   * Все потомки (BFS по индексу parent→children, защита от циклов).
+   * Все потомки (BFS по уровням, защита от циклов).
    * @param {string} uid
-   * @returns {Promise<Array<Object>>}
+   * @returns {Promise<Array<{note: Object, gen: number}>>}
+   *   gen: 1 = прямые дети, 2 = внуки, … Порядок: по поколениям,
+   *   внутри поколения — порядок базы.
    */
   function descendants(uid) {
     if (!uid) return Promise.resolve([]);
@@ -4919,16 +4886,18 @@ DI.register('Provenance', function (DB, bus, Nostr) {
       const out = [];
       const seenIds = new Set([uid]);
       let frontier = [uid];
+      let gen = 0;
 
       while (frontier.length) {
         const next = [];
+        gen++;
 
         for (const p of frontier) {
           const kids = byParent.get(p) || [];
           for (const k of kids) {
             if (!seenIds.has(k.uid)) {
               seenIds.add(k.uid);
-              out.push(k);
+              out.push({ note: k, gen });
               next.push(k.uid);
             }
           }
@@ -6050,16 +6019,16 @@ DI.register('Onboarding', function (Config, Modal, I18n, Embedder) {
 /**
  * Ввод: лимиты (soft 1200 / hard 2000 / max 2500), тумблер видимости,
  * Ctrl+Enter, VisualViewport-клавиатура, отправка через Notes.create.
- * Родитель = пин {uid, owner} (И1). После отправки пин НЕ снимается
- * («мама» для серии заметок); контекст возвращается в 'pin'.
+ * Родитель = пин {uid, owner} (И1); после отправки пин НЕ снимается.
  *
- * КОНТРАКТ v1.0:
- * - Notes.create REJECT → тост 'toast.save.fail', текст ОСТАЁТСЯ в
- *   textarea, кнопка восстанавливается (Закон 2, B-02).
- * - mode='loading' (не stalled) и текст непуст → hint 'ai.pending':
- *   отправка НЕ блокируется — заметка сохранится без вектора,
- *   backfill доэмбеддит после ai:ready.
- * - Double-click защита: sending-флаг + disabled.
+ * v1.0.2 — autoGrow: целочисленная геометрия (гайдлайн правило 10):
+ * строка 24px, паддинги 12/12, максимум 5 строк (144px), 6-я строка —
+ * скролл внутри поля. Старт: одна строка, placeholder по центру.
+ * Идентично на iOS/Chrome/Firefox — нет дробных пикселей в формуле.
+ *
+ * Контракт v1.0 (без изменений): Notes.create REJECT → текст остаётся
+ * в textarea, кнопка восстанавливается; ai.pending при loading;
+ * double-click защита.
  */
 DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils, Config, Embedder) {
   let ta, cnt, sendBtn, toggle, footEl;
@@ -6153,6 +6122,32 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
   }
 
   /**
+   * Точная геометрия поля: N строк × 24px + паддинги 12/12.
+   * Число строк — из scrollHeight, итог округляется к целым строкам
+   * и клампится 1..5. Целые пиксели → идентично на всех движках.
+   * 6-я строка: overflow-y → auto (скролл внутри поля).
+   */
+  function autoGrow() {
+    const LINE = 24;
+    const PAD = 12;
+    const MAX_LINES = 5;
+
+    const wasOverflow = ta.style.overflowY;
+    ta.style.overflowY = 'hidden';
+
+    const content = ta.scrollHeight - PAD * 2;
+    const lines = Math.max(1, Math.min(MAX_LINES, Math.round(content / LINE)));
+
+    const h = PAD * 2 + lines * LINE;
+    ta.style.height = h + 'px';
+
+    const needsScroll = ta.scrollHeight > h + 1;
+    ta.style.overflowY = needsScroll ? 'auto' : 'hidden';
+
+    if (wasOverflow !== ta.style.overflowY && needsScroll) ta.scrollTop = ta.scrollHeight;
+  }
+
+  /**
    * @param {string} mode - 'private' | 'world'
    */
   function reflectMode(mode) {
@@ -6201,7 +6196,7 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
       sending = false;
       setSendingUI(false);
       ta.value = '';
-      ta.style.height = 'auto';
+      autoGrow();
       Context.setInput('');
       updateCounter();
     };
@@ -6216,9 +6211,7 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
         finish();
       })
       .catch(() => {
-        // Закон 2: текст пользователя неприкосновенен — остаётся
-        // в textarea, кнопка восстанавливается. Причину Notes уже
-        // записал в лог.
+        // Закон 2: текст пользователя неприкосновенен.
         Toast.show('err', I18n.t('toast.save.fail'));
         sending = false;
         setSendingUI(false);
@@ -6269,6 +6262,8 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
 
     if (!ta) return;
 
+    autoGrow(); // стартовая высота: одна строка по центру
+
     ensureSendIcon();
 
     if (iconTimer) clearTimeout(iconTimer);
@@ -6277,9 +6272,7 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
     ta.setAttribute('maxlength', Config.get('maxPostLength', 2500));
 
     ta.addEventListener('input', () => {
-      ta.style.height = 'auto';
-      ta.style.height = Math.min(ta.scrollHeight, 120) + 'px';
-
+      autoGrow();
       updateCounter();
       Context.setInput(ta.value);
     });
@@ -6306,7 +6299,6 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
 
     unsubs.push(Store.subscribe(s => s.sendMode, reflectMode));
 
-    // Состояние модели меняется → пересчитать подсказку ai.pending.
     unsubs.push(bus.on('ai:status', () => updateCounter()));
 
     unsubs.push(bus.on('i18n:change', () => {
@@ -6345,25 +6337,22 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
 // ─── UI/FeedView ─── START ──────────────────────────────────────────────────
 /**
  * Рендер ленты: хронология / пин-дрейф / ввод; карточки, связи,
- * резонанс, история (#btn-history).
+ * резонанс.
  *
- * ИЗМЕНЕНИЯ v1.0 против v0.9.9:
- * - Анимация входа только НОВЫМ карточкам (diff по uid): повторный
- *   рендер не мигает (M-02). Стагger считает только новые.
- * - Тикер 30с: обновляет текст .note-date (dataset.ts), без
- *   пересборки ленты — «н минут назад» живёт.
- * - isTyping && ctx.vector===null → прежняя лента (state.feed),
- *   пустого состояния-вспышки нет (H-05). Сегменты в этом окне
- *   скрыты (вектор ещё не готов — счётчики были бы ложными).
- * - Кнопка ↳: слушатель вешается СРАЗУ с флагом parentOk; быстрый
- *   клик до резолва — тихо, без всплытия в пин (M-08).
- * - Клик по карточке без вектора → warn-тост (честный отказ пина).
- * Контент — только textContent/createElement (Закон 1; innerHTML —
- * исключительно статические sig-bar полоски).
+ * v1.0.2:
+ * - Древо предков/потомков: классы .tree-list/.tree-item/.tree-gen
+ *   (гайдлайн, правило 7 — инлайны удалены). Карточки заподлицо,
+ *   поколение — mono-меткой слева.
+ * - Потомки ◆: полное поддерево через Provenance.descendants
+ *   (метки →1/→2 по поколениям), не только прямые дети.
+ * - Вычистка «Загрузить ещё»: histBtn и подписка net:history
+ *   удалены (кнопки в DOM больше нет).
+ * Остальное — контракт v1.0.1: анимация новым карточкам, тикер
+ * дат 30с, прежняя лента при вводе без вектора, ↳-флаг parentOk.
  */
 DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Influence, Provenance, Modal, NetService, Toast) {
   let feedEl, emptyEl, emptyT, segBar, ctxBanner, ctxSrc, ctxTxt, ctxX;
-  let cLocal, cWorld, cSeren, histBtn;
+  let cLocal, cWorld, cSeren;
   let segBtns = [];
   let unsubs = [];
   let rafPending = false;
@@ -6384,7 +6373,6 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
     cLocal = document.getElementById('c-local');
     cWorld = document.getElementById('c-world');
     cSeren = document.getElementById('c-seren');
-    histBtn = document.getElementById('btn-history');
     segBtns = Array.from(document.querySelectorAll('.seg-b'));
   }
 
@@ -6415,7 +6403,6 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
   function onNoteClick(n) {
     const ctx = Store.get('context');
 
-    // Повторный клик по закреплённой — снять пин.
     if ((ctx.source === 'pin' || ctx.source === 'drift') && ctx.uid === n.uid) {
       Context.clearPin();
       return;
@@ -6424,100 +6411,106 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
     if (n.vector) {
       Context.setPin(n);
     } else {
-      // Без вектора (модель не готова / fact-only) — честный отказ.
       Toast.show('warn', I18n.t('toast.pin.novector'));
     }
   }
 
-  /**
-   * @param {Array<Object>} childrenList
-   */
-  function renderChildrenModal(childrenList) {
-    const truncate = Config.get('truncateTextLength', 140);
-    const body = document.createElement('div');
-    body.style.cssText = 'display:flex;flex-direction:column;gap:8px;';
+  // ─── Древо: общая фабрика элементов ───────────────────────────────────────
 
-    if (!childrenList.length) {
+  /**
+   * Карточка древа: заподлицо, mono-метка поколения слева, текст
+   * полной шириной. Клик → открыть заметку.
+   * @param {Object} note - заметка из Provenance.
+   * @param {string} genLabel - Метка поколения ('↳1', '→2', '◆').
+   * @param {boolean} [root] - подсветка исходного узла.
+   * @returns {HTMLButtonElement}
+   */
+  function treeItem(note, genLabel, root) {
+    const item = document.createElement('button');
+    item.className = 'tree-item' + (root ? ' root' : '');
+
+    const gen = document.createElement('span');
+    gen.className = 'tree-gen';
+    gen.textContent = genLabel;
+    item.appendChild(gen);
+
+    const t = document.createElement('span');
+    const truncate = Config.get('truncateTextLength', 140);
+    t.textContent = (note.text || '').slice(0, truncate);
+    item.appendChild(t);
+
+    item.addEventListener('click', () => {
+      Modal.close();
+      try { bus.emit('note:open', { uid: note.uid }); } catch (_) {}
+    });
+
+    return item;
+  }
+
+  /**
+   * Модалка древа: общий каркас (тело-список, пустое состояние,
+   * кнопка Закрыть).
+   * @param {string} titleKey
+   * @param {number} count
+   * @param {Function} buildList - (body: Element) => void
+   */
+  function openTreeModal(titleKey, count, buildList) {
+    const body = document.createElement('div');
+    body.className = 'tree-list';
+
+    if (count) {
+      buildList(body);
+    } else {
       const empty = document.createElement('div');
-      empty.style.cssText = 'color:var(--text-3);font-size:13px;text-align:center;padding:12px;';
+      empty.className = 'modal-empty';
       empty.textContent = I18n.t('inf.nochildren');
       body.appendChild(empty);
-    } else {
-      childrenList.forEach(c => {
-        const item = document.createElement('button');
-        item.className = 'nv-act';
-        item.style.cssText = 'text-align:left;justify-content:flex-start;white-space:normal;height:auto;min-height:40px;width:100%;';
-        item.textContent = (c.text || '').slice(0, truncate);
-
-        item.addEventListener('click', () => {
-          Modal.close();
-          try { bus.emit('note:open', { uid: c.uid }); } catch (_) {}
-        });
-
-        body.appendChild(item);
-      });
     }
 
     Modal.open({
-      title: I18n.t('inf.children') + (childrenList.length ? ' · ' + childrenList.length : ''),
+      title: I18n.t(titleKey) + (count ? ' · ' + count : ''),
       body: body,
       buttons: [{ text: I18n.t('btn.close'), onClick: () => Modal.close() }],
     });
   }
 
+  // ─── Древо: потомки ◆ ─────────────────────────────────────────────────────
+
   /**
+   * Полное поддерево потомков: BFS-поколениями, метки →1/→2.
    * @param {Object} note
    */
   function showChildren(note) {
-    Provenance.children(note.uid).then(childrenList => {
-      renderChildrenModal(childrenList);
+    Provenance.descendants(note.uid).then(items => {
+      openTreeModal('inf.children', items.length, body => {
+        items.forEach(({ note: child, gen }) => {
+          body.appendChild(treeItem(child, '→' + gen));
+        });
+      });
     }).catch(() => {});
   }
 
-  /**
-   * @param {Object} note
-   * @param {Array<Object>} chain
-   */
-  function renderAncestorsModal(note, chain) {
-    const truncate = Config.get('truncateTextLength', 140);
-    const body = document.createElement('div');
-    body.style.cssText = 'display:flex;flex-direction:column;gap:8px;';
-
-    if (!chain.length) {
-      const empty = document.createElement('div');
-      empty.style.cssText = 'color:var(--text-3);font-size:13px;text-align:center;padding:12px;';
-      empty.textContent = I18n.t('inf.noancestors');
-      body.appendChild(empty);
-    } else {
-      chain.forEach((c, i) => {
-        const item = document.createElement('button');
-        item.className = 'nv-act';
-        item.style.cssText = 'text-align:left;justify-content:flex-start;white-space:normal;height:auto;min-height:40px;width:100%;';
-        item.style.paddingLeft = (16 + i * 14) + 'px';
-        item.textContent = '↳ ' + (c.text || '').slice(0, truncate);
-
-        item.addEventListener('click', () => {
-          Modal.close();
-          try { bus.emit('note:open', { uid: c.uid }); } catch (_) {}
-        });
-
-        body.appendChild(item);
-      });
-    }
-
-    Modal.open({
-      title: I18n.t('inf.lineage') + (chain.length ? ' · ' + chain.length : ''),
-      body: body,
-      buttons: [{ text: I18n.t('btn.close'), onClick: () => Modal.close() }],
-    });
-  }
+  // ─── Древо: предки ↳ ──────────────────────────────────────────────────────
 
   /**
+   * Цепочка предков: сверху мама, вниз старше; метка ↳N.
    * @param {Object} note
    */
   function showAncestors(note) {
     Provenance.ancestors(note.uid).then(chain => {
-      renderAncestorsModal(note, chain);
+      openTreeModal('inf.noancestors', chain.length, body => {
+        if (!chain.length) {
+          body.textContent = '';
+          const empty = document.createElement('div');
+          empty.className = 'modal-empty';
+          empty.textContent = I18n.t('inf.noancestors');
+          body.appendChild(empty);
+          return;
+        }
+        chain.forEach((c, i) => {
+          body.appendChild(treeItem(c, '↳' + (i + 1)));
+        });
+      });
     }).catch(() => {});
   }
 
@@ -6574,8 +6567,6 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
         link.title = I18n.t('inf.lineage');
         link.setAttribute('aria-label', I18n.t('inf.openparent'));
 
-        // Слушатель сразу; резолв поднимает флаг или вешает orphan.
-        // Быстрый клик до резолва — тихо (M-08: без всплытия в пин).
         let parentOk = false;
         link.addEventListener('click', e => {
           e.stopPropagation();
@@ -6705,8 +6696,6 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
     const isRanked = isPinnedMode || isTyping || isDrift;
     const hasVector = !!ctx.vector;
 
-    // Сегменты — только в режиме ввода с готовым вектором
-    // (до готовности счётчики были бы нулевыми/ложными).
     segBar.classList.toggle('on', isTyping && hasVector);
     ctxBanner.classList.toggle('on', isPinnedMode || isDrift);
 
@@ -6731,12 +6720,9 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
     } else if (isTyping && hasVector) {
       notes = state.lists[state.seg] || [];
     } else {
-      // Хронология — ИЛИ ввод до готовности вектора: прежняя лента
-      // (H-05: без пустой вспышки на окно debounce+embed).
       notes = state.feed;
     }
 
-    // Diff по uid: анимация входа только новым карточкам.
     const prevUids = new Set();
     for (const el of feedEl.children) {
       if (el.dataset && el.dataset.uid) prevUids.add(el.dataset.uid);
@@ -6758,7 +6744,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
       notes.forEach(n => {
         const c = card(n, isRanked, newIdx);
         if (prevUids.has(n.uid)) {
-          c.style.animation = 'none'; // уже была на экране — без мигания
+          c.style.animation = 'none';
         } else {
           newIdx++;
         }
@@ -6783,22 +6769,6 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
     unsubs.push(bus.on('db:change', scheduleRender));
     unsubs.push(bus.on('db:mirror', scheduleRender));
     unsubs.push(bus.on('influence:updated', scheduleRender));
-
-    if (histBtn) {
-      histBtn.addEventListener('click', () => NetService.loadHistory());
-
-      unsubs.push(bus.on('net:history', e => {
-        if (!histBtn) return;
-
-        if (e && e.loading) {
-          histBtn.disabled = true;
-          histBtn.textContent = I18n.t('net.loading');
-        } else {
-          histBtn.disabled = false;
-          histBtn.textContent = I18n.t('net.loadmore');
-        }
-      }));
-    }
 
     segBtns.forEach(b => {
       b.addEventListener('click', () => {
@@ -8719,6 +8689,378 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboar
 }, ['Store', 'Config', 'Modal', 'Toast', 'I18n', 'EventBus', 'Onboarding', 'Nostr', 'DB', 'NetService']);
 // ─── UI/MenuView ─── END ─────────────────══─────────────────────────────────
 
+// ─── UI/FirstRunGate ─── START ──────────────────────────────────────────────
+/**
+ * Гейт первого запуска: блокирующий полноэкранный экран идентичности.
+ *
+ * Флоу: первый запуск (или после полного сброса — firstRunDone
+ * стирается вместе с localStorage) → Nostr.init уже сгенерировал
+ * ключ → гейт предлагает:
+ *   «Я здесь впервые» → показ ключа (nsec) → скопировать →
+ *   «Я сохранил ключ» → firstRunDone = true → гейт уходит.
+ *   «У меня есть ключ» → вход (nsec/ncryptsec + пароль) →
+ *   Account.enterKey (замена ключа, DB.reset) → firstRunDone → уход.
+ *
+ * Прогресс модели (z-1200) качается ПОД гейтом (z-1250) — фон.
+ * Тосты (z-1300) видны поверх гейта.
+ * Гейт не закрывается Escape/кликом — только явным выбором юзера.
+ */
+DI.register('FirstRunGate', function (Config, Nostr, Account, Crypto, Toast, I18n, bus) {
+  let root = null;
+
+  /**
+   * Ленивое построение DOM гейта.
+   */
+  function ensureRoot() {
+    if (root) return root;
+
+    root = document.createElement('div');
+    root.id = 'gate';
+    document.body.appendChild(root);
+    return root;
+  }
+
+  /**
+   * @param {string} text
+   * @returns {Promise<boolean>}
+   */
+  async function copyText(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      try {
+        await navigator.clipboard.writeText(text);
+        return true;
+      } catch (_) {
+        return false;
+      }
+    }
+    return false;
+  }
+
+  // ─── Экран 1: выбор ───────────────────────────────────────────────────────
+
+  /**
+   * Стартовый экран: логотип, описание, два выбора.
+   */
+  function renderChoice() {
+    const r = ensureRoot();
+    r.innerHTML = '';
+
+    const c = document.createElement('div');
+    c.className = 'gate-c';
+
+    const logo = document.createElement('div');
+    logo.className = 'gate-logo';
+    logo.innerHTML = 'NOO<b>·</b>mium';
+    c.appendChild(logo);
+
+    const sub = document.createElement('div');
+    sub.className = 'gate-sub';
+    sub.textContent = I18n.t('gate.sub');
+    c.appendChild(sub);
+
+    const choices = document.createElement('div');
+    choices.className = 'gate-choices';
+
+    // «Я здесь впервые» — primary.
+    const fresh = document.createElement('button');
+    fresh.className = 'gate-choice primary';
+    const ft = document.createElement('span');
+    ft.className = 'gc-t';
+    ft.textContent = I18n.t('gate.new');
+    const fd = document.createElement('span');
+    fd.className = 'gc-d';
+    fd.textContent = I18n.t('gate.new.d');
+    fresh.appendChild(ft);
+    fresh.appendChild(fd);
+    fresh.addEventListener('click', renderNewKey);
+    choices.appendChild(fresh);
+
+    // «У меня есть ключ».
+    const have = document.createElement('button');
+    have.className = 'gate-choice';
+    const ht = document.createElement('span');
+    ht.className = 'gc-t';
+    ht.textContent = I18n.t('gate.have');
+    const hd = document.createElement('span');
+    hd.className = 'gc-d';
+    hd.textContent = I18n.t('gate.have.d');
+    have.appendChild(ht);
+    have.appendChild(hd);
+    have.addEventListener('click', renderEnterKey);
+    choices.appendChild(have);
+
+    c.appendChild(choices);
+    r.appendChild(c);
+    r.classList.add('on');
+  }
+
+  // ─── Экран 2: новый ключ ──────────────────────────────────────────────────
+
+  /**
+   * Показ сгенерированного ключа (nsec) с копированием и подтверждением.
+   */
+  function renderNewKey() {
+    const r = ensureRoot();
+    r.innerHTML = '';
+
+    const c = document.createElement('div');
+    c.className = 'gate-c';
+
+    const title = document.createElement('div');
+    title.className = 'gate-logo';
+    title.style.fontSize = '18px';
+    c.appendChild(title);
+
+    const t2 = document.createElement('div');
+    t2.className = 'gate-sub';
+    t2.style.fontWeight = '600';
+    t2.style.color = 'var(--text)';
+    t2.textContent = I18n.t('gate.newkey.title');
+    c.appendChild(t2);
+
+    const sub = document.createElement('div');
+    sub.className = 'gate-sub';
+    sub.textContent = I18n.t('gate.newkey.sub');
+    c.appendChild(sub);
+
+    // Ключ: маскирован до «Показать», потом полный.
+    const box = document.createElement('div');
+    box.className = 'key-box masked';
+    box.textContent = I18n.t('account.nsec.masked');
+    c.appendChild(box);
+
+    let revealed = false;
+    let copied = false;
+
+    const showBtn = document.createElement('button');
+    showBtn.className = 'nv-act';
+    showBtn.style.width = '100%';
+    showBtn.textContent = I18n.t('btn.show');
+    showBtn.addEventListener('click', async () => {
+      if (revealed) return;
+      revealed = true;
+
+      showBtn.disabled = true;
+      box.textContent = '…';
+
+      const nsec = await Crypto.encodeNsec(Nostr.getSecretKey());
+      showBtn.disabled = false;
+
+      if (!nsec) {
+        revealed = false;
+        box.textContent = I18n.t('account.nsec.masked');
+        Toast.show('err', I18n.t('toast.copy.fail'));
+        return;
+      }
+
+      box.textContent = nsec;
+      box.classList.remove('masked');
+      box.classList.add('focused');
+
+      // Сразу копируем: юзер пришёл за ключом — буфер к его услугам.
+      const ok = await copyText(nsec);
+      copied = ok;
+      Toast.show(ok ? 'ok' : 'warn',
+        I18n.t(ok ? 'gate.copied' : 'account.nsec.masked'));
+
+      showBtn.textContent = I18n.t('btn.copy');
+      showBtn.addEventListener('click', async () => {
+        const ok2 = await copyText(nsec);
+        if (ok2) {
+          copied = true;
+          Toast.show('ok', I18n.t('gate.copied'));
+        } else {
+          Toast.show('err', I18n.t('toast.copy.fail'));
+        }
+      }, { once: true });
+    });
+    c.appendChild(showBtn);
+
+    const warn = document.createElement('div');
+    warn.className = 'gate-warn';
+    warn.textContent = I18n.t('gate.newkey.warn');
+    c.appendChild(warn);
+
+    const actions = document.createElement('div');
+    actions.className = 'gate-actions';
+
+    const done = document.createElement('button');
+    done.className = 'nv-act';
+    done.style.background = 'var(--amber-btn)';
+    done.style.color = '#1a1206';
+    done.style.borderColor = 'transparent';
+    done.style.fontWeight = '600';
+    done.textContent = I18n.t('gate.saved');
+    done.addEventListener('click', () => {
+      Config.set('firstRunDone', true);
+      Config.set('keyExported', true); // ключ показан и (скорее всего) сохранён
+      finish();
+    });
+    actions.appendChild(done);
+
+    const back = document.createElement('button');
+    back.className = 'nv-act';
+    back.textContent = I18n.t('btn.cancel');
+    back.addEventListener('click', renderChoice);
+    actions.appendChild(back);
+
+    c.appendChild(actions);
+    r.appendChild(c);
+  }
+
+  // ─── Экран 3: вход по ключу ───────────────────────────────────────────────
+
+  /**
+   * Вход с существующим ключом (nsec / ncryptsec + пароль).
+   */
+  function renderEnterKey() {
+    const r = ensureRoot();
+    r.innerHTML = '';
+
+    const c = document.createElement('div');
+    c.className = 'gate-c';
+
+    const title = document.createElement('div');
+    title.className = 'gate-sub';
+    title.style.fontWeight = '600';
+    title.style.color = 'var(--text)';
+    title.textContent = I18n.t('gate.enter.title');
+    c.appendChild(title);
+
+    const sub = document.createElement('div');
+    sub.className = 'gate-sub';
+    sub.textContent = I18n.t('gate.enter.sub');
+    c.appendChild(sub);
+
+    const keyField = document.createElement('div');
+    keyField.className = 'field';
+
+    const keyLabel = document.createElement('span');
+    keyLabel.className = 'field-label';
+    keyLabel.textContent = I18n.t('account.enter.placeholder');
+    keyField.appendChild(keyLabel);
+
+    const keyInput = document.createElement('input');
+    keyInput.type = 'text';
+    keyInput.className = 'field-input mono';
+    keyInput.placeholder = I18n.t('account.enter.placeholder');
+    keyInput.autocomplete = 'off';
+    keyInput.spellcheck = false;
+    keyField.appendChild(keyInput);
+    c.appendChild(keyField);
+
+    const pwField = document.createElement('div');
+    pwField.className = 'field';
+    pwField.style.display = 'none';
+
+    const pwLabel = document.createElement('span');
+    pwLabel.className = 'field-label';
+    pwLabel.textContent = I18n.t('account.password.set');
+    pwField.appendChild(pwLabel);
+
+    const pwInput = document.createElement('input');
+    pwInput.type = 'password';
+    pwInput.className = 'field-input';
+    pwField.appendChild(pwInput);
+    c.appendChild(pwField);
+
+    keyInput.addEventListener('input', () => {
+      const v = keyInput.value.trim();
+      pwField.style.display = v.startsWith('ncryptsec1') ? '' : 'none';
+    });
+
+    const errEl = document.createElement('div');
+    errEl.className = 'field-hint err';
+    errEl.style.display = 'none';
+    errEl.textContent = I18n.t('gate.enter.wrong');
+    c.appendChild(errEl);
+
+    const actions = document.createElement('div');
+    actions.className = 'gate-actions';
+
+    let submitting = false;
+
+    const submit = document.createElement('button');
+    submit.className = 'nv-act';
+    submit.style.background = 'var(--amber-btn)';
+    submit.style.color = '#1a1206';
+    submit.style.borderColor = 'transparent';
+    submit.style.fontWeight = '600';
+    submit.textContent = I18n.t('gate.enter.ok');
+    submit.addEventListener('click', async () => {
+      const raw = keyInput.value.trim();
+      if (!raw || submitting) return;
+
+      errEl.style.display = 'none';
+      submitting = true;
+      submit.disabled = true;
+
+      const res = await Account.enterKey(raw, pwInput.value);
+
+      submit.disabled = false;
+      submitting = false;
+
+      if (res.ok) {
+        Config.set('firstRunDone', true);
+        Toast.show('ok', I18n.t('account.enter.done'));
+        finish();
+        return;
+      }
+
+      // Битый ключ — остаёмся на экране, показываем ошибку.
+      errEl.style.display = '';
+    });
+    actions.appendChild(submit);
+
+    const back = document.createElement('button');
+    back.className = 'nv-act';
+    back.textContent = I18n.t('btn.cancel');
+    back.addEventListener('click', renderChoice);
+    actions.appendChild(back);
+
+    c.appendChild(actions);
+    r.appendChild(c);
+  }
+
+  /**
+   * Закрыть гейт (после явного выбора юзера).
+   */
+  function finish() {
+    if (root) {
+      root.classList.remove('on');
+      setTimeout(() => {
+        try { root.remove(); } catch (_) {}
+        root = null;
+      }, 300);
+    }
+    try { bus.emit('gate:done', {}); } catch (_) {}
+  }
+
+  /**
+   * Инициализация: показать гейт, если первый запуск.
+   * Вызывается из Boot ПОСЛЕ Nostr.init (ключ уже есть) — Boot
+   * гарантирует порядок: NetService.start() резолвит Nostr.init
+   * раньше, но гейт сам ждёт готовности через Account.
+   */
+  function init() {
+    if (Config.get('firstRunDone', false)) return;
+
+    // Ключ должен существовать до показа: Nostr.init() идентпотентен.
+    Nostr.init().then(() => {
+      if (Config.get('firstRunDone', false)) return;
+      renderChoice();
+    }).catch(() => {
+      // Nostr не загрузился (нет сети на самом первом старте):
+      // не держим юзера в чистом экране — гейт покажется при
+      // следующем запуске, firstRunDone ещё не стоит.
+      // Приложение остаётся рабочим (оффлайн-режим).
+    });
+  }
+
+  return { init };
+}, ['Config', 'Nostr', 'Account', 'Crypto', 'Toast', 'I18n', 'EventBus']);
+// ─── UI/FirstRunGate ─── END ────────────────────────────────────────────────
+
 // ═══ СЛОЙ: PLATFORM ═══════════════════════════════════════════════════════════
 
 // ─── PLATFORM/TelegramAdapter ─── START ─────────────────────────────────────
@@ -8871,6 +9213,15 @@ DI.register('TelegramAdapter', function (Config, bus, Logger) {
 // ─── PLATFORM/TelegramAdapter ─── END ───────────────────────────────────────
 
 // ═══ СЛОЙ: BOOT (реализован — это оркестрация каркаса) ══════════════════════
+/**
+ * Точка входа: порядок инициализации модели состояний v1.
+ *
+ * v1.0.2: +FirstRunGate — гейт первого запуска (после всех UI-модулей,
+ * до загрузки модели). Онбординг теперь ПОСЛЕ гейта: новый юзер
+ * сначала получает ключ, потом узнаёт механики. Первый показ
+ * онбординга также не ждёт модель бесконечно (30с страховка — в
+ * самом Onboarding).
+ */
 DI.register('Boot', function () {
   function mount() {
     const Config = DI.resolve('Config');
@@ -8901,14 +9252,6 @@ DI.register('Boot', function () {
     const I18n = DI.resolve('I18n');
     const NetService = DI.resolve('NetService');
 
-    // Модель догрузилась → доэмбеддить заметки, созданные без вектора.
-    bus.on('ai:ready', () => {
-      DI.resolve('Notes').backfill().catch(e => {
-        DI.resolve('Logger').warn('Boot: backfill', String(e));
-      });
-    });
-
-    // Локальная очистка базы + сетевой wipe (честный отчёт при офлайне).
     bus.on('wipe:request', async () => {
       const report = await NetService.publishWipeAll().catch(() => ({ published: 0, offline: true }));
       try { await DB.reset(); } catch (_) {}
@@ -8917,7 +9260,17 @@ DI.register('Boot', function () {
       DI.resolve('Store').setState({ view: 'stream' });
     });
 
+    // Модель догрузилась → доэмбеддить заметки, созданные без вектора.
+    bus.on('ai:ready', () => {
+      DI.resolve('Notes').backfill().catch(e => {
+        DI.resolve('Logger').warn('Boot: backfill', String(e));
+      });
+    });
+
     document.body.classList.add('ready');
+
+    // Гейт первого запуска: поверх всего, модель качается фоном.
+    DI.resolve('FirstRunGate').init();
 
     DI.resolve('Embedder').load();
     NetService.start();
