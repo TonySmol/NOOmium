@@ -1,5 +1,5 @@
 /* ═══════════════════════════════════════════════════════════════════════════════
-   NOOmium — Design System «Quiet Room» v2 (1.0.2)
+   NOOmium — Design System «Quiet Room» v2.1 (1.0.2)
    Мысль важнее интерфейса: интерфейс почти невидим и вспыхивает янтарным
    только там, где живёт смысл.
 
@@ -9,31 +9,37 @@
    2. Один акцент за раз. Янтарный = действие. Бирюзовый = сеть.
       Розовый = деструкция. Зелёный = статус (никогда кнопка).
    3. Тишина движения. 0.12–0.25с, один ease. Пульсация — только точки
-      индикаторов. Hover не двигает, active сжимает (0.97).
+      индикаторов. Hover не двигает (только фон/цвет), active сжимает 0.97.
    4. Моно — голос машины (время, ключи, числа, статусы, поколения),
-      пропорции — голос человека (мысли, кнопки). Не смешивать.
-   5. Ровность важнее красоты. Высоты 34/40/46/50, uppercase 0.05em,
-      ряды равных кнопок — grid. Неровность = баг.
-   6. ТАЧ ≥ 34px — без исключений. Слайдеры ≥ 24px.
+      Inter — голос человека (мысли, кнопки). Не смешивать.
+   5. Ровность важнее красоты. Шкала высот: 34/40/46/50/56. Uppercase
+      0.05em. Ряды равных кнопок — grid. Неровность = баг.
+   6. ТАЧ ≥ 34px без исключений. Слайдеры ≥ 24px.
    7. Инлайн-стили в JS запрещены — всё через классы этой системы.
    8. Пустые состояния — единый ритм: иконка/текст, центр, text-2.
-   9. disabled — один вес: 0.4. Везде.
-   10. Целые пиксели в геометрии строк: line-height кратен целым (24).
-       Дробные высоты текста = баг.
+   9. disabled — один вес 0.4 (исключение: edit-поле 0.6 — текст жив).
+   10. Целые пиксели в геометрии строк: line-height кратен 24.
+   11. Одинаковые ряды — одинаковый grid-template; позиция только
+       через grid-column. Никаких «примерно похожих» пропорций.
+   12. Клавиатурный фокус (focus-visible) — единственный источник
+       янтарного outline. Мышь/тап рамок не рисуют.
+
+   ШКАЛЫ (канон, не менять точечно):
+   - Радиусы: 6 (мелкое) / 8 (кнопки, поля) / 12 (карточки, панели) / 999.
+   - Зазоры: 6 (в рядах) / 8 (блоки в модалках) / 10 (карточки ленты) /
+     12 (межзонный) / 14 (боковые поля ленты).
+   - Высоты: 34 (тач-мин) / 40 (кнопки, поля) / 46 (menu-row) /
+     50 (панельные футеры) / 56 (шапка).
 
    ПРАВИЛА UI
-   - Радиусы 6/8/12 (+999 капсулы). Иконки монохромны, эмодзи запрещены.
    - Primary: bg --amber-btn, текст #1a1206, одна на экран.
    - Значения справа: mono 12 --text-3; подписи: Inter 13 500 --text-2.
    - Активная вкладка может подсвечивать значение янтарным.
    - Блоки без границы запрещены.
-   - Дыхание: 12px между крупными зонами, 10px между карточками,
-     14px боковые поля ленты. Композер — 12/14 со всех сторон.
 
    ПРАВИЛА UX
-   - Деструкция — только через confirm (danger-кнопка розовая).
-   - Отклик на действие ≤300мс.
-   - Escape закрывает всё ручное; ввод пользователя неприкосновенен.
+   - Деструкция — только через confirm (danger розовая).
+   - Отклик ≤ 300мс. Escape закрывает ручное; ввод юзера неприкосновенен.
    ═══════════════════════════════════════════════════════════════════════════════ */
 
 /* ═══ 1. ЦВЕТОВАЯ СИСТЕМА ═══ */
@@ -173,6 +179,7 @@ button {
   user-select: none;
 }
 
+/* Правило 9: единый вес disabled */
 button:disabled {
   opacity: 0.4;
   cursor: not-allowed;
@@ -192,6 +199,7 @@ input, textarea, select {
 ::-webkit-scrollbar-thumb:hover { background: var(--text-3); }
 ::-webkit-scrollbar-track { background: transparent; }
 
+/* Правило 12: outline — только клавиатуре. Мышь рамок не рисует. */
 :focus { outline: none; }
 
 :focus-visible {
@@ -247,11 +255,6 @@ select:focus-visible {
 }
 
 .btn:active:not(:disabled) { transform: scale(0.97); }
-
-.btn:disabled {
-  opacity: 0.4;
-  cursor: wait;
-}
 
 .btn.primary {
   background: var(--amber-btn);
@@ -632,7 +635,8 @@ body.ready #app { display: flex; }
   color: var(--text-3);
   flex-wrap: wrap;
   margin-top: auto;
-  padding-top: 10px;
+  padding-top: 6px;
+  min-height: 34px;
 }
 
 .note-tag {
@@ -664,6 +668,7 @@ body.ready #app { display: flex; }
   flex-shrink: 0;
 }
 
+/* Мини-кнопки: тач 34 (правило 6), не вылезают из карточки */
 .note-sim,
 .note-parent,
 .na {
@@ -672,7 +677,6 @@ body.ready #app { display: flex; }
   border-radius: var(--r-xs);
   width: 34px;
   height: 34px;
-  margin: -8px 0;
   padding: 0;
   display: inline-flex;
   align-items: center;
@@ -701,13 +705,13 @@ body.ready #app { display: flex; }
 }
 
 .note-sim:hover:not(:disabled),
-.note-parent:hover:not(:disabled),
-.na:hover {
+.note-parent:hover:not(:disabled) {
   background: var(--surface-3);
   border-color: var(--line-2);
 }
 
 .na:hover {
+  background: var(--surface-3);
   color: var(--amber);
   border-color: var(--amber);
 }
@@ -767,7 +771,7 @@ body.ready #app { display: flex; }
   align-items: center;
   justify-content: center;
   text-align: center;
-  padding: 32px;
+  padding: 32px 16px;
   color: var(--text-3);
 }
 
@@ -786,10 +790,9 @@ body.ready #app { display: flex; }
 }
 
 /* ═══ 9. КОМПОЗЕР ═══
-   Геометрия: две половины. Верх — поле (старт 48 = строка 24 по
-   центру, паддинги 12/12; рост целыми строками из Composer.autoGrow;
-   максимум 5 строк = 144). Низ — кнопки (min-height 50, по центру).
-   Дыхание: 12 сверху от ленты, 14 бока — как у ленты. */
+   Две половины: поле (старт 48 = строка 24 по центру, паддинги 12/12;
+   рост целыми строками из Composer.autoGrow; макс 5 строк = 144) и
+   футер кнопок (min-height 50). Дыхание: 12 сверху, 14 бока. */
 
 #composer {
   position: relative;
@@ -844,6 +847,7 @@ body.ready #app { display: flex; }
   font: 400 11px / 1 var(--mono);
   color: var(--text-3);
   flex-shrink: 0;
+  min-height: 11px;
 }
 
 #ed-hint {
@@ -973,7 +977,7 @@ body.ready #app { display: flex; }
 
 #base-stats {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: 1fr 1fr 1fr;
   gap: 6px;
   margin-bottom: 10px;
 }
@@ -1004,17 +1008,23 @@ body.ready #app { display: flex; }
   font-weight: 500;
 }
 
+/* Правило 11: та же сетка, что у статов; позиции — grid-column */
 #base-ctrls {
   display: grid;
-  grid-template-columns: 2fr 1fr;
+  grid-template-columns: 1fr 1fr 1fr;
   gap: 6px;
 }
 
 #base-q {
+  grid-column: 1 / 3;
   background: var(--surface);
   border: 1px solid var(--line);
   border-radius: var(--r-sm);
-  padding: 9px 12px;
+  padding: 0 12px;
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+  font-size: 13px;
   transition: border-color 0.15s var(--ease);
   min-width: 0;
 }
@@ -1023,21 +1033,24 @@ body.ready #app { display: flex; }
 #base-q::placeholder { color: var(--text-3); }
 
 #base-sort {
+  grid-column: 3 / 4;
   background-color: var(--surface);
   border: 1px solid var(--line);
   border-radius: var(--r-sm);
-  padding: 9px 34px 9px 12px;
+  padding: 0 34px 0 12px;
+  min-height: 40px;
+  display: flex;
+  align-items: center;
   appearance: none;
   cursor: pointer;
   color: var(--text);
   font-size: 13px;
   font-weight: 500;
   transition: border-color 0.15s var(--ease);
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23a1a1aa' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23a8a8b3' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
   background-repeat: no-repeat;
   background-position: right 12px center;
   background-size: 12px;
-  flex-shrink: 0;
 }
 
 #base-sort:hover { border-color: var(--line-2); }
@@ -1144,7 +1157,7 @@ body.ready #app { display: flex; }
 #modal-x {
   width: 34px;
   height: 34px;
-  margin: -4px -8px -4px 0;
+  margin: 0 -8px 0 0;
   border-radius: var(--r-xs);
   font-size: 16px;
   color: var(--text-3);
@@ -1177,9 +1190,7 @@ body.ready #app { display: flex; }
   flex-shrink: 0;
 }
 
-#modal-f.hidden {
-  display: none;
-}
+#modal-f.hidden { display: none; }
 
 #modal-f .mbtn {
   width: 100%;
@@ -1188,12 +1199,6 @@ body.ready #app { display: flex; }
   overflow: hidden;
   text-overflow: ellipsis;
   padding: 9px 10px;
-}
-
-@media (max-width: 480px) {
-  #modal-f {
-    grid-template-columns: 1fr;
-  }
 }
 
 .mbtn {
@@ -1235,8 +1240,7 @@ body.ready #app { display: flex; }
 }
 
 /* ═══ 12. ТОСТЫ ═══
-   Fixed, z-1300 — поверх всего (модалка 1000, прогресс 1200,
-   гейт 1250). Появление не сжимает ленту. */
+   Fixed, z-1300 — поверх всего. Появление не сжимает ленту. */
 
 #notif-bar {
   position: fixed;
@@ -1478,11 +1482,6 @@ body.ready #app { display: flex; }
 
 .nv-act:active:not(:disabled) { transform: scale(0.97); }
 
-.nv-act:disabled {
-  opacity: 0.4;
-  cursor: wait;
-}
-
 .nv-act.danger {
   color: var(--rose);
   background: var(--rose-glow);
@@ -1519,7 +1518,7 @@ body.ready #app { display: flex; }
 .nv-text-edit:focus { border-color: var(--amber); }
 
 .nv-text-edit:disabled {
-  opacity: 0.6;
+  opacity: 0.6;  /* исключение правила 9: текст в поле жив */
   cursor: not-allowed;
 }
 
@@ -1773,11 +1772,13 @@ body.ready #app { display: flex; }
   background: var(--surface-2);
   border: 1px solid var(--line);
   border-radius: var(--r-sm);
-  padding: 10px 12px;
+  padding: 0 12px;
+  min-height: 40px;
+  display: flex;
+  align-items: center;
   font: 13px / 1.5 var(--font);
   color: var(--text);
   transition: border-color 0.15s var(--ease);
-  min-height: 40px;
 }
 
 .field-input.mono {
@@ -1936,10 +1937,7 @@ body.ready #app { display: flex; }
   margin-top: 8px;
 }
 
-/* ═══ 20. ДРЕВО «ПО МОТИВАМ» ═══
-   Вертикальная шкала: карточки заподлицо, полной ширины, друг под
-   другом. Поколения — mono-метка слева (голос машины), не отступом.
-   Без шума. */
+/* ═══ 20. ДРЕВО «ПО МОТИВАМ» ═══ */
 
 .tree-list {
   display: flex;
@@ -1976,7 +1974,7 @@ body.ready #app { display: flex; }
   font: 600 10px / 1.6 var(--mono);
   color: var(--text-3);
   flex-shrink: 0;
-  min-width: 22px;
+  min-width: 24px;
   text-align: right;
   white-space: nowrap;
 }
@@ -1992,9 +1990,38 @@ body.ready #app { display: flex; }
   padding: 16px 12px;
 }
 
-/* ═══ 21. ГЕЙТ ПЕРВОГО ЗАПУСКА ═══
-   Полноэкранный, z-1250: поверх всего, кроме тостов (1300).
-   Прогресс модели (1200) качается под ним — фоном. */
+/* ═══ 21. ОНБОРДИНГ ═══ (классы — под будущий перевод модуля с инлайнов) */
+
+.onb-list {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.onb-sec-title {
+  font-weight: 700;
+  font-size: 13px;
+  margin-bottom: 3px;
+  color: var(--text);
+}
+
+.onb-sec-desc {
+  font-size: 13px;
+  color: var(--text-2);
+  line-height: 1.5;
+}
+
+.onb-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-2);
+  cursor: pointer;
+  margin-top: 4px;
+}
+
+/* ═══ 22. ГЕЙТ ПЕРВОГО ЗАПУСКА ═══ */
 
 #gate {
   position: fixed;
@@ -2034,6 +2061,13 @@ body.ready #app { display: flex; }
 .gate-logo b {
   color: var(--amber);
   font-weight: 700;
+}
+
+.gate-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text);
+  text-align: center;
 }
 
 .gate-sub {
@@ -2110,6 +2144,22 @@ body.ready #app { display: flex; }
 .gate-actions .nv-act {
   width: 100%;
   min-width: 0;
+}
+
+.gate-full {
+  width: 100%;
+}
+
+.gate-primary {
+  background: var(--amber-btn);
+  color: #1a1206;
+  border-color: transparent;
+  box-shadow: var(--shadow-sm);
+  font-weight: 600;
+}
+
+.gate-primary:hover:not(:disabled) {
+  background: var(--amber-hover);
 }
 
 .gate-back {
