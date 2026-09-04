@@ -1,5 +1,5 @@
 /* ═══════════════════════════════════════════════════════════════════════════════
-   NOOmium — Design System «Quiet Room» (v1, 0.7.6)
+   NOOmium — Design System «Quiet Room» v2 (1.0.2)
    Мысль важнее интерфейса: интерфейс почти невидим и вспыхивает янтарным
    только там, где живёт смысл.
 
@@ -10,30 +10,34 @@
       Розовый = деструкция. Зелёный = статус (никогда кнопка).
    3. Тишина движения. 0.12–0.25с, один ease. Пульсация — только точки
       индикаторов. Hover не двигает, active сжимает (0.97).
-   4. Моно — голос машины (время, ключи, числа, статусы), пропорции —
-      голос человека (мысли, кнопки). Не смешивать.
-   5. Ровность важнее красоты. Высоты 34/40/46, uppercase 0.05em,
+   4. Моно — голос машины (время, ключи, числа, статусы, поколения),
+      пропорции — голос человека (мысли, кнопки). Не смешивать.
+   5. Ровность важнее красоты. Высоты 34/40/46/50, uppercase 0.05em,
       ряды равных кнопок — grid. Неровность = баг.
+   6. ТАЧ ≥ 34px — без исключений, включая мини-кнопки в мета-строках
+      и закрытия. Слайдеры ≥ 24px.
+   7. Инлайн-стили в JS запрещены — всё через классы этой системы.
+   8. Пустые состояния — единый ритм: иконка/текст, центр, text-2.
+   9. disabled — один вес: 0.4. Везде.
+   10. Целые пиксели в геометрии строк: line-height кратен целым (24).
+       Дробные высоты текста = баг (iOS/Chrome разойдутся).
 
    ПРАВИЛА UI
    - Радиусы 6/8/12 (+999 капсулы). Иконки монохромны, эмодзи запрещены.
    - Primary: bg --amber-btn, текст #1a1206, одна на экран.
    - Значения справа: mono 12 --text-3; подписи: Inter 13 500 --text-2.
-    - Исключение: активная вкладка может подсвечивать значение янтарным.
-   - Границы — бордерами; блоки без границы запрещены.
+   - Активная вкладка может подсвечивать значение янтарным.
+   - Блоки без границы запрещены.
 
    ПРАВИЛА UX
-   - Деструкция — только через confirm. Отклик на действие ≤300мс.
-   - Тач ≥34px, слайдеры ≥24px. Пустые состояния объясняют смысл.
+   - Деструкция — только через confirm (danger-кнопка розовая).
+   - Отклик на действие ≤300мс.
    - Escape закрывает всё ручное; ввод пользователя неприкосновенен.
    ═══════════════════════════════════════════════════════════════════════════════ */
 
-/* ═══════════════════════════════════════════════════════════════════════════════
-   1. ЦВЕТОВАЯ СИСТЕМА (DARK / LIGHT)
-   ═══════════════════════════════════════════════════════════════════════════════ */
+/* ═══ 1. ЦВЕТОВАЯ СИСТЕМА (DARK / LIGHT) ═══ */
 
 :root {
-  /* Тёмная тема (по умолчанию) */
   --bg: #0a0a0b;
   --bg-2: #111113;
   --surface: #141417;
@@ -47,7 +51,6 @@
   --text-2: #a8a8b3;
   --text-3: #83838e;
 
-  /* Акценты */
   --amber: #f59e0b;
   --amber-btn: #f59e0b;
   --amber-hover: #d97706;
@@ -64,32 +67,26 @@
   --green: #22c55e;
   --green-glow: rgba(34, 197, 94, 0.12);
 
-  /* Шрифты */
   --font: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   --display: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   --mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
 
-  /* Радиусы */
   --r: 12px;
   --r-sm: 8px;
   --r-xs: 6px;
 
-  /* Анимации */
   --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
 
-  /* Безопасные зоны (iOS) */
   --safe-top: env(safe-area-inset-top, 0px);
   --safe-bot: env(safe-area-inset-bottom, 0px);
 
-  /* Тени */
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
   --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.25);
   --shadow-lg: 0 16px 40px rgba(0, 0, 0, 0.4);
   --shadow-xl: 0 24px 64px rgba(0, 0, 0, 0.5);
 }
 
-/* Светлая тема */
 [data-theme="light"] {
   --bg: #f4f4f5;
   --bg-2: #ffffff;
@@ -126,9 +123,7 @@
   --shadow-xl: 0 24px 64px rgba(0, 0, 0, 0.16);
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════════
-   2. СБРОС И БАЗОВЫЕ СТИЛИ
-   ═══════════════════════════════════════════════════════════════════════════════ */
+/* ═══ 2. СБРОС И БАЗОВЫЕ СТИЛИ ═══ */
 
 *,
 *::before,
@@ -193,13 +188,11 @@ input, textarea, select {
   outline: none;
 }
 
-/* Скроллбар */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-thumb { background: var(--line-2); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--text-3); }
 ::-webkit-scrollbar-track { background: transparent; }
 
-/* Фокус: только клавиатурная навигация. */
 :focus { outline: none; }
 
 :focus-visible {
@@ -223,10 +216,8 @@ select:focus-visible {
   background: rgba(180, 83, 9, 0.18);
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════════
-   3. УНИВЕРСАЛЬНАЯ СИСТЕМА КНОПОК
-   Шкала высот: 34 (компакт) / 40 (стандарт) / 46 (строки меню).
-   ═══════════════════════════════════════════════════════════════════════════════ */
+/* ═══ 3. УНИВЕРСАЛЬНАЯ СИСТЕМА КНОПОК ═══
+   Шкала высот: 34 (компакт/тач-минимум) / 40 (стандарт) / 46 (строки меню). */
 
 .btn {
   display: inline-flex;
@@ -260,7 +251,7 @@ select:focus-visible {
 .btn:active:not(:disabled) { transform: scale(0.97); }
 
 .btn:disabled {
-  opacity: 0.5;
+  opacity: 0.4;
   cursor: wait;
 }
 
@@ -305,7 +296,6 @@ select:focus-visible {
   flex-shrink: 0;
 }
 
-/* Спиннер для кнопок в состоянии «отправляется». */
 .btn-spinner {
   display: block;
   width: 14px;
@@ -321,9 +311,7 @@ select:focus-visible {
   to { transform: rotate(360deg); }
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════════
-   4. ОСНОВНАЯ СТРУКТУРА
-   ═══════════════════════════════════════════════════════════════════════════════ */
+/* ═══ 4. ОСНОВНАЯ СТРУКТУРА ═══ */
 
 #app {
   display: none;
@@ -336,9 +324,7 @@ select:focus-visible {
 
 body.ready #app { display: flex; }
 
-/* ═══════════════════════════════════════════════════════════════════════════════
-   5. ШАПКА (HEADER)
-   ═══════════════════════════════════════════════════════════════════════════════ */
+/* ═══ 5. ШАПКА ═══ */
 
 #hdr {
   display: flex;
@@ -409,7 +395,6 @@ body.ready #app { display: flex; }
   50% { opacity: 0.35; }
 }
 
-/* Кнопки-иконки в шапке */
 .icon-btn {
   width: 40px;
   height: 40px;
@@ -438,7 +423,6 @@ body.ready #app { display: flex; }
   color: var(--amber);
 }
 
-/* Бургер-меню */
 #btn-menu {
   flex-direction: column;
   gap: 4px;
@@ -453,9 +437,7 @@ body.ready #app { display: flex; }
   transition: transform 0.2s var(--ease);
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════════
-   6. ОФФЛАЙН-БАР
-   ═══════════════════════════════════════════════════════════════════════════════ */
+/* ═══ 6. ОФФЛАЙН-БАР ═══ */
 
 #offline-bar {
   display: none;
@@ -469,9 +451,7 @@ body.ready #app { display: flex; }
 
 #offline-bar.on { display: block; }
 
-/* ═══════════════════════════════════════════════════════════════════════════════
-   7. ОСНОВНОЙ КОНТЕНТ: БАННЕР, УВЕДОМЛЕНИЯ, СЕГМЕНТЫ
-   ═══════════════════════════════════════════════════════════════════════════════ */
+/* ═══ 7. КОНТЕНТ: БАННЕР, СЕГМЕНТЫ ═══ */
 
 #main {
   flex: 1;
@@ -482,13 +462,12 @@ body.ready #app { display: flex; }
   position: relative;
 }
 
-/* Баннер контекста */
 #ctx-banner {
   display: none;
   align-items: center;
   gap: 10px;
   margin: 10px 14px 0;
-  padding: 10px 12px;
+  padding: 6px 12px;
   background: var(--amber-glow);
   border: 1px solid var(--line-2);
   border-radius: var(--r-sm);
@@ -514,15 +493,17 @@ body.ready #app { display: flex; }
   min-width: 0;
 }
 
+/* Тач-минимум 34 (гайдлайн, правило 6) */
 #ctx-banner .ctx-x {
   color: var(--text-3);
   font-size: 14px;
-  width: 24px;
-  height: 24px;
+  width: 34px;
+  height: 34px;
+  margin: -4px -6px -4px 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: 6px;
+  border-radius: var(--r-xs);
   transition: background 0.15s var(--ease), color 0.15s var(--ease);
   flex-shrink: 0;
 }
@@ -532,7 +513,6 @@ body.ready #app { display: flex; }
   color: var(--text);
 }
 
-/* Сегменты (табы) */
 #seg {
   display: none;
   gap: 2px;
@@ -548,8 +528,9 @@ body.ready #app { display: flex; }
 
 .seg-b {
   flex: 1;
+  min-height: 34px;
   padding: 8px 6px;
-  border-radius: 6px;
+  border-radius: var(--r-xs);
   font-size: 13px;
   font-weight: 600;
   color: var(--text-3);
@@ -590,9 +571,7 @@ body.ready #app { display: flex; }
   color: var(--amber);
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════════
-   8. ЛЕНТА
-   ═══════════════════════════════════════════════════════════════════════════════ */
+/* ═══ 8. ЛЕНТА ═══ */
 
 #feed-wrap {
   flex: 1;
@@ -610,7 +589,6 @@ body.ready #app { display: flex; }
   overscroll-behavior-y: contain;
 }
 
-/* Карточка заметки */
 .note {
   position: relative;
   background: var(--surface);
@@ -649,7 +627,6 @@ body.ready #app { display: flex; }
   line-height: 1.55;
 }
 
-/* Мета-блок */
 .note-meta {
   display: flex;
   align-items: center;
@@ -661,7 +638,6 @@ body.ready #app { display: flex; }
   padding-top: 10px;
 }
 
-/* Теги */
 .note-tag {
   padding: 3px 7px;
   border-radius: 4px;
@@ -684,7 +660,6 @@ body.ready #app { display: flex; }
   color: var(--teal);
 }
 
-/* Разделитель */
 .note-meta-sep {
   width: 1px;
   height: 14px;
@@ -692,17 +667,16 @@ body.ready #app { display: flex; }
   flex-shrink: 0;
 }
 
-/* Кнопки навигации: стрелка и ромб (24×24, бирюзовые) */
+/* Мини-кнопки навигации: ТАЧ 34 (гайдлайн) */
 .note-sim,
-.note-parent {
+.note-parent,
+.na {
   background: var(--surface-2);
   border: 1px solid var(--line);
   border-radius: var(--r-xs);
-  color: var(--teal);
-  font-size: 11px;
-  font-weight: 600;
-  width: 24px;
-  height: 24px;
+  width: 34px;
+  height: 34px;
+  margin: -8px 0;
   padding: 0;
   display: inline-flex;
   align-items: center;
@@ -713,10 +687,33 @@ body.ready #app { display: flex; }
   cursor: pointer;
 }
 
+.note-sim {
+  color: var(--teal);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.note-parent {
+  color: var(--teal);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.na {
+  color: var(--text-2);
+  font-size: 13px;
+}
+
 .note-sim:hover:not(:disabled),
-.note-parent:hover:not(:disabled) {
+.note-parent:hover:not(:disabled),
+.na:hover {
   background: var(--surface-3);
   border-color: var(--line-2);
+}
+
+.na:hover {
+  color: var(--amber);
+  border-color: var(--amber);
 }
 
 .note-parent.orphan {
@@ -726,7 +723,6 @@ body.ready #app { display: flex; }
   pointer-events: none;
 }
 
-/* Индикатор сходства */
 .note-sim-info {
   display: inline-flex;
   align-items: center;
@@ -767,31 +763,7 @@ body.ready #app { display: flex; }
   margin-left: auto;
 }
 
-/* Кнопка карандаша (24×24) */
-.na {
-  background: var(--surface-2);
-  border: 1px solid var(--line);
-  border-radius: var(--r-xs);
-  color: var(--text-2);
-  font-size: 12px;
-  width: 24px;
-  height: 24px;
-  padding: 0;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  transition: background 0.12s var(--ease), color 0.12s var(--ease), border-color 0.12s var(--ease);
-  flex-shrink: 0;
-  line-height: 1;
-}
-
-.na:hover {
-  background: var(--surface-3);
-  color: var(--amber);
-  border-color: var(--amber);
-}
-
-/* Пустое состояние */
+/* Пустое состояние ленты — эталон ритма (гайдлайн, правило 8) */
 #feed-empty {
   position: absolute;
   inset: 0;
@@ -818,41 +790,16 @@ body.ready #app { display: flex; }
   color: var(--text-2);
 }
 
-/* Кнопка "Загрузить ещё" */
-.hist-btn {
-  align-self: center;
-  margin: 8px 0 10px;
-  padding: 8px 18px;
-  border-radius: 999px;
-  background: var(--surface);
-  border: 1px solid var(--line);
-  color: var(--text-2);
-  font-size: 12px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: all 0.15s var(--ease);
-}
-
-.hist-btn:hover:not(:disabled) {
-  border-color: var(--amber);
-  color: var(--text);
-  background: var(--amber-glow);
-}
-
-.hist-btn:disabled {
-  opacity: 0.5;
-  cursor: default;
-}
-
-/* ═══════════════════════════════════════════════════════════════════════════════
-   9. КОМПОЗЕР
-   ═══════════════════════════════════════════════════════════════════════════════ */
+/* ═══ 9. КОМПОЗЕР ═══
+   Геометрия: две половины. Верх — поле (старт 48px = строка 24 по центру
+   с паддингами 12/12; рост строго по целым строкам из JS autoGrow;
+   максимум 5 строк = 144px). Низ — кнопки (min-height 50, по центру).
+   Целочисленная сетка — гайдлайн, правило 10. */
 
 #composer {
   position: relative;
   margin: 0 14px 12px;
-  padding: 10px 12px;
-  padding-bottom: calc(10px + var(--safe-bot));
+  padding: 0 12px;
   background: var(--surface);
   border: 1px solid var(--line);
   border-radius: var(--r);
@@ -864,26 +811,38 @@ body.ready #app { display: flex; }
 
 #ed-ta {
   width: 100%;
-  min-height: 44px;
-  max-height: 120px;
+  height: 48px;
+  min-height: 48px;
+  max-height: 152px;
   resize: none;
-  font: 15px / 1.55 var(--font);
+  font-family: var(--font);
+  font-size: 15px;
+  line-height: 24px;
   color: var(--text);
   letter-spacing: -0.005em;
   border: none;
   outline: none;
   background: transparent;
+  padding: 12px 0;
+  margin: 0;
+  display: block;
+  overflow-y: hidden;
 }
 
-#ed-ta::placeholder { color: var(--text-3); }
+#ed-ta::placeholder {
+  color: var(--text-3);
+  line-height: 24px;
+}
 
 #ed-foot {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding-top: 8px;
+  padding: 8px 0;
+  padding-bottom: calc(8px + var(--safe-bot));
   border-top: 1px solid var(--line);
+  min-height: 50px;
 }
 
 #ed-cnt {
@@ -896,7 +855,7 @@ body.ready #app { display: flex; }
 #ed-hint {
   font-size: 11px;
   color: var(--text-3);
-  padding: 6px 2px 0;
+  padding: 6px 2px 8px;
   transition: color 0.15s var(--ease);
 }
 
@@ -909,7 +868,6 @@ body.ready #app { display: flex; }
   gap: 8px;
 }
 
-/* Переключатель Личное/Мир */
 #mode-toggle {
   display: inline-flex;
   align-items: center;
@@ -969,7 +927,6 @@ body.ready #app { display: flex; }
   background: var(--amber-glow);
 }
 
-/* Кнопка отправки. */
 #btn-send {
   width: 40px;
   height: 34px;
@@ -1003,9 +960,7 @@ body.ready #app { display: flex; }
 #btn-send:active:not(:disabled) { transform: scale(0.95); }
 #btn-send.sending { opacity: 0.75; cursor: wait; }
 
-/* ═══════════════════════════════════════════════════════════════════════════════
-   10. БАЗА (BASE VIEW)
-   ═══════════════════════════════════════════════════════════════════════════════ */
+/* ═══ 10. БАЗА ═══ */
 
 #base {
   display: none;
@@ -1055,13 +1010,15 @@ body.ready #app { display: flex; }
   font-weight: 500;
 }
 
+/* Управление — строго под сеткой статистики: поиск под блоками 1–2,
+   сортировка под блоком 3 (гайдлайн: ровность важнее красоты). */
 #base-ctrls {
-  display: flex;
+  display: grid;
+  grid-template-columns: 2fr 1fr;
   gap: 6px;
 }
 
 #base-q {
-  flex: 1;
   background: var(--surface);
   border: 1px solid var(--line);
   border-radius: var(--r-sm);
@@ -1137,9 +1094,7 @@ body.ready #app { display: flex; }
   color: var(--text-3);
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════════
-   11. МОДАЛЬНЫЕ ОКНА
-   ═══════════════════════════════════════════════════════════════════════════════ */
+/* ═══ 11. МОДАЛЬНЫЕ ОКНА ═══ */
 
 #overlay {
   position: fixed;
@@ -1183,7 +1138,7 @@ body.ready #app { display: flex; }
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 16px;
+  padding: 12px 16px;
   border-bottom: 1px solid var(--line);
   flex-shrink: 0;
 }
@@ -1195,9 +1150,10 @@ body.ready #app { display: flex; }
 }
 
 #modal-x {
-  width: 32px;
-  height: 32px;
-  border-radius: 8px;
+  width: 34px;
+  height: 34px;
+  margin: -4px -8px -4px 0;
+  border-radius: var(--r-xs);
   font-size: 16px;
   color: var(--text-3);
   display: inline-flex;
@@ -1220,9 +1176,6 @@ body.ready #app { display: flex; }
   min-height: 0;
 }
 
-/* Футер модалки: сетка равных кнопок, при переполнении — перенос.
-   Десктоп: один ряд, равные ширины, равные зазоры.
-   Мобилка (<480px): кнопки во всю ширину, стек. */
 #modal-f {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
@@ -1247,7 +1200,6 @@ body.ready #app { display: flex; }
   }
 }
 
-/* Кнопки в футере модалок — высота 40 (шкала) */
 .mbtn {
   display: inline-flex;
   align-items: center;
@@ -1286,9 +1238,9 @@ body.ready #app { display: flex; }
   color: #fff;
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════════
-   12. ТОСТЫ
-   ═══════════════════════════════════════════════════════════════════════════════ */
+/* ═══ 12. ТОСТЫ ═══
+   Fixed, z-index 1300 — поверх модалки (1000), noteview (900),
+   прогресса (1200) и гейта (1250). Появление тоста не сжимает ленту. */
 
 #notif-bar {
   position: fixed;
@@ -1303,13 +1255,12 @@ body.ready #app { display: flex; }
   pointer-events: none;
 }
 
-#toasts { pointer-events: auto; }
-
 #toasts {
   display: flex;
   flex-direction: column;
   gap: 8px;
   width: 100%;
+  pointer-events: auto;
 }
 
 .toast {
@@ -1348,9 +1299,7 @@ body.ready #app { display: flex; }
   to { opacity: 1; transform: none; }
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════════
-   13. ПРОГРЕСС ЗАГРУЗКИ МОДЕЛИ
-   ═══════════════════════════════════════════════════════════════════════════════ */
+/* ═══ 13. ПРОГРЕСС ЗАГРУЗКИ МОДЕЛИ ═══ */
 
 #progress {
   position: fixed;
@@ -1382,6 +1331,20 @@ body.ready #app { display: flex; }
   box-shadow: var(--shadow-xl);
 }
 
+.prog-title {
+  font: 600 17px var(--display);
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+
+.prog-sub {
+  font: 400 12px var(--mono);
+  color: var(--text-3);
+  margin-top: 4px;
+  word-break: break-all;
+  min-height: 16px;
+}
+
 .prog-bar {
   height: 4px;
   background: var(--surface-3);
@@ -1396,6 +1359,11 @@ body.ready #app { display: flex; }
   background: linear-gradient(90deg, var(--amber-btn), var(--amber-hover));
   border-radius: 2px;
   transition: width 0.3s var(--ease);
+}
+
+.prog-pct {
+  font: 500 12px var(--mono);
+  color: var(--text-2);
 }
 
 .prog-skip {
@@ -1418,9 +1386,7 @@ body.ready #app { display: flex; }
   border-color: var(--line-2);
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════════
-   14. ПРОСМОТР ЗАМЕТКИ (NOTEVIEW)
-   ═══════════════════════════════════════════════════════════════════════════════ */
+/* ═══ 14. ПРОСМОТР ЗАМЕТКИ (NOTEVIEW) ═══ */
 
 #noteview {
   position: fixed;
@@ -1487,7 +1453,6 @@ body.ready #app { display: flex; }
   min-height: 56px;
 }
 
-/* Кнопки действий */
 .nv-act {
   display: inline-flex;
   align-items: center;
@@ -1518,7 +1483,7 @@ body.ready #app { display: flex; }
 .nv-act:active:not(:disabled) { transform: scale(0.97); }
 
 .nv-act:disabled {
-  opacity: 0.5;
+  opacity: 0.4;
   cursor: wait;
 }
 
@@ -1539,7 +1504,6 @@ body.ready #app { display: flex; }
   background: var(--amber-glow);
 }
 
-/* NoteView edit mode */
 .nv-text-edit {
   flex: 1;
   width: 100%;
@@ -1563,9 +1527,7 @@ body.ready #app { display: flex; }
   cursor: not-allowed;
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════════
-   15. НАСТРОЙКИ РАНЖИРОВАНИЯ (СЛАЙДЕРЫ)
-   ═══════════════════════════════════════════════════════════════════════════════ */
+/* ═══ 15. НАСТРОЙКИ РАНЖИРОВАНИЯ ═══ */
 
 .range-body {
   display: flex;
@@ -1606,7 +1568,6 @@ body.ready #app { display: flex; }
   line-height: 1.4;
 }
 
-/* Кастомный ползунок: зона касания 24px */
 .no-range {
   -webkit-appearance: none;
   appearance: none;
@@ -1663,7 +1624,6 @@ body.ready #app { display: flex; }
 .no-range.teal::-moz-range-thumb { background: var(--teal); }
 .no-range.rose::-moz-range-thumb { background: var(--rose); }
 
-/* Живой предпросмотр: три строки */
 .range-preview {
   display: flex;
   flex-direction: column;
@@ -1678,7 +1638,6 @@ body.ready #app { display: flex; }
   white-space: nowrap;
 }
 
-/* Парные переключатели: grid — равные половинки */
 .range-display {
   display: flex;
   flex-direction: column;
@@ -1715,9 +1674,7 @@ body.ready #app { display: flex; }
   }
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════════
-   16. АККАУНТ И КЛЮЧ (AccountView)
-   ═══════════════════════════════════════════════════════════════════════════════ */
+/* ═══ 16. АККАУНТ И КЛЮЧ ═══ */
 
 .acc-body {
   display: flex;
@@ -1743,7 +1700,6 @@ body.ready #app { display: flex; }
   line-height: 1.5;
 }
 
-/* Поле с ключом */
 .key-box {
   background: var(--surface-2);
   border: 1px solid var(--line);
@@ -1767,7 +1723,6 @@ body.ready #app { display: flex; }
   letter-spacing: 2px;
 }
 
-/* Ряд действий */
 .acc-actions {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
@@ -1783,7 +1738,6 @@ body.ready #app { display: flex; }
   text-overflow: ellipsis;
 }
 
-/* Строка статуса синка */
 .acc-sync {
   display: flex;
   align-items: center;
@@ -1805,9 +1759,7 @@ body.ready #app { display: flex; }
 .acc-sync .dot.load { background: var(--teal); box-shadow: 0 0 6px var(--teal-glow); animation: pulse 1.4s ease-in-out infinite; }
 .acc-sync .dot.err  { background: var(--rose); box-shadow: 0 0 6px var(--rose-glow); }
 
-/* ═══════════════════════════════════════════════════════════════════════════════
-   17. УНИВЕРСАЛЬНЫЕ ПОЛЯ ВВОДА
-   ═══════════════════════════════════════════════════════════════════════════════ */
+/* ═══ 17. УНИВЕРСАЛЬНЫЕ ПОЛЯ ВВОДА ═══ */
 
 .field {
   display: flex;
@@ -1850,9 +1802,7 @@ body.ready #app { display: flex; }
 
 .field-hint.err { color: var(--rose); }
 
-/* ═══════════════════════════════════════════════════════════════════════════════
-   18. УТИЛИТЫ И АДАПТИВНОСТЬ
-   ═══════════════════════════════════════════════════════════════════════════════ */
+/* ═══ 18. УТИЛИТЫ И АДАПТИВНОСТЬ ═══ */
 
 .hidden { display: none !important; }
 
@@ -1871,7 +1821,6 @@ body.ready #app { display: flex; }
   .btn,
   .mbtn,
   .nv-act,
-  .hist-btn,
   .na,
   .note-sim,
   .note-parent,
@@ -1880,7 +1829,8 @@ body.ready #app { display: flex; }
   .mt-thumb,
   .menu-row,
   .no-range::-webkit-slider-thumb,
-  .btn-spinner {
+  .btn-spinner,
+  .prog-skip {
     transition: none !important;
     transform: none !important;
     animation: none !important;
@@ -1915,8 +1865,6 @@ body.ready #app { display: flex; }
   .note { padding: 12px; }
 
   .note-meta { gap: 6px; }
-
-  /* Учтено: #modal-f и .range-display-btns уже переключаются в 1fr выше */
 }
 
 @media (min-width: 768px) {
@@ -1927,9 +1875,7 @@ body.ready #app { display: flex; }
   .note { padding: 16px; }
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════════
-   19. СПИСОК МЕНЮ
-   ═══════════════════════════════════════════════════════════════════════════════ */
+/* ═══ 19. СПИСОК МЕНЮ ═══ */
 
 .menu-list {
   display: flex;
@@ -1992,4 +1938,203 @@ body.ready #app { display: flex; }
   font-size: 11px;
   color: var(--text-3);
   margin-top: 8px;
+}
+
+/* ═══ 20. ДРЕВО «ПО МОТИВАМ» (предки ↳ и потомки ◆) ═══
+   Вертикальная шкала: карточки заподлицо, полной ширины, друг под
+   другом. Поколения различает mono-метка слева (голос машины) —
+   не отступом (узкие экраны). Без шума. */
+
+.tree-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.tree-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: 100%;
+  min-height: 40px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  background: var(--surface-2);
+  border-radius: var(--r-sm);
+  font-size: 13px;
+  color: var(--text);
+  text-align: left;
+  line-height: 1.45;
+  white-space: normal;
+  word-break: break-word;
+  transition: background 0.12s var(--ease), border-color 0.12s var(--ease);
+  cursor: pointer;
+}
+
+.tree-item:hover {
+  background: var(--surface-3);
+  border-color: var(--line-2);
+}
+
+/* Метка поколения: →1 = ребёнок, →2 = внук... Для предков —
+   поколение от текущей заметки вверх. */
+.tree-gen {
+  font: 600 10px / 1.6 var(--mono);
+  color: var(--text-3);
+  flex-shrink: 0;
+  min-width: 22px;
+  text-align: right;
+  padding-top: 1px;
+}
+
+.tree-item.root .tree-gen,
+.tree-item.root {
+  border-color: var(--line-2);
+}
+
+/* Пустое состояние внутри модалок — единый ритм (правило 8) */
+.modal-empty {
+  color: var(--text-3);
+  font-size: 13px;
+  text-align: center;
+  padding: 16px 12px;
+}
+
+/* ═══ 21. ГЕЙТ ПЕРВОГО ЗАПУСКА (FirstRunGate) ═══
+   Полноэкранный, z-index 1250: поверх всего, кроме тостов (1300).
+   Прогресс модели (1200) качается под ним — фоном. */
+
+#gate {
+  position: fixed;
+  inset: 0;
+  background: var(--bg);
+  z-index: 1250;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  animation: nvIn 0.25s var(--ease-out);
+}
+
+#gate.on { display: flex; }
+
+.gate-c {
+  background: var(--surface);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r);
+  box-shadow: var(--shadow-xl);
+  width: min(400px, 100%);
+  max-height: calc(100dvh - 40px);
+  overflow-y: auto;
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.gate-logo {
+  font: 600 22px / 1 var(--display);
+  letter-spacing: -0.02em;
+  color: var(--text);
+  text-align: center;
+}
+
+.gate-logo b {
+  color: var(--amber);
+  font-weight: 700;
+}
+
+.gate-sub {
+  font-size: 13px;
+  color: var(--text-2);
+  line-height: 1.5;
+  text-align: center;
+}
+
+/* Выбор: два больших блока */
+.gate-choices {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.gate-choice {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  width: 100%;
+  min-height: 56px;
+  padding: 12px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+  text-align: left;
+  transition: background 0.12s var(--ease), border-color 0.12s var(--ease);
+  cursor: pointer;
+}
+
+.gate-choice:hover {
+  background: var(--surface-3);
+  border-color: var(--line-2);
+}
+
+.gate-choice .gc-t {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.gate-choice .gc-d {
+  font-size: 11px;
+  color: var(--text-3);
+  line-height: 1.4;
+}
+
+.gate-choice.primary {
+  background: var(--amber-glow);
+  border-color: var(--amber);
+}
+
+.gate-choice.primary:hover {
+  background: rgba(245, 158, 11, 0.2);
+  border-color: var(--amber);
+}
+
+/* Экран «новый ключ» */
+.gate-warn {
+  font-size: 12px;
+  color: var(--rose);
+  line-height: 1.5;
+  background: var(--rose-glow);
+  border-radius: var(--r-sm);
+  padding: 10px 12px;
+}
+
+.gate-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.gate-actions .nv-act {
+  width: 100%;
+  min-width: 0;
+}
+
+.gate-back {
+  background: none;
+  border: none;
+  color: var(--text-3);
+  font-size: 12px;
+  font-weight: 500;
+  padding: 8px;
+  cursor: pointer;
+  transition: color 0.12s var(--ease);
+}
+
+.gate-back:hover { color: var(--text); }
+
+@media (max-width: 480px) {
+  .gate-actions { grid-template-columns: 1fr; }
 }
