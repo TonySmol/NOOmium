@@ -1,5 +1,5 @@
 /* ═══════════════════════════════════════════════════════════════════════════════
-   NOOmium — Design System «Quiet Room» v2.1 (1.0.2)
+   NOOmium — Design System «Quiet Room» v2.2 (1.0.3)
    Мысль важнее интерфейса: интерфейс почти невидим и вспыхивает янтарным
    только там, где живёт смысл.
 
@@ -22,7 +22,11 @@
    11. Одинаковые ряды — одинаковый grid-template; позиция только
        через grid-column. Никаких «примерно похожих» пропорций.
    12. Клавиатурный фокус (focus-visible) — единственный источник
-       янтарного outline. Мышь/тап рамок не рисуют.
+       янтарного outline. Мышь/тап рамок не рисует.
+   13. Ряды кнопок: ≥480px — в ряд с равными долями; <480px — весь
+       ряд в стек на всю ширину. «Две в ряду + одна одинокая» запрещено.
+   14. Кнопка не знает, где она: лейаут решает контейнер. Новый
+       элемент = существующий класс + существующий контейнер.
 
    ШКАЛЫ (канон, не менять точечно):
    - Радиусы: 6 (мелкое) / 8 (кнопки, поля) / 12 (карточки, панели) / 999.
@@ -179,7 +183,6 @@ button {
   user-select: none;
 }
 
-/* Правило 9: единый вес disabled */
 button:disabled {
   opacity: 0.4;
   cursor: not-allowed;
@@ -199,7 +202,6 @@ input, textarea, select {
 ::-webkit-scrollbar-thumb:hover { background: var(--text-3); }
 ::-webkit-scrollbar-track { background: transparent; }
 
-/* Правило 12: outline — только клавиатуре. Мышь рамок не рисует. */
 :focus { outline: none; }
 
 :focus-visible {
@@ -668,7 +670,6 @@ body.ready #app { display: flex; }
   flex-shrink: 0;
 }
 
-/* Мини-кнопки: тач 34 (правило 6), не вылезают из карточки */
 .note-sim,
 .note-parent,
 .na {
@@ -789,10 +790,7 @@ body.ready #app { display: flex; }
   color: var(--text-2);
 }
 
-/* ═══ 9. КОМПОЗЕР ═══
-   Две половины: поле (старт 48 = строка 24 по центру, паддинги 12/12;
-   рост целыми строками из Composer.autoGrow; макс 5 строк = 144) и
-   футер кнопок (min-height 50). Дыхание: 12 сверху, 14 бока. */
+/* ═══ 9. КОМПОЗЕР ═══ */
 
 #composer {
   position: relative;
@@ -1008,7 +1006,7 @@ body.ready #app { display: flex; }
   font-weight: 500;
 }
 
-/* Правило 11: та же сетка, что у статов; позиции — grid-column */
+/* Правило 11: сетка = у статов, позиции — grid-column */
 #base-ctrls {
   display: grid;
   grid-template-columns: 1fr 1fr 1fr;
@@ -1099,7 +1097,9 @@ body.ready #app { display: flex; }
   color: var(--text-3);
 }
 
-/* ═══ 11. МОДАЛЬНЫЕ ОКНА ═══ */
+/* ═══ 11. МОДАЛЬНЫЕ ОКНА ═══
+   Правило 13: ≥480 — кнопки в ряд равными долями; <480 — весь ряд
+   в стек на всю ширину. «Одинокая кнопка» невозможна по построению. */
 
 #overlay {
   position: fixed;
@@ -1198,7 +1198,6 @@ body.ready #app { display: flex; }
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  padding: 9px 10px;
 }
 
 .mbtn {
@@ -1239,8 +1238,13 @@ body.ready #app { display: flex; }
   color: #fff;
 }
 
-/* ═══ 12. ТОСТЫ ═══
-   Fixed, z-1300 — поверх всего. Появление не сжимает ленту. */
+@media (max-width: 480px) {
+  #modal-f {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ═══ 12. ТОСТЫ ═══ */
 
 #notif-bar {
   position: fixed;
@@ -1370,6 +1374,7 @@ body.ready #app { display: flex; }
   margin-top: 14px;
   padding: 9px 14px;
   min-height: 40px;
+  width: 100%;
   border-radius: var(--r-sm);
   border: 1px solid var(--line);
   background: var(--surface-2);
@@ -1493,12 +1498,6 @@ body.ready #app { display: flex; }
   color: #fff;
 }
 
-.nv-act.selected {
-  border-color: var(--amber);
-  color: var(--amber);
-  background: var(--amber-glow);
-}
-
 .nv-text-edit {
   flex: 1;
   width: 100%;
@@ -1518,7 +1517,7 @@ body.ready #app { display: flex; }
 .nv-text-edit:focus { border-color: var(--amber); }
 
 .nv-text-edit:disabled {
-  opacity: 0.6;  /* исключение правила 9: текст в поле жив */
+  opacity: 0.6;
   cursor: not-allowed;
 }
 
@@ -1647,6 +1646,7 @@ body.ready #app { display: flex; }
   color: var(--text);
 }
 
+/* Парные тумблеры: единая подсветка .selected — объявлена ОДИН раз */
 .range-display-btns {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -1661,6 +1661,13 @@ body.ready #app { display: flex; }
   overflow: hidden;
   text-overflow: ellipsis;
   padding: 8px 6px;
+}
+
+.range-display-btns .nv-act.selected,
+.gate-actions .nv-act.selected {
+  border-color: var(--amber);
+  color: var(--amber);
+  background: var(--amber-glow);
 }
 
 @media (max-width: 480px) {
@@ -1990,7 +1997,7 @@ body.ready #app { display: flex; }
   padding: 16px 12px;
 }
 
-/* ═══ 21. ОНБОРДИНГ ═══ (классы — под будущий перевод модуля с инлайнов) */
+/* ═══ 21. ОНБОРДИНГ ═══ */
 
 .onb-list {
   display: flex;
