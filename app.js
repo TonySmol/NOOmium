@@ -31,7 +31,7 @@
 
 'use strict';
 
-const APP_VERSION = '1.0.3';
+const APP_VERSION = '1.0.2';
 
 // ═══ РЕЕСТР СОБЫТИЙ ШИНЫ (полный контракт) ════════════════════════════════════
 //
@@ -349,8 +349,14 @@ DI.register('Utils', function () {
  * applyToDOM: data-i18n / data-i18n-ph / data-i18n-aria.
  * setLang: persist в Config + applyToDOM + onChange + bus 'i18n:change'.
  *
- * v1.0.2: +gate.* (гейт первого запуска); −net.loadmore/net.loading
- * (кнопка истории удалена).
+ * v1.0.3:
+ * + inf.ancestors ('Предки'/'Ancestors') — парный к inf.children;
+ * + inf.noancestors.short → заменён финально на inf.ancestors.none
+ *   ('Предков пока нет') — парный к inf.nochildren;
+ * − inf.lineage, inf.noancestors (легаси старой модалки каскада:
+ *   заглушка попадала в заголовок при живой цепочке — баг v1.0.2);
+ * − net.loadmore / net.loading (кнопка истории удалена);
+ * + gate.* (гейт первого запуска).
  */
 DI.register('I18n', function (Config, bus) {
   const dicts = Object.create(null);
@@ -474,10 +480,10 @@ DI.register('I18n', function (Config, bus) {
     'inf.resonance': 'резонанс',
     'inf.linked': 'по мотивам',
     'inf.openparent': 'Открыть заметку-источник',
+    'inf.ancestors': 'Предки',
+    'inf.ancestors.none': 'Предков пока нет',
     'inf.children': 'Потомки',
     'inf.nochildren': 'Потомков пока нет',
-    'inf.lineage': 'Линейка «по мотивам»',
-    'inf.noancestors': 'Это корень — предков нет',
     'inf.orphan.hint': 'Источник недоступен',
     'inf.parent.unavailable': 'Источник недоступен: скрыт автором или удалён',
 
@@ -706,10 +712,10 @@ DI.register('I18n', function (Config, bus) {
     'inf.resonance': 'resonance',
     'inf.linked': 'inspired by',
     'inf.openparent': 'Open source note',
+    'inf.ancestors': 'Ancestors',
+    'inf.ancestors.none': 'No ancestors yet',
     'inf.children': 'Descendants',
     'inf.nochildren': 'No descendants yet',
-    'inf.lineage': '"Inspired by" lineage',
-    'inf.noancestors': 'This is the root — no ancestors',
     'inf.orphan.hint': 'Source unavailable',
     'inf.parent.unavailable': 'Source unavailable: hidden by author or deleted',
 
@@ -6341,16 +6347,16 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
  * Рендер ленты: хронология / пин-дрейф / ввод; карточки, связи,
  * резонанс.
  *
- * v1.0.2:
- * - Древо предков/потомков: классы .tree-list/.tree-item/.tree-gen
- *   (гайдлайн, правило 7 — инлайны удалены). Карточки заподлицо,
- *   поколение — mono-меткой слева.
- * - Потомки ◆: полное поддерево через Provenance.descendants
- *   (метки →1/→2 по поколениям), не только прямые дети.
- * - Вычистка «Загрузить ещё»: histBtn и подписка net:history
- *   удалены (кнопки в DOM больше нет).
- * Остальное — контракт v1.0.1: анимация новым карточкам, тикер
- * дат 30с, прежняя лента при вводе без вектора, ↳-флаг parentOk.
+ * v1.0.3 (фикс заголовков древа): общий каркас openTreeModal получает
+ * и ключ заголовка, и ключ пустого состояния — раньше ключ-заглушка
+ * «Это корень — предков нет» передавался как заголовок при живой
+ * цепочке. Заголовки парные: «Предки · N» / «Потомки · N».
+ *
+ * Контракт v1.0.2 (сохранён): древо на классах .tree-list/.tree-item/
+ * .tree-gen; потомки — полное поддерево через descendants (метки
+ * →1/→2); предки — колонна без каскада, метки ↳1/↳2; анимация новым
+ * карточкам; тикер дат 30с; прежняя лента при вводе без вектора;
+ * ↳-кнопка с флагом parentOk (быстрый клик — тихо).
  */
 DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Influence, Provenance, Modal, NetService, Toast) {
   let feedEl, emptyEl, emptyT, segBar, ctxBanner, ctxSrc, ctxTxt, ctxX;
@@ -6422,14 +6428,13 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
   /**
    * Карточка древа: заподлицо, mono-метка поколения слева, текст
    * полной шириной. Клик → открыть заметку.
-   * @param {Object} note - заметка из Provenance.
-   * @param {string} genLabel - Метка поколения ('↳1', '→2', '◆').
-   * @param {boolean} [root] - подсветка исходного узла.
+   * @param {Object} note - Заметка из Provenance.
+   * @param {string} genLabel - Метка поколения ('↳1', '→2').
    * @returns {HTMLButtonElement}
    */
-  function treeItem(note, genLabel, root) {
+  function treeItem(note, genLabel) {
     const item = document.createElement('button');
-    item.className = 'tree-item' + (root ? ' root' : '');
+    item.className = 'tree-item';
 
     const gen = document.createElement('span');
     gen.className = 'tree-gen';
@@ -6450,27 +6455,29 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
   }
 
   /**
-   * Модалка древа: общий каркас (тело-список, пустое состояние,
-   * кнопка Закрыть).
-   * @param {string} titleKey
-   * @param {number} count
-   * @param {Function} buildList - (body: Element) => void
+   * Модалка древа: единый каркас. Заголовок и пустое состояние —
+   * раздельными ключами (фикс: заглушка больше не попадает в title).
+   * @param {string} titleKey - Ключ заголовка ('inf.ancestors'/'inf.children').
+   * @param {string} emptyKey - Ключ пустого состояния.
+   * @param {number} count - Количество записей.
+   * @param {Function} buildList - (body: Element) => void; вызывается
+   *   только при count > 0.
    */
-  function openTreeModal(titleKey, count, buildList) {
+  function openTreeModal(titleKey, emptyKey, count, buildList) {
     const body = document.createElement('div');
     body.className = 'tree-list';
 
-    if (count) {
+    if (count > 0) {
       buildList(body);
     } else {
       const empty = document.createElement('div');
       empty.className = 'modal-empty';
-      empty.textContent = I18n.t('inf.nochildren');
+      empty.textContent = I18n.t(emptyKey);
       body.appendChild(empty);
     }
 
     Modal.open({
-      title: I18n.t(titleKey) + (count ? ' · ' + count : ''),
+      title: I18n.t(titleKey) + (count > 0 ? ' · ' + count : ''),
       body: body,
       buttons: [{ text: I18n.t('btn.close'), onClick: () => Modal.close() }],
     });
@@ -6484,7 +6491,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
    */
   function showChildren(note) {
     Provenance.descendants(note.uid).then(items => {
-      openTreeModal('inf.children', items.length, body => {
+      openTreeModal('inf.children', 'inf.nochildren', items.length, body => {
         items.forEach(({ note: child, gen }) => {
           body.appendChild(treeItem(child, '→' + gen));
         });
@@ -6495,20 +6502,12 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
   // ─── Древо: предки ↳ ──────────────────────────────────────────────────────
 
   /**
-   * Цепочка предков: сверху мама, вниз старше; метка ↳N.
+   * Цепочка предков: сверху мама, вниз старше; метки ↳N.
    * @param {Object} note
    */
   function showAncestors(note) {
     Provenance.ancestors(note.uid).then(chain => {
-      openTreeModal('inf.noancestors', chain.length, body => {
-        if (!chain.length) {
-          body.textContent = '';
-          const empty = document.createElement('div');
-          empty.className = 'modal-empty';
-          empty.textContent = I18n.t('inf.noancestors');
-          body.appendChild(empty);
-          return;
-        }
+      openTreeModal('inf.ancestors', 'inf.noancestors.short', chain.length, body => {
         chain.forEach((c, i) => {
           body.appendChild(treeItem(c, '↳' + (i + 1)));
         });
