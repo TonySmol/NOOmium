@@ -798,7 +798,7 @@ body.ready #app { display: flex; }
 
 #composer {
   position: relative;
-  margin: 0 14px 12px;
+  margin: 12px 14px 12px;
   padding: 0 12px;
   background: var(--surface);
   border: 1px solid var(--line);
