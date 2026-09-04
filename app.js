@@ -31,7 +31,7 @@
 
 'use strict';
 
-const APP_VERSION = '1.0.2';
+const APP_VERSION = '1.0.3';
 
 // ═══ РЕЕСТР СОБЫТИЙ ШИНЫ (полный контракт) ════════════════════════════════════
 //
@@ -6021,10 +6021,10 @@ DI.register('Onboarding', function (Config, Modal, I18n, Embedder) {
  * Ctrl+Enter, VisualViewport-клавиатура, отправка через Notes.create.
  * Родитель = пин {uid, owner} (И1); после отправки пин НЕ снимается.
  *
- * v1.0.2 — autoGrow: целочисленная геометрия (гайдлайн правило 10):
- * строка 24px, паддинги 12/12, максимум 5 строк (144px), 6-я строка —
- * скролл внутри поля. Старт: одна строка, placeholder по центру.
- * Идентично на iOS/Chrome/Firefox — нет дробных пикселей в формуле.
+ * v1.0.2 → fix (autoGrow): перед замером строк поле схлопывается в
+ * auto (иначе scrollHeight не опускается ниже текущей height —
+ * поле не уменьшалось при удалении текста). Замер — целочисленный:
+ * строка 24px, паддинги 12/12, максимум 5 строк, 6-я — скролл внутри.
  *
  * Контракт v1.0 (без изменений): Notes.create REJECT → текст остаётся
  * в textarea, кнопка восстанавливается; ai.pending при loading;
@@ -6052,8 +6052,7 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
   }
 
   /**
-   * Счётчик и лимиты. Приоритет подсказок: max > hard > soft >
-   * ai.pending (модель учится, текст непуст).
+   * Счётчик и лимиты.
    */
   function updateCounter() {
     if (!cnt || !ta) return;
@@ -6122,10 +6121,9 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
   }
 
   /**
-   * Точная геометрия поля: N строк × 24px + паддинги 12/12.
-   * Число строк — из scrollHeight, итог округляется к целым строкам
-   * и клампится 1..5. Целые пиксели → идентично на всех движках.
-   * 6-я строка: overflow-y → auto (скролл внутри поля).
+   * Точная геометрия поля. Схлопывание → замер → целые строки.
+   * Уменьшение и рост симметричны: удалил текст — поле село,
+   * дописал — выросло. 6-я строка — скролл внутри.
    */
   function autoGrow() {
     const LINE = 24;
@@ -6133,6 +6131,10 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
     const MAX_LINES = 5;
 
     const wasOverflow = ta.style.overflowY;
+
+    // Схлопнуть перед замером — иначе scrollHeight >= height и
+    // поле никогда не уменьшается.
+    ta.style.height = 'auto';
     ta.style.overflowY = 'hidden';
 
     const content = ta.scrollHeight - PAD * 2;
@@ -6169,7 +6171,7 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
   }
 
   /**
-   * Отправка: Notes.create(text, visibility, parent).
+   * Отправка.
    */
   function send() {
     if (sending) return;
@@ -6211,7 +6213,6 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
         finish();
       })
       .catch(() => {
-        // Закон 2: текст пользователя неприкосновенен.
         Toast.show('err', I18n.t('toast.save.fail'));
         sending = false;
         setSendingUI(false);
@@ -6262,7 +6263,7 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
 
     if (!ta) return;
 
-    autoGrow(); // стартовая высота: одна строка по центру
+    autoGrow();
 
     ensureSendIcon();
 
