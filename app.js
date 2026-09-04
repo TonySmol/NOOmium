@@ -31,7 +31,7 @@
 
 'use strict';
 
-const APP_VERSION = '1.0.1';
+const APP_VERSION = '1.0.2';
 
 // ═══ РЕЕСТР СОБЫТИЙ ШИНЫ (полный контракт) ════════════════════════════════════
 //
@@ -6493,7 +6493,6 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
         const item = document.createElement('button');
         item.className = 'nv-act';
         item.style.cssText = 'text-align:left;justify-content:flex-start;white-space:normal;height:auto;min-height:40px;width:100%;';
-        item.style.paddingLeft = (16 + i * 14) + 'px';
         item.textContent = '↳ ' + (c.text || '').slice(0, truncate);
 
         item.addEventListener('click', () => {
