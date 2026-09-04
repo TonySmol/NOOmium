@@ -911,6 +911,7 @@ DI.register('Config', function () {
     theme: 'dark',
     lang: null,
     onboarded: false,
+    firstRunDone: false,
     logLevel: 'info',
 
     model: 'onnx-community/granite-embedding-97m-multilingual-r2-ONNX',
