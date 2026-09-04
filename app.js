@@ -6201,7 +6201,7 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
       sending = false;
       setSendingUI(false);
       ta.value = '';
-      ta.style.height = '23';
+      ta.style.height = '23px';
       Context.setInput('');
       updateCounter();
     };
