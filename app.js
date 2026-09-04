@@ -31,7 +31,7 @@
 
 'use strict';
 
-const APP_VERSION = '1.0.2';
+const APP_VERSION = '1.0.3';
 
 // ═══ РЕЕСТР СОБЫТИЙ ШИНЫ (полный контракт) ════════════════════════════════════
 //
@@ -546,7 +546,7 @@ DI.register('I18n', function (Config, bus) {
     'ranking.serendipity.hint': 'Насколько широкие связи показывать как озарения (5%–30%)',
     'ranking.similarity': 'Порог одинаковости',
     'ranking.similarity.hint': 'Сходство, выше которого заметки считаются одинаковыми (88%–99%)',
-    'ranking.reset': 'Сбросить настройки',
+    'ranking.reset': 'Сброс',
     'ranking.saved': 'Настройки сохранены',
     'ranking.display': 'Отображение сходства',
     'ranking.display.signal': 'Индикатор сигнала',
@@ -778,7 +778,7 @@ DI.register('I18n', function (Config, bus) {
     'ranking.serendipity.hint': 'How broad connections to show as insights (5%–30%)',
     'ranking.similarity': 'Duplicate threshold',
     'ranking.similarity.hint': 'Similarity above which notes are considered identical (88%–99%)',
-    'ranking.reset': 'Reset settings',
+    'ranking.reset': 'Reset',
     'ranking.saved': 'Settings saved',
     'ranking.display': 'Similarity display',
     'ranking.display.signal': 'Signal indicator',
