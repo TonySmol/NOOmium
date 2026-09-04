@@ -31,7 +31,7 @@
 
 'use strict';
 
-const APP_VERSION = '1.0.2';
+const APP_VERSION = '1.0.3';
 
 // ═══ РЕЕСТР СОБЫТИЙ ШИНЫ (полный контракт) ════════════════════════════════════
 //
@@ -8691,19 +8691,18 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboar
 
 // ─── UI/FirstRunGate ─── START ──────────────────────────────────────────────
 /**
- * Гейт первого запуска: блокирующий полноэкранный экран идентичности.
+ * Гейт первого запуска: блокирующий экран идентичности.
  *
- * Флоу: первый запуск (или после полного сброса — firstRunDone
- * стирается вместе с localStorage) → Nostr.init уже сгенерировал
- * ключ → гейт предлагает:
- *   «Я здесь впервые» → показ ключа (nsec) → скопировать →
- *   «Я сохранил ключ» → firstRunDone = true → гейт уходит.
- *   «У меня есть ключ» → вход (nsec/ncryptsec + пароль) →
- *   Account.enterKey (замена ключа, DB.reset) → firstRunDone → уход.
- *
- * Прогресс модели (z-1200) качается ПОД гейтом (z-1250) — фон.
- * Тосты (z-1300) видны поверх гейта.
- * Гейт не закрывается Escape/кликом — только явным выбором юзера.
+ * v1.0.2 (исправление логики показа):
+ * - Гейт виден ТОЛЬКО при отсутствии ключа в localStorage: юзер с
+ *   существующим ключом (включая миграцию с v1.0.1) гейт не видит
+ *   никогда. firstRunDone — вторичный флаг (ставится при показе
+ *   ключа и при входе; полный сброс стирает оба условия → гейт
+ *   возвращается).
+ * - Флаг ставится в момент показа ключа, а не только по кнопке
+ *   «Я сохранил»: случайное закрытие вкладки не возвращает гейт.
+ * - Ветка «У меня есть ключ» — вход на чистом устройстве
+ *   (DB.reset уместен: локальных данных нет).
  */
 DI.register('FirstRunGate', function (Config, Nostr, Account, Crypto, Toast, I18n, bus) {
   let root = null;
@@ -8718,6 +8717,19 @@ DI.register('FirstRunGate', function (Config, Nostr, Account, Crypto, Toast, I18
     root.id = 'gate';
     document.body.appendChild(root);
     return root;
+  }
+
+  /**
+   * Ключ уже есть в хранилище? (Юзер существует — гейт не нужен.)
+   * @returns {boolean}
+   */
+  function hasStoredKey() {
+    try {
+      const hex = localStorage.getItem('noomium:sk');
+      return !!(hex && /^[0-9a-f]{64}$/i.test(hex));
+    } catch (_) {
+      return false;
+    }
   }
 
   /**
@@ -8761,7 +8773,6 @@ DI.register('FirstRunGate', function (Config, Nostr, Account, Crypto, Toast, I18
     const choices = document.createElement('div');
     choices.className = 'gate-choices';
 
-    // «Я здесь впервые» — primary.
     const fresh = document.createElement('button');
     fresh.className = 'gate-choice primary';
     const ft = document.createElement('span');
@@ -8775,7 +8786,6 @@ DI.register('FirstRunGate', function (Config, Nostr, Account, Crypto, Toast, I18
     fresh.addEventListener('click', renderNewKey);
     choices.appendChild(fresh);
 
-    // «У меня есть ключ».
     const have = document.createElement('button');
     have.className = 'gate-choice';
     const ht = document.createElement('span');
@@ -8806,15 +8816,8 @@ DI.register('FirstRunGate', function (Config, Nostr, Account, Crypto, Toast, I18
     const c = document.createElement('div');
     c.className = 'gate-c';
 
-    const title = document.createElement('div');
-    title.className = 'gate-logo';
-    title.style.fontSize = '18px';
-    c.appendChild(title);
-
     const t2 = document.createElement('div');
-    t2.className = 'gate-sub';
-    t2.style.fontWeight = '600';
-    t2.style.color = 'var(--text)';
+    t2.className = 'gate-title';
     t2.textContent = I18n.t('gate.newkey.title');
     c.appendChild(t2);
 
@@ -8823,18 +8826,15 @@ DI.register('FirstRunGate', function (Config, Nostr, Account, Crypto, Toast, I18
     sub.textContent = I18n.t('gate.newkey.sub');
     c.appendChild(sub);
 
-    // Ключ: маскирован до «Показать», потом полный.
     const box = document.createElement('div');
     box.className = 'key-box masked';
     box.textContent = I18n.t('account.nsec.masked');
     c.appendChild(box);
 
     let revealed = false;
-    let copied = false;
 
     const showBtn = document.createElement('button');
-    showBtn.className = 'nv-act';
-    showBtn.style.width = '100%';
+    showBtn.className = 'nv-act gate-full';
     showBtn.textContent = I18n.t('btn.show');
     showBtn.addEventListener('click', async () => {
       if (revealed) return;
@@ -8857,21 +8857,19 @@ DI.register('FirstRunGate', function (Config, Nostr, Account, Crypto, Toast, I18
       box.classList.remove('masked');
       box.classList.add('focused');
 
-      // Сразу копируем: юзер пришёл за ключом — буфер к его услугам.
+      // Флаг сразу: юзер увидел ключ — приложение «его», гейт
+      // не вернётся при случайном закрытии вкладки.
+      Config.set('firstRunDone', true);
+      Config.set('keyExported', true);
+
       const ok = await copyText(nsec);
-      copied = ok;
       Toast.show(ok ? 'ok' : 'warn',
-        I18n.t(ok ? 'gate.copied' : 'account.nsec.masked'));
+        I18n.t(ok ? 'gate.copied' : 'account.nsec.hint'));
 
       showBtn.textContent = I18n.t('btn.copy');
       showBtn.addEventListener('click', async () => {
         const ok2 = await copyText(nsec);
-        if (ok2) {
-          copied = true;
-          Toast.show('ok', I18n.t('gate.copied'));
-        } else {
-          Toast.show('err', I18n.t('toast.copy.fail'));
-        }
+        Toast.show(ok2 ? 'ok' : 'err', I18n.t(ok2 ? 'gate.copied' : 'toast.copy.fail'));
       }, { once: true });
     });
     c.appendChild(showBtn);
@@ -8885,15 +8883,10 @@ DI.register('FirstRunGate', function (Config, Nostr, Account, Crypto, Toast, I18
     actions.className = 'gate-actions';
 
     const done = document.createElement('button');
-    done.className = 'nv-act';
-    done.style.background = 'var(--amber-btn)';
-    done.style.color = '#1a1206';
-    done.style.borderColor = 'transparent';
-    done.style.fontWeight = '600';
+    done.className = 'nv-act gate-primary';
     done.textContent = I18n.t('gate.saved');
     done.addEventListener('click', () => {
       Config.set('firstRunDone', true);
-      Config.set('keyExported', true); // ключ показан и (скорее всего) сохранён
       finish();
     });
     actions.appendChild(done);
@@ -8912,6 +8905,7 @@ DI.register('FirstRunGate', function (Config, Nostr, Account, Crypto, Toast, I18
 
   /**
    * Вход с существующим ключом (nsec / ncryptsec + пароль).
+   * Валидно только для чистого устройства (нет ключа в хранилище).
    */
   function renderEnterKey() {
     const r = ensureRoot();
@@ -8921,9 +8915,7 @@ DI.register('FirstRunGate', function (Config, Nostr, Account, Crypto, Toast, I18
     c.className = 'gate-c';
 
     const title = document.createElement('div');
-    title.className = 'gate-sub';
-    title.style.fontWeight = '600';
-    title.style.color = 'var(--text)';
+    title.className = 'gate-title';
     title.textContent = I18n.t('gate.enter.title');
     c.appendChild(title);
 
@@ -8981,11 +8973,7 @@ DI.register('FirstRunGate', function (Config, Nostr, Account, Crypto, Toast, I18
     let submitting = false;
 
     const submit = document.createElement('button');
-    submit.className = 'nv-act';
-    submit.style.background = 'var(--amber-btn)';
-    submit.style.color = '#1a1206';
-    submit.style.borderColor = 'transparent';
-    submit.style.fontWeight = '600';
+    submit.className = 'nv-act gate-primary';
     submit.textContent = I18n.t('gate.enter.ok');
     submit.addEventListener('click', async () => {
       const raw = keyInput.value.trim();
@@ -9007,7 +8995,6 @@ DI.register('FirstRunGate', function (Config, Nostr, Account, Crypto, Toast, I18
         return;
       }
 
-      // Битый ключ — остаёмся на экране, показываем ошибку.
       errEl.style.display = '';
     });
     actions.appendChild(submit);
@@ -9037,23 +9024,20 @@ DI.register('FirstRunGate', function (Config, Nostr, Account, Crypto, Toast, I18
   }
 
   /**
-   * Инициализация: показать гейт, если первый запуск.
-   * Вызывается из Boot ПОСЛЕ Nostr.init (ключ уже есть) — Boot
-   * гарантирует порядок: NetService.start() резолвит Nostr.init
-   * раньше, но гейт сам ждёт готовности через Account.
+   * Инициализация: гейт ТОЛЬКО если ключа нет в хранилище.
+   * Юзер с ключом (миграция, повторные запуски) гейт не видит.
    */
   function init() {
-    if (Config.get('firstRunDone', false)) return;
+    if (hasStoredKey()) return;      // существующий юзер — мимо
+    if (Config.get('firstRunDone', false)) return; // уже прошёл (страховка)
 
-    // Ключ должен существовать до показа: Nostr.init() идентпотентен.
     Nostr.init().then(() => {
-      if (Config.get('firstRunDone', false)) return;
+      if (hasStoredKey()) return;
       renderChoice();
     }).catch(() => {
       // Nostr не загрузился (нет сети на самом первом старте):
-      // не держим юзера в чистом экране — гейт покажется при
-      // следующем запуске, firstRunDone ещё не стоит.
-      // Приложение остаётся рабочим (оффлайн-режим).
+      // гейт покажется при следующем запуске — firstRunDone ещё не
+      // стоит, приложение остаётся рабочим в оффлайне.
     });
   }
 
