@@ -861,21 +861,20 @@ body.ready #app { display: flex; }
 
 #ed-ta {
   width: 100%;
-  min-height: 23px;
-  height: 23px;
-  max-height: 115px;
+  height: 40px;
+  min-height: 40px;
+  max-height: 136px;
   resize: none;
-  font: 15px / 1.55 var(--font);
+  font: 15px / 1.6 var(--font);
   color: var(--text);
   letter-spacing: -0.005em;
   border: none;
   outline: none;
   background: transparent;
-  padding: 0;
+  padding: 8px 0;
   margin: 0;
   display: block;
-  line-height: 1.55;
-}
+  line-height: 1.6;
 }
 
 #ed-ta::placeholder { color: var(--text-3); }
@@ -885,7 +884,8 @@ body.ready #app { display: flex; }
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding-top: 8px;
+  padding: 8px 0;
+  padding-bottom: calc(8px + var(--safe-bot));
   border-top: 1px solid var(--line);
 }
 
