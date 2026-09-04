@@ -31,7 +31,7 @@
 
 'use strict';
 
-const APP_VERSION = '1.0.3';
+const APP_VERSION = '1.0.1';
 
 // ═══ РЕЕСТР СОБЫТИЙ ШИНЫ (полный контракт) ════════════════════════════════════
 //
@@ -6201,7 +6201,7 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
       sending = false;
       setSendingUI(false);
       ta.value = '';
-      ta.style.height = '40px';
+      ta.style.height = 'auto';
       Context.setInput('');
       updateCounter();
     };
@@ -6268,7 +6268,7 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
     footEl = document.getElementById('ed-foot');
 
     if (!ta) return;
-    
+
     ensureSendIcon();
 
     if (iconTimer) clearTimeout(iconTimer);
@@ -6278,7 +6278,7 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
 
     ta.addEventListener('input', () => {
       ta.style.height = 'auto';
-      ta.style.height = Math.min(ta.scrollHeight, 136) + 'px';
+      ta.style.height = Math.min(ta.scrollHeight, 120) + 'px';
 
       updateCounter();
       Context.setInput(ta.value);
@@ -6493,6 +6493,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
         const item = document.createElement('button');
         item.className = 'nv-act';
         item.style.cssText = 'text-align:left;justify-content:flex-start;white-space:normal;height:auto;min-height:40px;width:100%;';
+        item.style.paddingLeft = (16 + i * 14) + 'px';
         item.textContent = '↳ ' + (c.text || '').slice(0, truncate);
 
         item.addEventListener('click', () => {
