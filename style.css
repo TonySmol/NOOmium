@@ -851,8 +851,7 @@ body.ready #app { display: flex; }
 #composer {
   position: relative;
   margin: 0 14px 12px;
-  padding: 10px 12px;
-  padding-bottom: calc(10px + var(--safe-bot));
+  padding: 10px 12px 0;
   background: var(--surface);
   border: 1px solid var(--line);
   border-radius: var(--r);
@@ -860,12 +859,11 @@ body.ready #app { display: flex; }
   transition: border-color 0.15s var(--ease);
 }
 
-#composer:focus-within { border-color: var(--amber); }
-
 #ed-ta {
   width: 100%;
-  min-height: 44px;
-  max-height: 120px;
+  min-height: 23px;
+  height: 23px;
+  max-height: 115px;
   resize: none;
   font: 15px / 1.55 var(--font);
   color: var(--text);
@@ -873,6 +871,11 @@ body.ready #app { display: flex; }
   border: none;
   outline: none;
   background: transparent;
+  padding: 0;
+  margin: 0;
+  display: block;
+  line-height: 1.55;
+}
 }
 
 #ed-ta::placeholder { color: var(--text-3); }
