@@ -31,7 +31,7 @@
 
 'use strict';
 
-const APP_VERSION = '1.0.4';
+const APP_VERSION = '1.0.5';
 
 // ═══ РЕЕСТР СОБЫТИЙ ШИНЫ (полный контракт) ════════════════════════════════════
 //
@@ -946,7 +946,12 @@ DI.register('Config', function () {
     peerTTL: 60000,
     heartbeat: 30000,
     subWindow: 300,
-    historyMaxWindow: 2592000,
+    feedFreshDays: 7,        // ОБЩИЙ свежий слой: каноны свежее N дней
+                              // тянутся всем — единый фонд поиска
+    mirrorLimit: 2000,       // жёсткий потолок чужих записей (эвикция)
+    lastSeen: 0,             // created_at последнего полученного канона
+                              // (дельта при старте; часы релеев, не клиента)
+    olderBatch: 200,         // размер слоя при скролле вглубь
     reconnectMaxAttempts: 10,
     reconnectBaseDelay: 1000,
     reconnectMaxDelay: 60000,
@@ -1394,30 +1399,33 @@ DI.register('Vec', function () {
 
 // ─── DATA/DB ─── START ──────────────────────────────────────────────────────
 /**
- * Хранение: notes (свои) + mirror (чужие). IndexedDB noomium_v3
- * (данные v0.9 читаются как есть). In-memory fallback при недоступности.
+ * Хранение: notes (свои) + mirror (чужие). IndexedDB noomium_v3.
+ * In-memory fallback при недоступности.
  *
  * Формат mirror-записи = результат Protocol.decodeCanon:
  *   {uid, owner, version (created_at канона, fallback-версия),
  *    noteVersion? (истина заметки из payload — приоритетна),
- *    visibility, text?, vec?, parent?, ts?, deleted?}
+ *    visibility, text?, vec?, parent?, ts?, deleted?,
+ *    lastShownStamp? — LRU-отметка показа (DB.markShown)}
  *
  * Формат notes-записи (модель v1.0):
  *   {uid, text, vector: Array|null, visibility, parent, version,
  *    publishedVersion, createdAt, updatedAt}
  *
- * ИЗМЕНЕНИЯ v1.0 против v0.9.9:
+ * Контракт v1.0 (сохранён):
  * 1. upsertMirror — ОДНА readwrite-транзакция (get → решение → put):
- *    конкурентные upsert одного uid сериализуются движком, TOCTOU-окна
- *    нет. Сходимость: LWW по noteVersion (payload), fallback version
- *    (created_at); равные → richer-wins + мердж недостающих полей;
- *    deleted-факт побеждает равную версию (эхо-удаление).
- * 2. updatePublishState(uid, version) — тихая запись publishedVersion
- *    БЕЗ db:change (иначе цикл: публикация → событие → рендер).
- * 3. close() — закрытие соединения для fullReset; после close все
- *    операции тихо уходят в память, соединение НЕ переоткрывается.
- * 4. onblocked: ждём до 10с, потом mem-fallback (вместо мгновенного
- *    провала в память при мульти-табе).
+ *    TOCTOU-окна нет. Сходимость: LWW по noteVersion, fallback
+ *    version; равные → richer-wins + мердж; deleted побеждает
+ *    при равной версии (эхо-удаление).
+ * 2. updatePublishState — тихая запись БЕЗ db:change.
+ * 3. close() — для fullReset; после close всё в память.
+ * 4. onblocked: 10с ожидания, потом mem-fallback.
+ *
+ * v1.0.5 (общая свежесть + личная глубина):
+ * 5. markShown(uids) — LRU-отметки показа для эвикции.
+ * 6. evictMirror(limit) — жёсткий потолок чужих записей; свои
+ *    не трогаем; мера жертв — «забытость» (нет отметки/давняя
+ *    отметка, потом старее по ts). Тихая, без db:mirror.
  */
 DI.register('DB', function (Config, bus, Logger) {
   let db = null;
@@ -1454,7 +1462,7 @@ DI.register('DB', function (Config, bus, Logger) {
   }
 
   /**
-   * Открытие соединения. Кэшируется; после close() — всегда null (mem).
+   * Открытие соединения. Кэшируется; после close() — всегда null.
    * @returns {Promise<IDBDatabase|null>}
    */
   function open() {
@@ -1497,12 +1505,10 @@ DI.register('DB', function (Config, bus, Logger) {
           resolve(null);
         };
 
-        // Блокировано другой вкладкой: даём 10с на снятие блока,
-        // потом деградируем в память (а не мгновенно, как в v0.9.9).
         req.onblocked = () => {
           Logger.warn('DB: открытие заблокировано (другая вкладка?), жду 10с');
           setTimeout(() => {
-            if (db) return; // блок снят, onsuccess уже отработал
+            if (db) return;
             memNotes = new Map();
             memMirror = new Map();
             Logger.warn('DB: блок не снят, fallback в память');
@@ -1521,7 +1527,7 @@ DI.register('DB', function (Config, bus, Logger) {
   }
 
   /**
-   * Индексы uid в памяти (быстрые hasOwn/проверки владения).
+   * Индексы uid в памяти.
    * @returns {Promise<void>}
    */
   function buildIndexes() {
@@ -1542,7 +1548,7 @@ DI.register('DB', function (Config, bus, Logger) {
   }
 
   /**
-   * Обёртка транзакции. fn получает objectStore и возвращает IDBRequest.
+   * Обёртка транзакции.
    * @param {string} store
    * @param {string} mode
    * @param {Function} fn
@@ -1635,8 +1641,8 @@ DI.register('DB', function (Config, bus, Logger) {
   // ─── upsertMirror: сходимость зеркала ────────────────────────────────────
 
   /**
-   * Эффективная версия записи: noteVersion (payload, истина заметки),
-   * fallback — version (created_at канона; legacy/fact-only записи).
+   * Эффективная версия записи: noteVersion (payload, истина),
+   * fallback — version (created_at канона).
    * @param {Object} x
    * @returns {number}
    */
@@ -1659,8 +1665,7 @@ DI.register('DB', function (Config, bus, Logger) {
   }
 
   /**
-   * Заимствование недостающих полей из существующей записи
-   * (fact-only не затирает полную; полная поглощает факт).
+   * Заимствование недостающих полей из существующей записи.
    * @param {Object} entry
    * @param {Object} existing
    */
@@ -1672,16 +1677,15 @@ DI.register('DB', function (Config, bus, Logger) {
         }
       }
     });
+    // LRU-отметку не теряем при мердже.
+    if ((entry.lastShownStamp === undefined || entry.lastShownStamp === null)
+        && typeof existing.lastShownStamp === 'number') {
+      entry.lastShownStamp = existing.lastShownStamp;
+    }
   }
 
   /**
    * Решение о сходимости. Возвращает запись для put или null.
-   * Порядок правил:
-   *   - tombstone (deleted) побеждает при ev >= xv;
-   *   - живая запись воскрешает tombstone только при ev > xv;
-   *   - ev > xv → замена с заимствованием недостающих полей;
-   *   - ev < xv → отказ;
-   *   - равные → только если incoming «богаче» (richer-wins).
    * @param {Object} entry
    * @param {Object|undefined} existing
    * @returns {Object|null}
@@ -1716,8 +1720,7 @@ DI.register('DB', function (Config, bus, Logger) {
   }
 
   /**
-   * Upsert в mirror: ОДНА readwrite-транзакция (get → решение → put).
-   * Атомарно: конкурентные upsert сериализуются движком IDB.
+   * Upsert в mirror: ОДНА readwrite-транзакция.
    * @param {Object} entry
    * @returns {Promise<boolean>} true — запись обновлена.
    */
@@ -1727,7 +1730,6 @@ DI.register('DB', function (Config, bus, Logger) {
     }
 
     return open().then(d => {
-      // mem-путь: та же логика решения, без транзакции.
       if (!d) {
         const existing = memMirror.get(entry.uid);
         const toPut = decideUpsert(entry, existing);
@@ -1752,7 +1754,6 @@ DI.register('DB', function (Config, bus, Logger) {
               store.put(toPut);
               result = true;
             }
-            // решения null — tx завершится пусто, result=false
           };
 
           tx.oncomplete = () => {
@@ -1818,9 +1819,7 @@ DI.register('DB', function (Config, bus, Logger) {
   }
 
   /**
-   * Тихая запись publishedVersion (после успешной публикации канона).
-   * БЕЗ db:change — иначе цикл публикация→событие→ререндер.
-   * undefined трактуется как 0 (не публиковалось).
+   * Тихая запись publishedVersion.
    * @param {string} uid
    * @param {number} version
    * @returns {Promise<void>}
@@ -1861,6 +1860,101 @@ DI.register('DB', function (Config, bus, Logger) {
     }).catch(() => {});
   }
 
+  // ─── LRU-кэш глубины: отметки показа и эвикция ────────────────────────────
+
+  /**
+   * Отметка «запись показана юзеру» (лента/поиск/древо). Пишется
+   * FeedView при рендере и скролле. Основа LRU: что юзер видит —
+   * живёт; что забыл — кандидат на выезд из зеркала.
+   * Тихая: событий не эмитит (иначе цикл refresh'ей).
+   * Реализация: одна транзакция, get→put на каждый uid (страница
+   * ~30 — десятки мс, раз на чанк; курсорный обход выигрыша не даёт).
+   * @param {Array<string>} uids
+   * @returns {Promise<void>}
+   */
+  async function markShown(uids) {
+    if (!uids || !uids.length) return;
+    const now = Date.now();
+
+    return open().then(d => {
+      if (!d) {
+        for (const uid of uids) {
+          const m = memMirror.get(uid);
+          if (m) m.lastShownStamp = now;
+        }
+        return;
+      }
+
+      return new Promise(resolve => {
+        try {
+          const tx = d.transaction(MIRROR(), 'readwrite');
+          const store = tx.objectStore(MIRROR());
+
+          for (const uid of uids) {
+            const req = store.get(uid);
+            req.onsuccess = () => {
+              const m = req.result;
+              if (m) {
+                m.lastShownStamp = now;
+                store.put(m);
+              }
+            };
+          }
+
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => resolve();
+          tx.onabort = () => resolve();
+        } catch (_) {
+          resolve();
+        }
+      });
+    }).catch(() => {});
+  }
+
+  /**
+   * Эвикция зеркала: жёсткий потолок mirrorLimit для чужих записей.
+   * Свои (ownUids) не трогаем никогда.
+   * Мера жертв — «забытость»: (1) никогда не показывалась или
+   * показывалась давно (lastShownStamp), (2) тай-брейк — старее по
+   * ts. Свежий фонд (активно листаемое) цел.
+   * Тихая: db:mirror НЕ эмитим.
+   * @param {number} [limit]
+   * @returns {Promise<number>} Сколько выкинули.
+   */
+  async function evictMirror(limit) {
+    const L = typeof limit === 'number' ? limit : Config.get('mirrorLimit', 2000);
+
+    let all;
+    try {
+      all = await allMirror();
+    } catch (_) {
+      return 0;
+    }
+
+    const foreign = all.filter(m => m && m.uid && !ownUids.has(m.uid));
+    if (foreign.length <= L) return 0;
+
+    const excess = foreign.length - L;
+    const now = Date.now();
+
+    const score = m => (m.lastShownStamp ? now - m.lastShownStamp : Infinity) * 1e10
+      + (m.ts || (m.version || 0) * 1000);
+
+    const sorted = foreign.slice().sort((a, b) => score(b) - score(a));
+    const victims = sorted.slice(0, excess);
+
+    let removed = 0;
+    for (const m of victims) {
+      try {
+        await delMirror(m.uid);
+        removed++;
+      } catch (_) {}
+    }
+
+    if (removed) Logger.info('DB: эвикция зеркала — ' + removed + ' (свежий фонд цел)');
+    return removed;
+  }
+
   /**
    * Очистка обоих сторов (wipe локальной базы).
    * @returns {Promise<void>}
@@ -1891,8 +1985,6 @@ DI.register('DB', function (Config, bus, Logger) {
 
   /**
    * Закрытие соединения (только перед deleteDatabase в fullReset).
-   * После close: все операции тихо идут в память; соединение НЕ
-   * переоткрывается — deleteDatabase не упадёт в blocked.
    */
   function close() {
     closed = true;
@@ -1918,6 +2010,8 @@ DI.register('DB', function (Config, bus, Logger) {
     delMirror,
 
     updatePublishState,
+    markShown,
+    evictMirror,
     reset,
     close,
 
@@ -3190,15 +3284,25 @@ DI.register('Protocol', function (Config, Vec, Vault, Nostr) {
 
 // ─── NET/NetService ─── START ───────────────────────────────────────────────
 /**
- * Движение: подписка на комнату (каноны — без since: replaceable
- * отдаёт последнюю версию каждого; запросы/ответы — скользящим
- * окном), подписка на себя, публикация через очередь, ответы-ссылки,
- * запросы при контексте, heartbeat.
+ * Движение сети.
  *
- * v1.0.2: −loadHistory/emitHistoryDone (кнопка «Загрузить ещё»
- * удалена — лента живёт свежим срезом, глубина нужна только поиску).
- * Остальное — контракт v1.0: версионированная очередь c
- * publishedVersion, полный цикл sync:status, wipe-отчёт.
+ * v1.0.5 — модель «общая свежесть + личная глубина»:
+ * - ОБЩИЙ ФОНД: все юзеры тянут один свежий слой канонов
+ *   (since = max(now − feedFreshDays, lastSeen)). Первый визит —
+ *   свежий срез, повторные — только дельта. Поиск у всех по одной
+ *   базе: одна сеть смыслов, персональных пузырей нет.
+ * - ЛИЧНАЯ ГЛУБИНА: fetchOlder() — слой старее, слой под скролл.
+ *   Пришедшая глубина — персональный кэш интереса; живёт по
+ *   LRU-отметкам показа (DB.markShown → эвикция), выезжает
+ *   забытостью, не положением скролла.
+ * - ДНО-ТИХО: пустой слой → флаг до смены контекста/онлайна.
+ *   Дно-качели исключены: один запрос в полёте (olderBusy).
+ * - lastSeen = максимальный created_at полученного канона
+ *   (часы релеев, не клиента — дыр от расхождения часов нет).
+ * - Подписка на себя — полная (перенос заметок, дыр быть не должно).
+ *
+ * Контракт v1.0 сохранён: очередь с publishedVersion, sync:status
+ * полный цикл, wipe-отчёт, бэкофф-эпохи, rate-limits, центроиды.
  */
 DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Config, Logger, bus) {
   let started = false;
@@ -3223,13 +3327,14 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   /** @type {Map<string, number>} */
   const peerQueryTimes = new Map();
 
-  let currentWindow = Config.get('subWindow', 300);
   let subEpoch = 0;
+  let olderBusy = false;
+  /** @type {number|null} - границы дна; null — дно не искали */
+  let olderExhaustedAt = null;
 
   const QUEUE_KEY = 'noomium:queue';
 
   /**
-   * Очередь: {uids: [{uid, version}], deleted: [{uid, version}]}.
    * @returns {{uids: Array<{uid: string, version: number}>,
    *   deleted: Array<{uid: string, version: number}>}}
    */
@@ -3294,7 +3399,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   }
 
   /**
-   * Удаление из очереди по uid.
    * @param {'uids'|'deleted'} list
    * @param {string} uid
    */
@@ -3350,8 +3454,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   }
 
   /**
-   * Сброс очереди: каноны живых (только непубликованные версии),
-   * затем deleted. После успеха — тихая запись publishedVersion.
+   * Сброс очереди (контракт v1.0).
    * @returns {Promise<void>}
    */
   async function flushQueue() {
@@ -3373,7 +3476,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
             continue;
           }
 
-          // Уже опубликовано этой или более новой версией — не дублируем.
           if (typeof note.version === 'number'
               && note.version <= (note.publishedVersion || 0)) {
             removeFromQueue('uids', item.uid);
@@ -3387,9 +3489,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
             await Nostr.publish(tpl);
             await DB.updatePublishState(item.uid, note.version);
             removeFromQueue('uids', item.uid);
-          } catch (_) {
-            // Релей не принял — останется в очереди, ретрай ниже.
-          }
+          } catch (_) {}
         }
 
         for (const item of queue.deleted.slice()) {
@@ -3412,7 +3512,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   }
 
   /**
-   * Перестройка центроидов (prefilter для чужих запросов).
+   * Перестройка центроидов.
    */
   function rebuildCentroids() {
     DB.allNotes().then(notes => {
@@ -3460,6 +3560,19 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   }
 
   /**
+   * Водяной знак общей свежести: created_at последнего канона.
+   * Часы релеев — источник истины (клиентские врут).
+   * @param {Object} ev
+   */
+  function trackLastSeen(ev) {
+    if (!ev || typeof ev.created_at !== 'number') return;
+    const prev = Config.get('lastSeen', 0);
+    if (ev.created_at > prev) {
+      Config.set('lastSeen', ev.created_at);
+    }
+  }
+
+  /**
    * @param {Object} ev
    */
   function onEvent(ev) {
@@ -3472,6 +3585,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     if (ev.kind === kCanon()) {
       seen.add(ev.id);
       trimSeen();
+      trackLastSeen(ev);
       try { bus.emit('net:canon', ev); } catch (_) {}
       return;
     }
@@ -3492,7 +3606,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   }
 
   /**
-   * Обрезка seen до половины лимита.
+   * Обрезка seen.
    */
   function trimSeen() {
     const max = Config.get('seenMaxSize', 1000);
@@ -3507,7 +3621,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   }
 
   /**
-   * Чужой запрос: rate-limit → prefilter → топ-ответы-ссылки.
+   * Чужой запрос (контракт v1.0).
    * @param {Object} ev
    */
   function handleIncomingQuery(ev) {
@@ -3551,7 +3665,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   }
 
   /**
-   * Отправка запроса при изменении контекста (pin/drift).
+   * Отправка запроса при контексте (контракт v1.0).
    */
   function maybeSendQuery() {
     const ctx = Store.get('context');
@@ -3592,13 +3706,20 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   }
 
   /**
-   * Подписка на комнату: каноны без since (replaceable-семантика);
-   * запросы и ответы — со скользящим окном.
+   * Подписка на комнату: каноны — ОБЩИЙ свежий слой
+   * (первый визит: свежее feedFreshDays; повторные: дельта от
+   * lastSeen, но не стареем шире среза). Запросы/ответы — окно 300с.
    */
   function subscribeToRoom() {
+    const freshDays = Config.get('feedFreshDays', 7);
+    const lastSeen = Config.get('lastSeen', 0);
+    const freshSince = Math.floor(Date.now() / 1000) - freshDays * 86400;
+
+    const since = Math.max(freshSince, lastSeen || 0);
+
     const filters = [
-      { kinds: [kCanon()], '#t': [room()] },
-      { kinds: [kQuery(), kAnswer()], '#t': [room()], since: Math.floor(Date.now() / 1000) - currentWindow },
+      { kinds: [kCanon()], '#t': [room()], since },
+      { kinds: [kQuery(), kAnswer()], '#t': [room()], since: Math.floor(Date.now() / 1000) - Config.get('subWindow', 300) },
     ];
 
     const myEpoch = ++subEpoch;
@@ -3649,7 +3770,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   }
 
   /**
-   * Подписка на свои каноны (синк устройств).
+   * Подписка на свои каноны — полная, без since.
    */
   function subscribeSelf() {
     const pk = Nostr.getPubkey();
@@ -3676,38 +3797,92 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   }
 
   /**
-   * Подтяжка цели по ответу-ссылке.
-   * @param {Object} p - {uid, owner}
+   * Слой вглубь (личная глубина, не общий фонд): каноны старее
+   * самой старой записи зеркала. Слой просится под скролл юзера,
+   * живёт по LRU-отметкам, вытесняется забытостью.
+   * ДНО-ТИХО: пустой слой → olderExhaustedAt до смены контекста.
+   * Один запрос в полёте (olderBusy). Ждём все релеи с таймаутом
+   * 8с (релей, игнорирующий until, не собьёт счёт: дедуп seen
+   * отсечёт уже имеющееся, пустой слой честен только если новый
+   * пуст у всех).
+   * @returns {Promise<boolean>} true — слой что-то принёс.
    */
-  function handleMirrorFetch(p) {
-    if (!p || !p.uid || !p.owner) return;
-    if (!Nostr.isReady()) return;
+  async function fetchOlder() {
+    if (!started || olderBusy || isOffline() || !Nostr.isReady()) return false;
+    if (olderExhaustedAt !== null) return false;
 
-    if (fetchSubscription && typeof fetchSubscription.close === 'function') {
-      try { fetchSubscription.close(); } catch (_) {}
-    }
+    olderBusy = true;
 
-    fetchSubscription = Nostr.subscribe(
-      [{ authors: [p.owner], kinds: [kCanon()], '#d': [p.uid] }],
-      {
-        onevent: ev => {
-          if (!ev || !ev.id) return;
-          try { bus.emit('net:canon', ev); } catch (_) {}
-          if (fetchSubscription && typeof fetchSubscription.close === 'function') {
-            try { fetchSubscription.close(); } catch (_) {}
-            fetchSubscription = null;
-          }
-        },
-        onclose: () => {
-          setTimeout(() => {
-            if (fetchSubscription) {
-              try { fetchSubscription.close(); } catch (_) {}
-              fetchSubscription = null;
-            }
-          }, 10000);
-        },
+    try {
+      const mirror = await DB.allMirror().catch(() => []);
+      let oldest = null;
+      for (const m of mirror) {
+        if (typeof m.version === 'number' && (oldest === null || m.version < oldest)) {
+          oldest = m.version;
+        }
       }
-    );
+
+      if (oldest === null) {
+        // Зеркало пустое: свежий слой уже спрашивался при старте.
+        olderExhaustedAt = 0;
+        return false;
+      }
+
+      const batch = Config.get('olderBatch', 200);
+      const until = oldest - 1;
+      let got = 0;
+
+      const urls = Nostr.relays();
+
+      await Promise.allSettled(urls.map(url =>
+        Nostr.ensureRelay(url).then(relay => new Promise(resolve => {
+          let settled = false;
+          const done = () => {
+            if (settled) return;
+            settled = true;
+            try { sub.close(); } catch (_) {}
+            resolve();
+          };
+
+          const sub = relay.subscribe(
+            [{ kinds: [kCanon()], '#t': [room()], since: until - 86400 * 90, until, limit: batch }],
+            {
+              onevent: ev => {
+                if (ev && ev.kind === kCanon() && !seen.has(ev.id)) got++;
+                onEvent(ev);
+              },
+              oneose: done,
+              onclose: done,
+            }
+          );
+
+          setTimeout(done, 8000);
+        }))
+      ));
+
+      if (got === 0) {
+        olderExhaustedAt = until;
+        Logger.info('NetService: глубже ' + until + ' пусто — дно');
+        return false;
+      }
+
+      Logger.info('NetService: слой вглубь — ' + got + ' канонов (глубже ' + until + ')');
+
+      // Потолок: слой приехал — зеркало поджимается. Свежий фонд
+      // (недавно показанное) цел: эвикция по забытости.
+      await DB.evictMirror().catch(() => {});
+
+      return true;
+    } finally {
+      olderBusy = false;
+    }
+  }
+
+  /**
+   * Сброс дна: смена контекста — глубину можно искать заново.
+   */
+  function resetOlderExhausted() {
+    olderExhaustedAt = null;
   }
 
   /**
@@ -3722,6 +3897,8 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
         start();
         return;
       }
+
+      resetOlderExhausted();
 
       if (!isOffline()) {
         if (!subscription) subscribeToRoom();
@@ -3746,7 +3923,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   }
 
   /**
-   * Heartbeat: чистка peerQueryTimes + seen.
+   * Heartbeat.
    */
   function startHeartbeat() {
     if (hbTimer) clearInterval(hbTimer);
@@ -3763,7 +3940,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   }
 
   /**
-   * Старт. Идемпотентен; при падении — retry 10с.
+   * Старт.
    * @returns {Promise<void>}
    */
   function start() {
@@ -3806,6 +3983,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
           saveQueue();
           seen.clear();
           peerQueryTimes.clear();
+          resetOlderExhausted();
         }));
 
         busUnsubs.push(bus.on('sync:toggle', p => {
@@ -3824,12 +4002,14 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
 
         busUnsubs.push(bus.on('mirror:fetch', handleMirrorFetch));
 
-        contextUnsub = Store.subscribe(s => s.context, () => maybeSendQuery());
+        contextUnsub = Store.subscribe(s => s.context, () => {
+          maybeSendQuery();
+          resetOlderExhausted();
+        });
 
         startHeartbeat();
         rebuildCentroids();
 
-        // Стартовая переочередка: только неопубликованные версии.
         DB.allNotes().then(notes => {
           notes.forEach(n => {
             if (n && n.uid
@@ -3876,6 +4056,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     }
 
     reconnectAttempts = 0;
+    resetOlderExhausted();
 
     if (!isOffline()) {
       subscribeToRoom();
@@ -3936,6 +4117,8 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     lastQueryVec = null;
     lastQueryTime = 0;
     reconnectAttempts = 0;
+    olderBusy = false;
+    olderExhaustedAt = null;
 
     if (full) {
       seen.clear();
@@ -3946,7 +4129,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   }
 
   /**
-   * Публичный wipe: каноны deleted для всех своих заметок.
+   * Публичный wipe.
    * @returns {Promise<{published: number, offline: boolean}>}
    */
   async function publishWipeAll() {
@@ -3972,7 +4155,48 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     return { published, offline: false };
   }
 
-  return { start, stop, resync, publishWipeAll };
+  /**
+   * Подтяжка цели по ответу-ссылке.
+   * @param {Object} p - {uid, owner}
+   */
+  function handleMirrorFetch(p) {
+    if (!p || !p.uid || !p.owner) return;
+    if (!Nostr.isReady()) return;
+
+    if (fetchSubscription && typeof fetchSubscription.close === 'function') {
+      try { fetchSubscription.close(); } catch (_) {}
+    }
+
+    fetchSubscription = Nostr.subscribe(
+      [{ authors: [p.owner], kinds: [kCanon()], '#d': [p.uid] }],
+      {
+        onevent: ev => {
+          if (!ev || !ev.id) return;
+          try { bus.emit('net:canon', ev); } catch (_) {}
+          if (fetchSubscription && typeof fetchSubscription.close === 'function') {
+            try { fetchSubscription.close(); } catch (_) {}
+            fetchSubscription = null;
+          }
+        },
+        onclose: () => {
+          setTimeout(() => {
+            if (fetchSubscription) {
+              try { fetchSubscription.close(); } catch (_) {}
+              fetchSubscription = null;
+            }
+          }, 10000);
+        },
+      }
+    );
+  }
+
+  return {
+    start,
+    stop,
+    resync,
+    publishWipeAll,
+    fetchOlder,
+  };
 }, ['Nostr', 'Protocol', 'DB', 'Ranker', 'Vec', 'Store', 'Config', 'Logger', 'EventBus']);
 // ─── NET/NetService ─── END ─────────────────────────────────────────────────
 
@@ -6385,18 +6609,16 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
  * Рендер ленты: хронология / пин-дрейф / ввод; карточки, связи,
  * резонанс.
  *
- * v1.0.4:
- * - ПАГИНАЦИЯ (фикс 2): рендер по 30 карточек, при скролле к низу
- *   +30. Данные в Store полные — ограничивается только DOM/память.
- *   Сброс счётчика при любом рендере НЕ из скролла (смена режима,
- *   новые данные). Пин/дрейф/ввод — та же механика, единообразно.
- * - Фиксы ключей: пустое состояние предков — 'inf.ancestors.none'
- *   (был несуществующий .short), title кнопки ↳ — 'inf.ancestors'
- *   (был удалённый 'inf.lineage').
- * Контракт v1.0.2/v1.0.3 сохранён: древо на классах, потомки через
- * descendants (→N), предки колонной (↳N), заголовки «Предки · N»,
- * анимация новым карточкам, тикер дат, прежняя лента при вводе без
- * вектора, ↳-флаг parentOk.
+ * v1.0.5:
+ * - Скролл-вглубь: Store исчерпан и это хронология → слой старее
+ *   с релеев (NetService.fetchOlder). Дно — тихо (флаг в сервисе).
+ * - LRU: видимые карточки отмечаются (DB.markShown) — основа
+ *   эвикции зеркала: что юзер видит — живёт.
+ * v1.0.4: пагинация DOM по 30.
+ * v1.0.3: каркас древа с раздельными ключами.
+ * Контракт v1.0.2: древо на классах, потомки descendants (→N),
+ * предки колонной (↳N), анимация новым карточкам, тикер дат 30с,
+ * прежняя лента при вводе без вектора, ↳-флаг parentOk.
  */
 DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Influence, Provenance, Modal, NetService, Toast) {
   const PAGE = 30;
@@ -6408,6 +6630,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
   let rafPending = false;
   let tickerTimer = null;
   let visibleCount = PAGE;
+  let shownThrottle = 0;
 
   /**
    * Привязка к DOM.
@@ -6466,13 +6689,49 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
     }
   }
 
+  // ─── LRU: отметки показа ──────────────────────────────────────────────────
+
+  /**
+   * Отметить показанные записи (DB.markShown). Троттлинг 2с: скролл
+   * событие частое, транзакции — нет.
+   * @param {Array<string>} uids
+   */
+  function markShownThrottled(uids) {
+    if (!uids || !uids.length) return;
+    const now = Date.now();
+    if (now - shownThrottle < 2000) return;
+    shownThrottle = now;
+    try { DI.resolve('DB').markShown(uids); } catch (_) {}
+  }
+
+  /**
+   * Видимые сейчас uid (в viewport'е ленты).
+   * @returns {Array<string>}
+   */
+  function visibleUids() {
+    const out = [];
+    if (!feedEl) return out;
+
+    const els = feedEl.children;
+    const h = feedEl.clientHeight;
+    for (let i = 0; i < els.length; i++) {
+      const el = els[i];
+      if (!el.dataset || !el.dataset.uid) continue;
+      const rect = el.getBoundingClientRect();
+      const feedRect = feedEl.getBoundingClientRect();
+      if (rect.bottom > feedRect.top && rect.top < feedRect.top + h) {
+        out.push(el.dataset.uid);
+      }
+    }
+    return out;
+  }
+
   // ─── Древо: общая фабрика элементов ───────────────────────────────────────
 
   /**
-   * Карточка древа: заподлицо, mono-метка поколения слева, текст
-   * полной шириной. Клик → открыть заметку.
-   * @param {Object} note - Заметка из Provenance.
-   * @param {string} genLabel - Метка поколения ('↳1', '→2').
+   * Карточка древа.
+   * @param {Object} note
+   * @param {string} genLabel
    * @returns {HTMLButtonElement}
    */
   function treeItem(note, genLabel) {
@@ -6502,7 +6761,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
    * @param {string} titleKey
    * @param {string} emptyKey
    * @param {number} count
-   * @param {Function} buildList - (body: Element) => void.
+   * @param {Function} buildList
    */
   function openTreeModal(titleKey, emptyKey, count, buildList) {
     const body = document.createElement('div');
@@ -6524,10 +6783,8 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
     });
   }
 
-  // ─── Древо: потомки ◆ ─────────────────────────────────────────────────────
-
   /**
-   * Полное поддерево потомков: BFS-поколениями, метки →1/→2.
+   * Полное поддерево потомков.
    * @param {Object} note
    */
   function showChildren(note) {
@@ -6540,10 +6797,8 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
     }).catch(() => {});
   }
 
-  // ─── Древо: предки ↳ ──────────────────────────────────────────────────────
-
   /**
-   * Цепочка предков: сверху мама, вниз старше; метки ↳N.
+   * Цепочка предков.
    * @param {Object} note
    */
   function showAncestors(note) {
@@ -6568,7 +6823,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
   /**
    * @param {Object} n
    * @param {boolean} isRanked
-   * @param {number} i - индекс среди НОВЫХ карточек (для stagger).
+   * @param {number} i
    * @returns {HTMLDivElement}
    */
   function card(n, isRanked, i) {
@@ -6709,7 +6964,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
   }
 
   /**
-   * Тикер дат: раз в 30с обновляет только текст, без пересборки.
+   * Тикер дат: раз в 30с обновляет только текст.
    */
   function startTicker() {
     if (tickerTimer) clearInterval(tickerTimer);
@@ -6726,8 +6981,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
 
   /**
    * Полный рендер.
-   * @param {boolean} isLoadMore - true при догрузке скроллом:
-   *   не сбрасывает visibleCount.
+   * @param {boolean} isLoadMore
    */
   function render(isLoadMore) {
     if (!feedEl) return;
@@ -6769,7 +7023,6 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
       notes = state.feed;
     }
 
-    // Пагинация: DOM получает страницу, Store держит всё.
     const page = notes.slice(0, visibleCount);
 
     const prevUids = new Set();
@@ -6800,14 +7053,25 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
         frag.appendChild(c);
       });
       feedEl.appendChild(frag);
+
+      // LRU: показанная страница — живая.
+      markShownThrottled(page.map(n => n.uid));
     }
   }
 
   /**
-   * Скролл-догрузка: у низа (600px запас) + есть ещё — +страница.
+   * Скролл: (1) у дна среза DOM → +страница из Store; (2) Store
+   * исчерпан и это хронология → слой вглубь с релеев. Дно — тихо.
+   * Плюс LRU-отметки видимых.
    */
   function onScroll() {
     if (!feedEl) return;
+
+    // LRU: что на экране — живёт.
+    markShownThrottled(visibleUids());
+
+    const rest = feedEl.scrollHeight - feedEl.scrollTop - feedEl.clientHeight;
+    if (rest >= 600) return;
 
     const state = Store.getState();
     const ctx = state.context;
@@ -6815,20 +7079,24 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
     const hasVector = !!ctx.vector;
 
     let total;
+    let isChrono = false;
     if (ctx.source === 'pin' || ctx.source === 'drift') {
       total = state.lists.local.length + state.lists.world.length + state.lists.seren.length;
     } else if (isTyping && hasVector) {
       total = (state.lists[state.seg] || []).length;
     } else {
       total = state.feed.length;
+      isChrono = true;
     }
 
-    if (visibleCount >= total) return;
-
-    const rest = feedEl.scrollHeight - feedEl.scrollTop - feedEl.clientHeight;
-    if (rest < 600) {
+    if (visibleCount < total) {
       visibleCount += PAGE;
       render(true);
+      return;
+    }
+
+    if (isChrono) {
+      NetService.fetchOlder().catch(() => {});
     }
   }
 
