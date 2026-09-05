@@ -31,7 +31,7 @@
 
 'use strict';
 
-const APP_VERSION = '1.0.3';
+const APP_VERSION = '1.0.4';
 
 // ═══ РЕЕСТР СОБЫТИЙ ШИНЫ (полный контракт) ════════════════════════════════════
 //
@@ -43,7 +43,6 @@ const APP_VERSION = '1.0.3';
 //               reconnecting|failed|disconnected}
 // net:canon     NetService → Mirror            (raw Nostr event kind 30078)
 // net:answer    NetService → Mirror            {queryId, uid, owner, score}
-// net:history   NetService → FeedView          {loading, window}
 // net:resync    NetService → Mirror            (сброс fetched-дедупа)
 //
 // sync:status   NetService → AccountView       {phase: 'off'|'active'|'idle'}
@@ -4316,21 +4315,55 @@ DI.register('Notes', function (DB, Embedder, bus, Logger, Utils) {
 // ─── DOMAIN/Mirror ─── START ────────────────────────────────────────────────
 /**
  * Интерпретация входящих канонов: свой → notes (LWW по noteVersion;
- * deleted-канон побеждает при >= — быстрое «создал → удалил»
- * больше не теряется), чужой → mirror. Единственная точка записи в
- * mirror. Свои записи в mirror невозможны (И2); purgeSelf вычищает
- * исторические дубли. ts из payload — хронология ленты.
+ * deleted-канон побеждает при >=), чужой → mirror. Единственная
+ * точка записи в mirror. ts из payload — хронология ленты.
+ *
+ * v1.0.4 (фикс 1): статистика снимка — окно 8с открывается первым
+ * каноном после старта/резинка, лог по завершении: «снимок — N
+ * канонов (живых M, удалено K, своих S)». Пустая лента теперь
+ * объясняется одной строкой лога, а не детективом.
  *
  * net:answer → fetchTarget (дедуп 500) → mirror:fetch → NetService
- * точечная подписка (authors + #d) — подтяжка цели по ссылке.
+ * точечная подписка.
  */
 DI.register('Mirror', function (DB, Protocol, Notes, bus, Nostr, Logger) {
   /** @type {Set<string>} */
   const fetched = new Set();
 
+  // ─── Статистика снимка (фикс 1) ───────────────────────────────────────────
+  /** @type {{count: number, live: number, deleted: number, own: number, timer: number}|null} */
+  let snap = null;
+
+  /**
+   * Счётчик снимка: первый канон открывает окно 8с.
+   * @param {Object} canonical - Декодированный канон.
+   */
+  function snapCount(canonical) {
+    if (!snap) {
+      snap = { count: 0, live: 0, deleted: 0, own: 0, timer: 0 };
+      snap.timer = setTimeout(snapLog, 8000);
+    }
+    snap.count++;
+    if (canonical.deleted) snap.deleted++;
+    else snap.live++;
+    if (canonical.owner === Nostr.getPubkey()) snap.own++;
+  }
+
+  /**
+   * Лог снимка + закрытие окна.
+   */
+  function snapLog() {
+    if (!snap) return;
+    clearTimeout(snap.timer);
+    Logger.info('Mirror: снимок — ' + snap.count + ' канонов'
+      + ' (живых ' + snap.live + ', удалено ' + snap.deleted
+      + ', своих ' + snap.own + ')');
+    snap = null;
+  }
+
   /**
    * Эффективная версия канона: noteVersion payload, fallback —
-   * created_at (legacy-каноны v0.9 без noteVersion в payload).
+   * created_at (legacy-каноны v0.9).
    * @param {Object} c
    * @returns {number}
    */
@@ -4377,6 +4410,11 @@ DI.register('Mirror', function (DB, Protocol, Notes, bus, Nostr, Logger) {
 
     bus.on('net:resync', () => {
       fetched.clear();
+      // Новая волна снимка: окно откроется первым пришедшим каноном.
+      if (snap) {
+        clearTimeout(snap.timer);
+        snap = null;
+      }
     });
 
     Nostr.init().then(purgeSelf).catch(() => {});
@@ -4392,6 +4430,8 @@ DI.register('Mirror', function (DB, Protocol, Notes, bus, Nostr, Logger) {
       const canonical = await Protocol.decodeCanon(ev);
       if (!canonical || !canonical.uid || !canonical.owner) return;
 
+      snapCount(canonical);
+
       const myPk = Nostr.getPubkey();
 
       // Чужой канон → зеркало (сходимость решает DB.upsertMirror).
@@ -4405,8 +4445,6 @@ DI.register('Mirror', function (DB, Protocol, Notes, bus, Nostr, Logger) {
 
       if (canonical.deleted) {
         if (!cur) return;
-        // deleted побеждает при >= : удаление на той же версии —
-        // законная финальная операция; более ранняя — игнорируется.
         if (effVersion(canonical) >= (typeof cur.version === 'number' ? cur.version : 0)) {
           await DB.delNote(canonical.uid);
           Logger.info('Mirror: удаление по эху v' + effVersion(canonical)
@@ -6347,24 +6385,29 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
  * Рендер ленты: хронология / пин-дрейф / ввод; карточки, связи,
  * резонанс.
  *
- * v1.0.3 (фикс заголовков древа): общий каркас openTreeModal получает
- * и ключ заголовка, и ключ пустого состояния — раньше ключ-заглушка
- * «Это корень — предков нет» передавался как заголовок при живой
- * цепочке. Заголовки парные: «Предки · N» / «Потомки · N».
- *
- * Контракт v1.0.2 (сохранён): древо на классах .tree-list/.tree-item/
- * .tree-gen; потомки — полное поддерево через descendants (метки
- * →1/→2); предки — колонна без каскада, метки ↳1/↳2; анимация новым
- * карточкам; тикер дат 30с; прежняя лента при вводе без вектора;
- * ↳-кнопка с флагом parentOk (быстрый клик — тихо).
+ * v1.0.4:
+ * - ПАГИНАЦИЯ (фикс 2): рендер по 30 карточек, при скролле к низу
+ *   +30. Данные в Store полные — ограничивается только DOM/память.
+ *   Сброс счётчика при любом рендере НЕ из скролла (смена режима,
+ *   новые данные). Пин/дрейф/ввод — та же механика, единообразно.
+ * - Фиксы ключей: пустое состояние предков — 'inf.ancestors.none'
+ *   (был несуществующий .short), title кнопки ↳ — 'inf.ancestors'
+ *   (был удалённый 'inf.lineage').
+ * Контракт v1.0.2/v1.0.3 сохранён: древо на классах, потомки через
+ * descendants (→N), предки колонной (↳N), заголовки «Предки · N»,
+ * анимация новым карточкам, тикер дат, прежняя лента при вводе без
+ * вектора, ↳-флаг parentOk.
  */
 DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Influence, Provenance, Modal, NetService, Toast) {
+  const PAGE = 30;
+
   let feedEl, emptyEl, emptyT, segBar, ctxBanner, ctxSrc, ctxTxt, ctxX;
   let cLocal, cWorld, cSeren;
   let segBtns = [];
   let unsubs = [];
   let rafPending = false;
   let tickerTimer = null;
+  let visibleCount = PAGE;
 
   /**
    * Привязка к DOM.
@@ -6392,7 +6435,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
     rafPending = true;
     requestAnimationFrame(() => {
       rafPending = false;
-      render();
+      render(false);
     });
   }
 
@@ -6455,13 +6498,11 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
   }
 
   /**
-   * Модалка древа: единый каркас. Заголовок и пустое состояние —
-   * раздельными ключами (фикс: заглушка больше не попадает в title).
-   * @param {string} titleKey - Ключ заголовка ('inf.ancestors'/'inf.children').
-   * @param {string} emptyKey - Ключ пустого состояния.
-   * @param {number} count - Количество записей.
-   * @param {Function} buildList - (body: Element) => void; вызывается
-   *   только при count > 0.
+   * Модалка древа: единый каркас.
+   * @param {string} titleKey
+   * @param {string} emptyKey
+   * @param {number} count
+   * @param {Function} buildList - (body: Element) => void.
    */
   function openTreeModal(titleKey, emptyKey, count, buildList) {
     const body = document.createElement('div');
@@ -6507,7 +6548,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
    */
   function showAncestors(note) {
     Provenance.ancestors(note.uid).then(chain => {
-      openTreeModal('inf.ancestors', 'inf.noancestors.short', chain.length, body => {
+      openTreeModal('inf.ancestors', 'inf.ancestors.none', chain.length, body => {
         chain.forEach((c, i) => {
           body.appendChild(treeItem(c, '↳' + (i + 1)));
         });
@@ -6565,7 +6606,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
         const link = document.createElement('button');
         link.className = 'note-parent';
         link.textContent = '↳';
-        link.title = I18n.t('inf.lineage');
+        link.title = I18n.t('inf.ancestors');
         link.setAttribute('aria-label', I18n.t('inf.openparent'));
 
         let parentOk = false;
@@ -6685,9 +6726,13 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
 
   /**
    * Полный рендер.
+   * @param {boolean} isLoadMore - true при догрузке скроллом:
+   *   не сбрасывает visibleCount.
    */
-  function render() {
+  function render(isLoadMore) {
     if (!feedEl) return;
+
+    if (!isLoadMore) visibleCount = PAGE;
 
     const state = Store.getState();
     const ctx = state.context;
@@ -6724,6 +6769,9 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
       notes = state.feed;
     }
 
+    // Пагинация: DOM получает страницу, Store держит всё.
+    const page = notes.slice(0, visibleCount);
+
     const prevUids = new Set();
     for (const el of feedEl.children) {
       if (el.dataset && el.dataset.uid) prevUids.add(el.dataset.uid);
@@ -6742,7 +6790,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
 
       let newIdx = 0;
       const frag = document.createDocumentFragment();
-      notes.forEach(n => {
+      page.forEach(n => {
         const c = card(n, isRanked, newIdx);
         if (prevUids.has(n.uid)) {
           c.style.animation = 'none';
@@ -6752,6 +6800,35 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
         frag.appendChild(c);
       });
       feedEl.appendChild(frag);
+    }
+  }
+
+  /**
+   * Скролл-догрузка: у низа (600px запас) + есть ещё — +страница.
+   */
+  function onScroll() {
+    if (!feedEl) return;
+
+    const state = Store.getState();
+    const ctx = state.context;
+    const isTyping = ctx.source === 'input';
+    const hasVector = !!ctx.vector;
+
+    let total;
+    if (ctx.source === 'pin' || ctx.source === 'drift') {
+      total = state.lists.local.length + state.lists.world.length + state.lists.seren.length;
+    } else if (isTyping && hasVector) {
+      total = (state.lists[state.seg] || []).length;
+    } else {
+      total = state.feed.length;
+    }
+
+    if (visibleCount >= total) return;
+
+    const rest = feedEl.scrollHeight - feedEl.scrollTop - feedEl.clientHeight;
+    if (rest < 600) {
+      visibleCount += PAGE;
+      render(true);
     }
   }
 
@@ -6771,6 +6848,8 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
     unsubs.push(bus.on('db:mirror', scheduleRender));
     unsubs.push(bus.on('influence:updated', scheduleRender));
 
+    feedEl.addEventListener('scroll', onScroll, { passive: true });
+
     segBtns.forEach(b => {
       b.addEventListener('click', () => {
         Store.setState({ seg: b.getAttribute('data-k') });
@@ -6781,7 +6860,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
       ctxX.addEventListener('click', () => Context.clearPin());
     }
 
-    render();
+    render(false);
     startTicker();
   }
 
@@ -8269,7 +8348,7 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboar
   function applyView(view) {
     const isBase = view === 'base';
 
-    ['ctx-banner', 'seg', 'feed-wrap', 'btn-history', 'composer'].forEach(id => {
+    ['ctx-banner', 'seg', 'feed-wrap', 'composer'].forEach(id => {
       const el = document.getElementById(id);
       if (el) el.classList.toggle('hidden', isBase);
     });
