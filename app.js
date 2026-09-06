@@ -31,7 +31,7 @@
 
 'use strict';
 
-const APP_VERSION = '1.0.6';
+const APP_VERSION = '1.0.7';
 
 // ═══ РЕЕСТР СОБЫТИЙ ШИНЫ (полный контракт) ════════════════════════════════════
 //
@@ -6624,16 +6624,19 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
  * Рендер ленты: хронология / пин-дрейф / ввод; карточки, связи,
  * резонанс.
  *
- * v1.0.5:
- * - Скролл-вглубь: Store исчерпан и это хронология → слой старее
- *   с релеев (NetService.fetchOlder). Дно — тихо (флаг в сервисе).
- * - LRU: видимые карточки отмечаются (DB.markShown) — основа
- *   эвикции зеркала: что юзер видит — живёт.
+ * v1.0.7:
+ * - SCROLL-ANCHORING: перед пересборкой запоминаем uid+позицию
+ *   первой видимой карточки, после — восстанавливаем. Удаление
+ *   из середины ленты больше не выбрасывает наверх (симптом
+ *   v1.0.6: delNote → db:change → render → scrollTop=0).
+ * - УМНЫЙ СБРОС СТРАНИЦЫ: render(false) при живой глубокой
+ *   прокрутке не сваливается в 30 карточек, а покрывает текущую
+ *   позицию + экран (симптом: fetchOlder у дна сжимал ленту,
+ *   скроллбар «распухал», надо было докручивать заново).
+ * v1.0.5: скролл-вглубь (fetchOlder), LRU-отметки.
  * v1.0.4: пагинация DOM по 30.
- * v1.0.3: каркас древа с раздельными ключами.
- * Контракт v1.0.2: древо на классах, потомки descendants (→N),
- * предки колонной (↳N), анимация новым карточкам, тикер дат 30с,
- * прежняя лента при вводе без вектора, ↳-флаг parentOk.
+ * Контракт: древо на классах, потомки descendants (→N), предки
+ * колонной (↳N), анимация новым карточкам, тикер дат 30с.
  */
 DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Influence, Provenance, Modal, NetService, Toast) {
   const PAGE = 30;
@@ -6707,8 +6710,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
   // ─── LRU: отметки показа ──────────────────────────────────────────────────
 
   /**
-   * Отметить показанные записи (DB.markShown). Троттлинг 2с: скролл
-   * событие частое, транзакции — нет.
+   * Отметить показанные (троттлинг 2с).
    * @param {Array<string>} uids
    */
   function markShownThrottled(uids) {
@@ -6720,34 +6722,91 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
   }
 
   /**
-   * Видимые сейчас uid (в viewport'е ленты).
+   * Видимые сейчас uid.
    * @returns {Array<string>}
    */
   function visibleUids() {
     const out = [];
     if (!feedEl) return out;
 
-    const els = feedEl.children;
+    const feedTop = feedEl.getBoundingClientRect().top;
     const h = feedEl.clientHeight;
+    const els = feedEl.children;
     for (let i = 0; i < els.length; i++) {
       const el = els[i];
       if (!el.dataset || !el.dataset.uid) continue;
       const rect = el.getBoundingClientRect();
-      const feedRect = feedEl.getBoundingClientRect();
-      if (rect.bottom > feedRect.top && rect.top < feedRect.top + h) {
+      if (rect.bottom > feedTop && rect.top < feedTop + h) {
         out.push(el.dataset.uid);
       }
     }
     return out;
   }
 
-  // ─── Древо: общая фабрика элементов ───────────────────────────────────────
+  // ─── Скролл-якорь: позиция переживает пересборку ──────────────────────────
+
+  /**
+   * Снять якорь: uid и вертикальный офсет первой видимой карточки
+   * относительно верха скролл-вьюпорта.
+   * @returns {{uid: string, offset: number}|null}
+   */
+  function takeAnchor() {
+    if (!feedEl) return null;
+    const feedTop = feedEl.getBoundingClientRect().top;
+    const els = feedEl.children;
+    for (let i = 0; i < els.length; i++) {
+      const el = els[i];
+      if (!el.dataset || !el.dataset.uid) continue;
+      const rect = el.getBoundingClientRect();
+      if (rect.bottom > feedTop) {
+        return { uid: el.dataset.uid, offset: rect.top - feedTop };
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Восстановить позицию по якорю: найти карточку uid, выставить
+   * scrollTop так, чтобы она оказалась на том же офсете. Карточки
+   * нет (удалена/эвиктнута) — ближайшая живая сверху от прежнего
+   * места: честный fallback — сохранить scrollTop в пределах.
+   * @param {{uid: string, offset: number}|null} anchor
+   */
+  function applyAnchor(anchor) {
+    if (!feedEl) return;
+
+    if (anchor) {
+      const el = feedEl.querySelector('[data-uid="' + anchor.uid + '"]');
+      if (el) {
+        const target = el.offsetTop - anchor.offset;
+        feedEl.scrollTop = Math.max(0, target);
+        return;
+      }
+    }
+
+    // Fallback: не дальше текущего scrollTop, не выше 0.
+    feedEl.scrollTop = Math.min(feedEl.scrollTop, Math.max(0, feedEl.scrollHeight - feedEl.clientHeight));
+  }
+
+  /**
+   * Сколько карточек надо показать, чтобы покрыть текущую глубину
+   * прокрутки + экран: удаление/refresh не сжимают ленту до 30,
+   * если ты на 200-й.
+   * @returns {number}
+   */
+  function pageForCurrentScroll() {
+    if (!feedEl || !feedEl.children.length) return PAGE;
+    // Высота средней карточки по факту:
+    const avg = feedEl.scrollHeight / feedEl.children.length || 120;
+    const depth = feedEl.scrollTop + feedEl.clientHeight;
+    const need = Math.ceil(depth / avg) + 10; // +запас
+    return Math.max(PAGE, Math.ceil(need / PAGE) * PAGE);
+  }
+
+  // ─── Древо ────────────────────────────────────────────────────────────────
 
   /**
    * Карточка древа.
-   * @param {Object} note
-   * @param {string} genLabel
-   * @returns {HTMLButtonElement}
    */
   function treeItem(note, genLabel) {
     const item = document.createElement('button');
@@ -6772,11 +6831,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
   }
 
   /**
-   * Модалка древа: единый каркас.
-   * @param {string} titleKey
-   * @param {string} emptyKey
-   * @param {number} count
-   * @param {Function} buildList
+   * Модалка древа.
    */
   function openTreeModal(titleKey, emptyKey, count, buildList) {
     const body = document.createElement('div');
@@ -6799,8 +6854,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
   }
 
   /**
-   * Полное поддерево потомков.
-   * @param {Object} note
+   * Потомки.
    */
   function showChildren(note) {
     Provenance.descendants(note.uid).then(items => {
@@ -6813,8 +6867,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
   }
 
   /**
-   * Цепочка предков.
-   * @param {Object} note
+   * Предки.
    */
   function showAncestors(note) {
     Provenance.ancestors(note.uid).then(chain => {
@@ -6836,10 +6889,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
   }
 
   /**
-   * @param {Object} n
-   * @param {boolean} isRanked
-   * @param {number} i
-   * @returns {HTMLDivElement}
+   * Карточка ленты.
    */
   function card(n, isRanked, i) {
     const el = document.createElement('div');
@@ -6979,7 +7029,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
   }
 
   /**
-   * Тикер дат: раз в 30с обновляет только текст.
+   * Тикер дат: раз в 30с.
    */
   function startTicker() {
     if (tickerTimer) clearInterval(tickerTimer);
@@ -7001,7 +7051,14 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
   function render(isLoadMore) {
     if (!feedEl) return;
 
-    if (!isLoadMore) visibleCount = PAGE;
+    // Якорь ДО wipe (симптом: удаление выбрасывало наверх).
+    const anchor = takeAnchor();
+
+    if (!isLoadMore) {
+      // Умный сброс: покрываем текущую глубину, не сжимаемся в 30
+      // (симптом: слой у дна сжимал ленту, скроллбар распухал).
+      visibleCount = pageForCurrentScroll();
+    }
 
     const state = Store.getState();
     const ctx = state.context;
@@ -7069,20 +7126,20 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
       });
       feedEl.appendChild(frag);
 
-      // LRU: показанная страница — живая.
       markShownThrottled(page.map(n => n.uid));
     }
+
+    // Позиция ПОСЛЕ wipe (якорь по uid, fallback — клэмп).
+    applyAnchor(anchor);
   }
 
   /**
-   * Скролл: (1) у дна среза DOM → +страница из Store; (2) Store
-   * исчерпан и это хронология → слой вглубь с релеев. Дно — тихо.
-   * Плюс LRU-отметки видимых.
+   * Скролл: LRU-отметки; (1) у дна → +страница; (2) исчерпано и
+   * хронология → слой вглубь. Дно — тихо.
    */
   function onScroll() {
     if (!feedEl) return;
 
-    // LRU: что на экране — живёт.
     markShownThrottled(visibleUids());
 
     const rest = feedEl.scrollHeight - feedEl.scrollTop - feedEl.clientHeight;
@@ -7579,14 +7636,16 @@ DI.register('NoteActions', function (Notes, Modal, Toast, I18n) {
 
 // ─── UI/BaseView ─── START ──────────────────────────────────────────────────
 /**
- * База: статистика по visibility, поиск (substring), сортировка.
- * Рендер только при view === 'base' — переключение через
- * Store.subscribe (событие-призрак view:changed удалён).
+ * База: статистика, поиск, сортировка, пагинация строк по 30
+ * (v1.0.7: полный рендер всех строк заменён чанками — как лента).
  */
 DI.register('BaseView', function (Store, DB, I18n, Utils, Config, bus) {
+  const PAGE = 30;
+
   let listEl, statsTotal, statsOpen, statsPriv, qEl, sortEl;
   let unsubs = [];
   let rafPending = false;
+  let visibleCount = PAGE;
 
   /**
    * Привязка к DOM.
@@ -7643,9 +7702,11 @@ DI.register('BaseView', function (Store, DB, I18n, Utils, Config, bus) {
       if (statsOpen) statsOpen.textContent = publicCount;
       if (statsPriv) statsPriv.textContent = notes.length - publicCount;
 
+      const page = arr.slice(0, visibleCount);
+
       listEl.innerHTML = '';
 
-      if (!arr.length) {
+      if (!page.length) {
         const empty = document.createElement('div');
         empty.className = 'note';
         empty.style.cursor = 'default';
@@ -7655,14 +7716,13 @@ DI.register('BaseView', function (Store, DB, I18n, Utils, Config, bus) {
       }
 
       const frag = document.createDocumentFragment();
-      arr.forEach(n => frag.appendChild(row(n)));
+      page.forEach(n => frag.appendChild(row(n)));
       listEl.appendChild(frag);
     }).catch(() => {});
   }
 
   /**
-   * @param {Object} n - Своя заметка.
-   * @returns {HTMLDivElement}
+   * Строка базы.
    */
   function row(n) {
     const el = document.createElement('div');
@@ -7695,21 +7755,47 @@ DI.register('BaseView', function (Store, DB, I18n, Utils, Config, bus) {
   }
 
   /**
+   * Скролл базы: у дна → +страница.
+   */
+  function onScroll() {
+    if (!listEl) return;
+
+    const rest = listEl.scrollHeight - listEl.scrollTop - listEl.clientHeight;
+    if (rest >= 600) return;
+
+    // Есть ли ещё — по текущему фильтру не знаем без запроса;
+    // тянем страницу: рендер сам обрежет по visibleCount+PAGE.
+    if (listEl.children.length >= visibleCount) {
+      visibleCount += PAGE;
+      render();
+    }
+  }
+
+  /**
    * Инициализация.
    */
   function init() {
     bind();
     if (!listEl) return;
 
-    const debouncedRender = Utils.debounce(scheduleRender, Config.get('baseSearchDebounce', 200));
+    const debouncedRender = Utils.debounce(() => {
+      visibleCount = PAGE; // смена запроса/сортировки — с начала
+      scheduleRender();
+    }, Config.get('baseSearchDebounce', 200));
 
     if (qEl) qEl.addEventListener('input', debouncedRender);
-    if (sortEl) sortEl.addEventListener('change', scheduleRender);
+    if (sortEl) sortEl.addEventListener('change', () => {
+      visibleCount = PAGE;
+      scheduleRender();
+    });
 
-    // view — из Store (единая точка истины; DOM-переключение — в MenuView).
+    listEl.addEventListener('scroll', onScroll, { passive: true });
+
     unsubs.push(Store.subscribe(s => s.view, scheduleRender));
-
-    unsubs.push(bus.on('db:change', scheduleRender));
+    unsubs.push(bus.on('db:change', () => {
+      // удаление/правка — без сброса страницы (позиция пользователя):
+      scheduleRender();
+    }));
     unsubs.push(bus.on('i18n:change', scheduleRender));
 
     render();
