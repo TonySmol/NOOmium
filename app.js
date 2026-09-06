@@ -31,7 +31,7 @@
 
 'use strict';
 
-const APP_VERSION = '1.0.7';
+const APP_VERSION = '1.0.8';
 
 // ═══ РЕЕСТР СОБЫТИЙ ШИНЫ (полный контракт) ════════════════════════════════════
 //
@@ -952,6 +952,7 @@ DI.register('Config', function () {
     lastSeen: 0,             // created_at последнего полученного канона
                               // (дельта при старте; часы релеев, не клиента)
     olderBatch: 200,         // размер слоя при скролле вглубь
+    deleteMinAck: 3,        // подтверждений для deleted-канонов (из 5)
     reconnectMaxAttempts: 10,
     reconnectBaseDelay: 1000,
     reconnectMaxDelay: 60000,
@@ -2534,19 +2535,19 @@ DI.register('Ranker', function (Vec, Config) {
 
 // ─── NET/Nostr ─── START ────────────────────────────────────────────────────
 /**
- * Транспорт: nostr-tools@2.7.2 (версия запиннена), SimplePool, ключи.
+ * Транспорт: nostr-tools@2.7.2, SimplePool, ключи.
  *
- * КОНТРАКТ v1.0:
- * - init() → Promise<pubkey>; идемпотентен; при ошибке CDN —
- *   net:status failed + throw (вызывающий решает, жить ли без сети).
- * - Секретный ключ: localStorage hex (известный компромисс B-04,
- *   изолирован здесь; смена хранилища — точечная правка load/saveKey).
- * - publish: параллельно на все релеи, успех = первый принявший,
- *   полный отказ = все упали, таймаут 30с. После таймаута событие
- *   МОЖЕТ уйти позднее — это безопасно: повторная публикация той же
- *   заметки даёт новый created_at при том же noteVersion в payload,
- *   зеркала сходятся (см. NetService/DB).
- * - setKey: замена аккаунта (валидация 32 байта).
+ * v1.0.8: publish(template, opts) — параметр minAck:
+ *   - minAck не задан/1 → успех = первый принявший (обычные каноны,
+ *     скорость);
+ *   - minAck = N → успех = N релеев из живых подтвердили (deleted:
+ *     надёжность). Полный отказ/таймаут → reject.
+ *   Это закрывает H-04b: «deleted при плохих релеях лёг не на все
+ *   доски → призраки возвращались с отстающих релеев».
+ * Побочный эффект: недобор N при падении части досок — reject,
+ * вызывающий оставит запись в очереди (ретраи доконают).
+ *
+ * Остальной контракт v1.0 без изменений.
  */
 DI.register('Nostr', function (Config, bus, Logger) {
   const CDN = 'https://cdn.jsdelivr.net/npm/nostr-tools@2.7.2/+esm';
@@ -2591,9 +2592,8 @@ DI.register('Nostr', function (Config, bus, Logger) {
   }
 
   /**
-   * Инициализация: загрузка библиотеки, восстановление/генерация
-   * ключа, создание пула. Идемпотентна.
-   * @returns {Promise<string>} Публичный ключ.
+   * Инициализация (контракт v1.0).
+   * @returns {Promise<string>}
    */
   function init() {
     if (initPromise) return initPromise;
@@ -2644,7 +2644,7 @@ DI.register('Nostr', function (Config, bus, Logger) {
 
   /**
    * @param {Uint8Array} newSk
-   * @returns {string} Новый pubkey.
+   * @returns {string}
    * @throws {Error}
    */
   function setKey(newSk) {
@@ -2662,7 +2662,7 @@ DI.register('Nostr', function (Config, bus, Logger) {
 
   /**
    * @param {Object} template
-   * @returns {Object} Подписанное событие.
+   * @returns {Object}
    * @throws {Error}
    */
   function sign(template) {
@@ -2671,11 +2671,14 @@ DI.register('Nostr', function (Config, bus, Logger) {
   }
 
   /**
-   * Публикация на все релеи; успех при первом принявшем.
+   * Публикация на все релеи.
    * @param {Object} template
+   * @param {Object} [opts] - {minAck: number} — минимум подтверждений.
+   *   1/undefined — первый принявший (обычные каноны);
+   *   N — N подтверждений (deleted: надёжность, H-04b).
    * @returns {Promise<Object>} Подписанное событие.
    */
-  function publish(template) {
+  function publish(template, opts) {
     let ev;
     try {
       ev = sign(template);
@@ -2688,38 +2691,49 @@ DI.register('Nostr', function (Config, bus, Logger) {
     const urls = relays();
     if (!urls.length) return Promise.reject(new Error('no relays configured'));
 
+    const minAck = (opts && typeof opts.minAck === 'number' && opts.minAck > 1)
+      ? Math.min(opts.minAck, urls.length)
+      : 1;
+
     const PUBLISH_TIMEOUT = 30000;
 
-    const publishPromise = new Promise((resolve, reject) => {
+    return new Promise((resolve, reject) => {
       let settled = false;
+      let acks = 0;
       let failures = 0;
+      const done = urls.length;
+
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+
+        // Недобор при полном проходе — reject: вызывающий оставит
+        // запись в очереди, ретраи добьют.
+        if (acks >= minAck) resolve(ev);
+        else reject(new Error('accepted ' + acks + '/' + minAck));
+      };
 
       urls.forEach(url => {
         pool.ensureRelay(url)
           .then(relay => relay.publish(ev))
           .then(() => {
-            if (!settled) {
-              settled = true;
-              resolve(ev);
-            }
+            if (settled) return;
+            acks++;
+            if (acks >= minAck) finish();
           })
           .catch(err => {
             failures++;
             Logger.warn('Nostr: релей ' + url + ' не принял', String(err && err.message || err));
 
-            if (!settled && failures === urls.length) {
-              settled = true;
-              reject(new Error('no relay accepted'));
-            }
+            if (failures + acks >= done) finish();
           });
       });
-    });
 
-    const timeoutPromise = new Promise((_, reject) => {
-      setTimeout(() => reject(new Error('publish timeout')), PUBLISH_TIMEOUT);
+      // Таймаут: что накопилось — то и решает.
+      setTimeout(() => {
+        finish();
+      }, PUBLISH_TIMEOUT);
     });
-
-    return Promise.race([publishPromise, timeoutPromise]);
   }
 
   /**
@@ -3299,25 +3313,16 @@ DI.register('Protocol', function (Config, Vec, Vault, Nostr) {
 
 // ─── NET/NetService ─── START ───────────────────────────────────────────────
 /**
- * Движение сети.
+ * Движение сети. Модель «общая свежесть + личная глубина» (v1.0.5).
  *
- * v1.0.5 — модель «общая свежесть + личная глубина»:
- * - ОБЩИЙ ФОНД: все юзеры тянут один свежий слой канонов
- *   (since = max(now − feedFreshDays, lastSeen)). Первый визит —
- *   свежий срез, повторные — только дельта. Поиск у всех по одной
- *   базе: одна сеть смыслов, персональных пузырей нет.
- * - ЛИЧНАЯ ГЛУБИНА: fetchOlder() — слой старее, слой под скролл.
- *   Пришедшая глубина — персональный кэш интереса; живёт по
- *   LRU-отметкам показа (DB.markShown → эвикция), выезжает
- *   забытостью, не положением скролла.
- * - ДНО-ТИХО: пустой слой → флаг до смены контекста/онлайна.
- *   Дно-качели исключены: один запрос в полёте (olderBusy).
- * - lastSeen = максимальный created_at полученного канона
- *   (часы релеев, не клиента — дыр от расхождения часов нет).
- * - Подписка на себя — полная (перенос заметок, дыр быть не должно).
- *
- * Контракт v1.0 сохранён: очередь с publishedVersion, sync:status
- * полный цикл, wipe-отчёт, бэкофф-эпохи, rate-limits, центроиды.
+ * v1.0.8 (H-04b — призраки удалений):
+ * - deleted-каноны публикуются с minAck (deleteMinAck из Config,
+ *   по умолчанию 3 из 5): удаление считается доставленным только
+ *   при N подтверждениях. Недобор → reject → запись ОСТАЁТСЯ в
+ *   очереди → ретраи (10с) доконают. Раньше: первый принявший →
+ *   отстающие доски держали живую версию → заметки возвращались
+ *   при следующем снимке (твой живой кейс).
+ * - Обычные каноны — как было: первый принявший (скорость).
  */
 DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Config, Logger, bus) {
   let started = false;
@@ -3344,7 +3349,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
 
   let subEpoch = 0;
   let olderBusy = false;
-  /** @type {number|null} - границы дна; null — дно не искали */
+  /** @type {number|null} */
   let olderExhaustedAt = null;
 
   const QUEUE_KEY = 'noomium:queue';
@@ -3469,7 +3474,8 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   }
 
   /**
-   * Сброс очереди (контракт v1.0).
+   * Сброс очереди. v1.0.8: deleted-каноны — с minAck; недобор
+   * подтверждений → reject → запись остаётся в очереди (ретраи).
    * @returns {Promise<void>}
    */
   async function flushQueue() {
@@ -3479,6 +3485,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
 
     flushing = true;
     const syncing = Config.get('syncEnabled', true);
+    const minAck = Math.max(1, Config.get('deleteMinAck', 3));
 
     try {
       if (syncing) {
@@ -3504,15 +3511,25 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
             await Nostr.publish(tpl);
             await DB.updatePublishState(item.uid, note.version);
             removeFromQueue('uids', item.uid);
-          } catch (_) {}
+          } catch (_) {
+            // Релей не принял — останется в очереди, ретрай ниже.
+          }
         }
 
+        // v1.0.8: удаление — надёжно или никак. Минимум N досок
+        // должны схавать deleted, иначе призрак вернётся с
+        // отстающей доски при следующем снимке.
         for (const item of queue.deleted.slice()) {
           try {
             const tpl = await Protocol.canonDeleted(item.uid, item.version || 0);
-            await Nostr.publish(tpl);
+            await Nostr.publish(tpl, { minAck });
             removeFromQueue('deleted', item.uid);
-          } catch (_) {}
+          } catch (e) {
+            // Недобор подтверждений: остаётся в очереди, ретрай
+            // через 10с — доконает по мере ожерелья досок.
+            Logger.warn('NetService: deleted ' + item.uid.slice(0, 6)
+              + ' недонёс (' + String(e && e.message || e) + '), ретрай');
+          }
         }
       }
     } catch (_) {} finally {
@@ -3575,8 +3592,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   }
 
   /**
-   * Водяной знак общей свежести: created_at последнего канона.
-   * Часы релеев — источник истины (клиентские врут).
+   * Водяной знак общей свежести.
    * @param {Object} ev
    */
   function trackLastSeen(ev) {
@@ -3636,7 +3652,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   }
 
   /**
-   * Чужой запрос (контракт v1.0).
+   * Чужой запрос.
    * @param {Object} ev
    */
   function handleIncomingQuery(ev) {
@@ -3680,7 +3696,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   }
 
   /**
-   * Отправка запроса при контексте (контракт v1.0).
+   * Отправка запроса при контексте.
    */
   function maybeSendQuery() {
     const ctx = Store.get('context');
@@ -3721,9 +3737,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   }
 
   /**
-   * Подписка на комнату: каноны — ОБЩИЙ свежий слой
-   * (первый визит: свежее feedFreshDays; повторные: дельта от
-   * lastSeen, но не стареем шире среза). Запросы/ответы — окно 300с.
+   * Подписка на комнату: общий свежий слой.
    */
   function subscribeToRoom() {
     const freshDays = Config.get('feedFreshDays', 7);
@@ -3785,7 +3799,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   }
 
   /**
-   * Подписка на свои каноны — полная, без since.
+   * Подписка на свои каноны.
    */
   function subscribeSelf() {
     const pk = Nostr.getPubkey();
@@ -3812,15 +3826,8 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   }
 
   /**
-   * Слой вглубь (личная глубина, не общий фонд): каноны старее
-   * самой старой записи зеркала. Слой просится под скролл юзера,
-   * живёт по LRU-отметкам, вытесняется забытостью.
-   * ДНО-ТИХО: пустой слой → olderExhaustedAt до смены контекста.
-   * Один запрос в полёте (olderBusy). Ждём все релеи с таймаутом
-   * 8с (релей, игнорирующий until, не собьёт счёт: дедуп seen
-   * отсечёт уже имеющееся, пустой слой честен только если новый
-   * пуст у всех).
-   * @returns {Promise<boolean>} true — слой что-то принёс.
+   * Слой вглубь.
+   * @returns {Promise<boolean>}
    */
   async function fetchOlder() {
     if (!started || olderBusy || isOffline() || !Nostr.isReady()) return false;
@@ -3838,7 +3845,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
       }
 
       if (oldest === null) {
-        // Зеркало пустое: свежий слой уже спрашивался при старте.
         olderExhaustedAt = 0;
         return false;
       }
@@ -3883,8 +3889,6 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
 
       Logger.info('NetService: слой вглубь — ' + got + ' канонов (глубже ' + until + ')');
 
-      // Потолок: слой приехал — зеркало поджимается. Свежий фонд
-      // (недавно показанное) цел: эвикция по забытости.
       await DB.evictMirror().catch(() => {});
 
       return true;
@@ -3894,7 +3898,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   }
 
   /**
-   * Сброс дна: смена контекста — глубину можно искать заново.
+   * Сброс дна.
    */
   function resetOlderExhausted() {
     olderExhaustedAt = null;
@@ -4144,7 +4148,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   }
 
   /**
-   * Публичный wipe.
+   * Публичный wipe: deleted для всех своих, с minAck.
    * @returns {Promise<{published: number, offline: boolean}>}
    */
   async function publishWipeAll() {
@@ -4153,6 +4157,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     }
 
     let published = 0;
+    const minAck = Math.max(1, Config.get('deleteMinAck', 3));
 
     try {
       const notes = await DB.allNotes();
@@ -4161,7 +4166,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
         if (!n || !n.uid) continue;
         try {
           const tpl = await Protocol.canonDeleted(n.uid, n.version || 0);
-          await Nostr.publish(tpl);
+          await Nostr.publish(tpl, { minAck });
           published++;
         } catch (_) {}
       }
