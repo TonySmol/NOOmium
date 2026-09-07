@@ -6878,9 +6878,10 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
       openTreeModal('inf.ancestors', 'inf.ancestors.none', chain.length, body => {
         chain.forEach((c, i) => {
           body.appendChild(treeItem(c, '↳' + (i + 1)));
+        });
       });
     }).catch(() => {});
-}
+  }
 
   // ─── Карточка ──────────────────────────────────────────────────────────────
 
