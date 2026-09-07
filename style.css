@@ -652,7 +652,8 @@ body.ready #app { display: flex; }
   gap: 1px;
   min-width: 0;
   max-width: 140px;
-  padding: 2px 8px;
+  height: 34px;
+  padding: 0 8px;
   border-radius: var(--r-xs);
   flex-shrink: 1;
   overflow: hidden;
