@@ -629,8 +629,8 @@ body.ready #app { display: flex; }
   line-height: 1.55;
 }
 
-/* ── ПОДВАЛ одним рядом (v1.0.10):
-   [плашка: автор+время] [↳] [◆] [сигнал] [↩|✎] — без переносов. */
+/* ── ПОДВАЛ одним рядом (v1.0.10.2):
+   [плашка: автор+время] [↳] [◆] [сигнал] [↩|✎] */
 .note-meta {
   display: flex;
   align-items: center;
@@ -643,8 +643,7 @@ body.ready #app { display: flex; }
   flex-wrap: nowrap;
 }
 
-/* Плашка автор+время: одна на всех, высота ряда кнопок.
-   priv серый / world teal — прежние цвета системы. */
+/* Плашка автор+время: одна на всех, высота ряда кнопок. */
 .note-badge {
   display: flex;
   flex-direction: column;
@@ -685,8 +684,8 @@ body.ready #app { display: flex; }
   white-space: nowrap;
 }
 
-/* Тег видимости: в карточках заменён плашкой, класс живёт
-   в NoteView (info-строка) и BaseView (строки списка). */
+/* Тег видимости: в карточках заменён плашкой; класс живёт
+   в NoteView и BaseView. */
 .note-tag {
   padding: 3px 7px;
   border-radius: 4px;
@@ -782,23 +781,42 @@ body.ready #app { display: flex; }
   pointer-events: none;
 }
 
+/* Индикатор сигнала (v1.0.10.2): полоски + подпись в колонку,
+   каркас кнопочный (surface-2 + бордер), высота 34. */
 .note-sim-info {
-  display: inline-flex;
+  display: flex;
+  flex-direction: column;
   align-items: center;
-  gap: 4px;
-  font-weight: 600;
-  font-size: 11px;
-  font-family: var(--mono);
-  white-space: nowrap;
+  justify-content: center;
+  gap: 2px;
+  height: 34px;
+  padding: 0 8px;
+  min-width: 0;
+  max-width: 92px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-xs);
   flex-shrink: 0;
+  line-height: 1;
+}
+
+.note-sim-info.pct .sig-label {
+  font: 600 11px / 1 var(--mono);
   color: var(--amber);
+}
+
+.note-sim-bars {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  flex-shrink: 0;
 }
 
 .sig-bar {
   display: inline-block;
-  width: 4px;
-  height: 12px;
-  border-radius: 1px;
+  width: 5px;
+  height: 14px;
+  border-radius: 1.5px;
   flex-shrink: 0;
 }
 
@@ -806,11 +824,14 @@ body.ready #app { display: flex; }
 .sig-bar.sig-empty { background: var(--surface-3); }
 
 .sig-label {
-  font-size: 10px;
-  font-weight: 600;
+  font: 600 9px / 1 var(--mono);
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  color: var(--text-2);
+  color: var(--text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
 }
 
 .note-meta-right {
