@@ -599,7 +599,7 @@ body.ready #app { display: flex; }
   padding: 14px;
   margin-bottom: 10px;
   cursor: pointer;
-  transition: border-color 0.15s var(--ease), box-shadow 0.15s var(--ease);
+  transition: border-color 0.15s var(--ease), box-shadow 0.15 var(--ease);
   animation: noteIn 0.25s var(--ease-out) both;
   display: flex;
   flex-direction: column;
@@ -629,16 +629,39 @@ body.ready #app { display: flex; }
   line-height: 1.55;
 }
 
+/* ── ПОДВАЛ КАРТОЧКИ (v1.0.9): две группы к краям.
+   Слева — идентичность + связи (тег, ↳ род, ◆ резонанс,
+   ↩ источник). Справа — состояние + действие (сигнал,
+   дата, ✎). Прежний flex-wrap живёт внутри левой группы. */
 .note-meta {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 8px;
   font: 400 11px / 1 var(--mono);
   color: var(--text-3);
-  flex-wrap: wrap;
   margin-top: auto;
   padding-top: 6px;
   min-height: 34px;
+}
+
+.note-meta-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  row-gap: 4px;
+  min-width: 0;
+}
+
+.note-meta-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  flex-shrink: 0;
+  margin-left: auto;
 }
 
 .note-tag {
@@ -672,6 +695,7 @@ body.ready #app { display: flex; }
 
 .note-sim,
 .note-parent,
+.note-src,
 .na {
   background: var(--surface-2);
   border: 1px solid var(--line);
@@ -698,6 +722,19 @@ body.ready #app { display: flex; }
   color: var(--teal);
   font-size: 13px;
   font-weight: 600;
+}
+
+/* Кнопка источника ↩: одна линейка с ↳/◆ (34px, teal).
+   В NoteView — текстовая версия .note-src-btn ниже в секции 14. */
+.note-src {
+  color: var(--teal);
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.note-src:hover {
+  background: var(--surface-3);
+  border-color: var(--teal);
 }
 
 .na {
@@ -761,7 +798,6 @@ body.ready #app { display: flex; }
   font-family: var(--mono);
   white-space: nowrap;
   flex-shrink: 0;
-  margin-left: auto;
 }
 
 #feed-empty {
@@ -1496,6 +1532,18 @@ body.ready #app { display: flex; }
 .nv-act.danger:hover:not(:disabled) {
   background: var(--rose);
   color: #fff;
+}
+
+/* v1.0.9: кнопка источника в просмотре — teal-акцент на базе
+   .nv-act (геометрия/паттерны системы, только цвет и hover). */
+.nv-act.note-src-btn {
+  color: var(--teal);
+}
+
+.nv-act.note-src-btn:hover:not(:disabled) {
+  border-color: var(--teal);
+  color: var(--teal);
+  background: var(--surface-3);
 }
 
 .nv-text-edit {
