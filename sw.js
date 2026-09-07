@@ -9,7 +9,7 @@
 // - pass-through: внешние CDN и WebSocket (SW их не трогает).
 // ═══════════════════════════════════════════════════════════════════════════
 
-const CACHE_VERSION = 'noomium-v1.0.10';
+const CACHE_VERSION = 'noomium-v1.0.10b';
 
 // App shell: кэшируем сразу при установке.
 const PRECACHE_URLS = [
