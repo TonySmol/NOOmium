@@ -599,7 +599,7 @@ body.ready #app { display: flex; }
   padding: 14px;
   margin-bottom: 10px;
   cursor: pointer;
-  transition: border-color 0.15s var(--ease), box-shadow 0.15 var(--ease);
+  transition: border-color 0.15s var(--ease), box-shadow 0.15s var(--ease);
   animation: noteIn 0.25s var(--ease-out) both;
   display: flex;
   flex-direction: column;
@@ -629,41 +629,63 @@ body.ready #app { display: flex; }
   line-height: 1.55;
 }
 
-/* ── ПОДВАЛ КАРТОЧКИ (v1.0.9): две группы к краям.
-   Слева — идентичность + связи (тег, ↳ род, ◆ резонанс,
-   ↩ источник). Справа — состояние + действие (сигнал,
-   дата, ✎). Прежний flex-wrap живёт внутри левой группы. */
+/* ── ПОДВАЛ одним рядом (v1.0.10):
+   [плашка: автор+время] [↳] [◆] [сигнал] [↩|✎] — без переносов. */
 .note-meta {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 8px;
   font: 400 11px / 1 var(--mono);
   color: var(--text-3);
   margin-top: auto;
   padding-top: 6px;
   min-height: 34px;
+  flex-wrap: nowrap;
 }
 
-.note-meta-left {
+/* Плашка автор+время: одна на всех, высота ряда кнопок.
+   priv серый / world teal — прежние цвета системы. */
+.note-badge {
   display: flex;
-  align-items: center;
-  gap: 8px;
-  flex: 0 1 auto;
-  flex-wrap: wrap;
-  row-gap: 4px;
+  flex-direction: column;
+  justify-content: center;
+  gap: 1px;
   min-width: 0;
+  max-width: 140px;
+  padding: 2px 8px;
+  border-radius: var(--r-xs);
+  flex-shrink: 1;
+  overflow: hidden;
 }
 
-.note-meta-right {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex: 0 0 auto;
-  flex-shrink: 0;
-  margin-left: auto;
+.note-badge.priv {
+  background: var(--surface-3);
 }
 
+.note-badge.world {
+  background: var(--teal-glow);
+}
+
+.note-badge-name {
+  font: 600 11px / 1.2 var(--font);
+  color: var(--text-2);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.note-badge.world .note-badge-name { color: var(--teal); }
+
+.note-badge-date {
+  font: 400 10px / 1 var(--mono);
+  color: var(--text-3);
+  white-space: nowrap;
+}
+
+/* Тег видимости: в карточках заменён плашкой, класс живёт
+   в NoteView (info-строка) и BaseView (строки списка). */
 .note-tag {
   padding: 3px 7px;
   border-radius: 4px;
@@ -724,8 +746,6 @@ body.ready #app { display: flex; }
   font-weight: 600;
 }
 
-/* Кнопка источника ↩: одна линейка с ↳/◆ (34px, teal).
-   В NoteView — текстовая версия .note-src-btn ниже в секции 14. */
 .note-src {
   color: var(--teal);
   font-size: 15px;
@@ -792,12 +812,12 @@ body.ready #app { display: flex; }
   color: var(--text-2);
 }
 
-.note-date {
-  color: var(--text-3);
-  font-size: 11px;
-  font-family: var(--mono);
-  white-space: nowrap;
+.note-meta-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   flex-shrink: 0;
+  margin-left: auto;
 }
 
 #feed-empty {
