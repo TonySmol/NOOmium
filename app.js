@@ -6880,7 +6880,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
           body.appendChild(treeItem(c, '↳' + (i + 1)));
       });
     }).catch(() => {});
-  }
+}
 
   // ─── Карточка ──────────────────────────────────────────────────────────────
 
