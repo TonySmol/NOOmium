@@ -31,7 +31,7 @@
 
 'use strict';
 
-const APP_VERSION = '1.0.8';
+const APP_VERSION = '1.0.9';
 
 // ═══ РЕЕСТР СОБЫТИЙ ШИНЫ (полный контракт) ════════════════════════════════════
 //
@@ -485,6 +485,7 @@ DI.register('I18n', function (Config, bus) {
     'inf.nochildren': 'Потомков пока нет',
     'inf.orphan.hint': 'Источник недоступен',
     'inf.parent.unavailable': 'Источник недоступен: скрыт автором или удалён',
+    'inf.source': 'источник',
 
     'empty.local.t': 'Пока нет мыслей',
     'empty.world.t': 'Никто не думает так же',
@@ -717,6 +718,7 @@ DI.register('I18n', function (Config, bus) {
     'inf.nochildren': 'No descendants yet',
     'inf.orphan.hint': 'Source unavailable',
     'inf.parent.unavailable': 'Source unavailable: hidden by author or deleted',
+    'inf.source': 'source',
 
     'empty.local.t': 'No thoughts yet',
     'empty.world.t': 'Nobody thinks alike',
@@ -3004,25 +3006,24 @@ DI.register('Crypto', function (Nostr, Logger) {
  * Кодек событий: канон состояний (kind 30078, replaceable, d = uid)
  * и служебные (запрос 21000, ответ-ссылка 21001).
  *
- * Payload v2: {v, visibility, text?, vec?, parent?, noteVersion, ts}.
- *   noteVersion — истина заметки (счётчик владельца); created_at
- *   канона — секунда публикации (свежесть, не истина).
+ * Payload v2: {v, visibility, text?, vec?, src?, parent?, noteVersion, ts}.
+ *   noteVersion — истина заметки; created_at — секунда публикации.
  *   ВСЕ каноны, включая удаление, несут noteVersion.
+ *   v1.0.9: src — ссылка-источник репоста (t.me/...), отдельным
+ *   полем, в text не попадает. Приём: только валидные t.me-URL
+ *   (анти-«вредонос»); чужие форматы src игнорируются.
  *
- * ИЗМЕНЕНИЯ v1.0 против v0.9.9:
- * - canonDeleted(uid, version) — сигнатура с noteVersion; эхо-удаление
- *   на других устройствах решается LWW по payload-версии, а не по
- *   секунде публикации (быстрое «создал → удалил» больше не теряется).
- * - decodeCanon: возвращает noteVersion и deleted для всех веток,
- *   где они есть в payload.
- * - decodeQuery: жёсткий кап длины вектора (1024) и конечность
- *   значений — анти-спам (векторы продукта 384-мерные).
+ * Контракт v1.0 сохранён: canonDeleted(uid, version) с noteVersion,
+ * decodeQuery с капом 1024.
  */
 DI.register('Protocol', function (Config, Vec, Vault, Nostr) {
   /** @type {number} */
   const MAX_CONTENT = 65536;
   /** @type {number} */
   const MAX_QUERY_DIM = 1024;
+
+  // v1.0.9: src-валидация — только https://t.me/канал/пост.
+  const SRC_RE = /^https:\/\/t\.me\/[A-Za-z0-9_]+\/\d+$/;
 
   /**
    * @param {Array} tags
@@ -3047,7 +3048,11 @@ DI.register('Protocol', function (Config, Vec, Vault, Nostr) {
 
   /**
    * Канон приватной версии (NIP-44).
-   * @param {Object} note - {uid, text, vector, parent, version, updatedAt}
+   * v1.0.9: src не шифруем — источник публичен по определению
+   * (ссылка на телегу), шифруем только текст/вектор/родителя.
+   * Но payload шифруется ЦЕЛИКОМ (проще и безопаснее) — src внутри
+   * шифра, чужие его не видят, владелец расшифрует.
+   * @param {Object} note - {uid, text, vector, src, parent, version, updatedAt}
    * @returns {Promise<Object>}
    * @throws {Error}
    */
@@ -3057,6 +3062,7 @@ DI.register('Protocol', function (Config, Vec, Vault, Nostr) {
       visibility: 'private',
       text: note.text || '',
       vec: note.vector ? Vec.toB64(note.vector) : null,
+      src: note.src || null,
       parent: note.parent || null,
       noteVersion: note.version,
       ts: note.updatedAt || note.version,
@@ -3087,6 +3093,7 @@ DI.register('Protocol', function (Config, Vec, Vault, Nostr) {
       visibility: 'public',
       text: note.text || '',
       vec: note.vector ? Vec.toB64(note.vector) : null,
+      src: note.src || null,
       parent: note.parent || null,
       noteVersion: note.version,
       ts: note.updatedAt || note.version,
@@ -3132,8 +3139,8 @@ DI.register('Protocol', function (Config, Vec, Vault, Nostr) {
    * Декодирование канона.
    * @param {Object} ev - Nostr-событие kind 30078.
    * @returns {Promise<Object|null>} Формат записи mirror:
-   *   {uid, owner, version (created_at), noteVersion?, visibility,
-   *    text?, vec?, parent?, ts, deleted?}
+   *   {uid, owner, version, noteVersion?, visibility,
+   *    text?, vec?, src?, parent?, ts, deleted?}
    */
   async function decodeCanon(ev) {
     if (!ev || ev.kind !== Config.get('kCanon', 30078)) return null;
@@ -3156,7 +3163,6 @@ DI.register('Protocol', function (Config, Vec, Vault, Nostr) {
     }
 
     if (!data || typeof data !== 'object') {
-      // Не JSON: возможно, наш NIP-44-канон.
       if (owner === Nostr.getPubkey()) {
         try {
           data = JSON.parse(await Vault.open(ev.content));
@@ -3164,7 +3170,6 @@ DI.register('Protocol', function (Config, Vec, Vault, Nostr) {
           return null;
         }
       } else {
-        // Чужой приватный канон: факт существования, без контента.
         return { uid, owner, version, visibility: 'private', ts: version * 1000 };
       }
     }
@@ -3191,6 +3196,12 @@ DI.register('Protocol', function (Config, Vec, Vault, Nostr) {
     if (typeof data.text !== 'string') return null;
     if (data.text.length > Config.get('maxNoteTextLength', 10000)) return null;
 
+    // v1.0.9: src — только валидный t.me-URL, всё иное игнорируем.
+    let src = null;
+    if (typeof data.src === 'string' && SRC_RE.test(data.src)) {
+      src = data.src;
+    }
+
     let vec = null;
     if (typeof data.vec === 'string') {
       const v = Vec.fromB64(data.vec);
@@ -3204,12 +3215,11 @@ DI.register('Protocol', function (Config, Vec, Vault, Nostr) {
 
     const ts = typeof data.ts === 'number' && data.ts > 0 ? data.ts : (version * 1000);
 
-    return { uid, owner, version, noteVersion, visibility, text: data.text, vec, parent, ts };
+    return { uid, owner, version, noteVersion, visibility, text: data.text, vec, src, parent, ts };
   }
 
   /**
-   * Событие запроса (публичный вектор — известный компромисс,
-   * отложен по консенсусу).
+   * Событие запроса (публичный вектор — известный компромисс).
    * @param {Float32Array|Array<number>} vector
    * @param {number} maxResponses
    * @param {number} window
@@ -3255,7 +3265,7 @@ DI.register('Protocol', function (Config, Vec, Vault, Nostr) {
   }
 
   /**
-   * Ответ-ссылка: (uid) владельца заметки, не копия контента.
+   * Ответ-ссылка.
    * @param {Object} note
    * @param {number} score
    * @param {string} queryId
@@ -4930,13 +4940,11 @@ DI.register('Context', function (Store, Embedder, Config, Utils, bus) {
 /**
  * Сборка лент из notes (свои: все) и mirror (чужие: public).
  * Свои private участвуют в поиске — ядро продукта.
- * Хронология чужих — по ts из payload (время заметки), не по
- * version (время публикации канона).
+ * Хронология чужих — по ts из payload.
+ * v1.0.9: src (ссылка-источник) прокидывается в ленту для кнопки
+ * «↩ источник» в FeedView. Свои заметки src не имеют (null).
  *
- * ИЗМЕНЕНИЕ v1.0: подписки db:change/db:mirror — через debounce
- * 120мс (гасит шторм полных сканов при пакетном сетевом синке;
- * seq-guard дополнительно отбрасывает устаревшие проходы).
- * Ликая логика v0.9.9 сохранена.
+ * Контракт v1.0: debounce 120мс на db:*, seq-guard.
  */
 DI.register('Feed', function (DB, Ranker, Store, bus, Logger, Utils, Config) {
   /** @type {number} */
@@ -4966,6 +4974,7 @@ DI.register('Feed', function (DB, Ranker, Store, bus, Logger, Utils, Config) {
       const ownNotes = notes
         .filter(n => n && n.text)
         .map(n => ({ uid: n.uid, owner: null, text: n.text, vector: n.vector,
+                     src: null,
                      parent: n.parent, visibility: n.visibility,
                      createdAt: n.createdAt, updatedAt: n.updatedAt,
                      own: true }));
@@ -4975,6 +4984,7 @@ DI.register('Feed', function (DB, Ranker, Store, bus, Logger, Utils, Config) {
         .map(m => {
           const ts = m.ts || (m.version * 1000);
           return { uid: m.uid, owner: m.owner, text: m.text, vector: m.vec,
+                   src: m.src || null,
                    parent: m.parent, visibility: 'public',
                    createdAt: ts, updatedAt: ts,
                    own: false };
@@ -6629,19 +6639,14 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
  * Рендер ленты: хронология / пин-дрейф / ввод; карточки, связи,
  * резонанс.
  *
- * v1.0.7:
- * - SCROLL-ANCHORING: перед пересборкой запоминаем uid+позицию
- *   первой видимой карточки, после — восстанавливаем. Удаление
- *   из середины ленты больше не выбрасывает наверх (симптом
- *   v1.0.6: delNote → db:change → render → scrollTop=0).
- * - УМНЫЙ СБРОС СТРАНИЦЫ: render(false) при живой глубокой
- *   прокрутке не сваливается в 30 карточек, а покрывает текущую
- *   позицию + экран (симптом: fetchOlder у дна сжимал ленту,
- *   скроллбар «распухал», надо было докручивать заново).
- * v1.0.5: скролл-вглубь (fetchOlder), LRU-отметки.
- * v1.0.4: пагинация DOM по 30.
- * Контракт: древо на классах, потомки descendants (→N), предки
- * колонной (↳N), анимация новым карточкам, тикер дат 30с.
+ * v1.0.9 — ПОДВАЛ КАРТОЧКИ (двухгрупповая раскладка, к краям):
+ *   слева  [тег][↳ род][◆ резонанс][↩ источник] — идентичность+связи
+ *   справа [сигнал][дата][✎] — состояние и действие
+ *   ↩ — кнопка источника: только валидный src (Feed/Protocol
+ *   отфильтровали), window.open с noopener (анти-вредонос).
+ *
+ * Контракт v1.0.7/8 сохранён: скролл-якорь, умная страница,
+ * пагинация, fetchOlder, LRU-отметки, тикер дат, древо.
  */
 DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Influence, Provenance, Modal, NetService, Toast) {
   const PAGE = 30;
@@ -6715,7 +6720,6 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
   // ─── LRU: отметки показа ──────────────────────────────────────────────────
 
   /**
-   * Отметить показанные (троттлинг 2с).
    * @param {Array<string>} uids
    */
   function markShownThrottled(uids) {
@@ -6727,7 +6731,6 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
   }
 
   /**
-   * Видимые сейчас uid.
    * @returns {Array<string>}
    */
   function visibleUids() {
@@ -6748,11 +6751,9 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
     return out;
   }
 
-  // ─── Скролл-якорь: позиция переживает пересборку ──────────────────────────
+  // ─── Скролл-якорь ──────────────────────────────────────────────────────────
 
   /**
-   * Снять якорь: uid и вертикальный офсет первой видимой карточки
-   * относительно верха скролл-вьюпорта.
    * @returns {{uid: string, offset: number}|null}
    */
   function takeAnchor() {
@@ -6771,10 +6772,6 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
   }
 
   /**
-   * Восстановить позицию по якорю: найти карточку uid, выставить
-   * scrollTop так, чтобы она оказалась на том же офсете. Карточки
-   * нет (удалена/эвиктнута) — ближайшая живая сверху от прежнего
-   * места: честный fallback — сохранить scrollTop в пределах.
    * @param {{uid: string, offset: number}|null} anchor
    */
   function applyAnchor(anchor) {
@@ -6789,29 +6786,26 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
       }
     }
 
-    // Fallback: не дальше текущего scrollTop, не выше 0.
     feedEl.scrollTop = Math.min(feedEl.scrollTop, Math.max(0, feedEl.scrollHeight - feedEl.clientHeight));
   }
 
   /**
-   * Сколько карточек надо показать, чтобы покрыть текущую глубину
-   * прокрутки + экран: удаление/refresh не сжимают ленту до 30,
-   * если ты на 200-й.
    * @returns {number}
    */
   function pageForCurrentScroll() {
     if (!feedEl || !feedEl.children.length) return PAGE;
-    // Высота средней карточки по факту:
     const avg = feedEl.scrollHeight / feedEl.children.length || 120;
     const depth = feedEl.scrollTop + feedEl.clientHeight;
-    const need = Math.ceil(depth / avg) + 10; // +запас
+    const need = Math.ceil(depth / avg) + 10;
     return Math.max(PAGE, Math.ceil(need / PAGE) * PAGE);
   }
 
   // ─── Древо ────────────────────────────────────────────────────────────────
 
   /**
-   * Карточка древа.
+   * @param {Object} note
+   * @param {string} genLabel
+   * @returns {HTMLButtonElement}
    */
   function treeItem(note, genLabel) {
     const item = document.createElement('button');
@@ -6836,7 +6830,10 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
   }
 
   /**
-   * Модалка древа.
+   * @param {string} titleKey
+   * @param {string} emptyKey
+   * @param {number} count
+   * @param {Function} buildList
    */
   function openTreeModal(titleKey, emptyKey, count, buildList) {
     const body = document.createElement('div');
@@ -6859,7 +6856,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
   }
 
   /**
-   * Потомки.
+   * @param {Object} note
    */
   function showChildren(note) {
     Provenance.descendants(note.uid).then(items => {
@@ -6872,7 +6869,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
   }
 
   /**
-   * Предки.
+   * @param {Object} note
    */
   function showAncestors(note) {
     Provenance.ancestors(note.uid).then(chain => {
@@ -6884,6 +6881,8 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
     }).catch(() => {});
   }
 
+  // ─── Карточка ──────────────────────────────────────────────────────────────
+
   /**
    * @returns {HTMLSpanElement}
    */
@@ -6894,7 +6893,37 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
   }
 
   /**
-   * Карточка ленты.
+   * Кнопка источника: ↩, teal, 34px, noopener.
+   * Только при валидном src (Feed отфильтровал, тут двойной
+   * страховка regex — Закон: кнопка из данных не рисуется).
+   * @param {Object} n
+   * @returns {HTMLButtonElement|null}
+   */
+  function srcButton(n) {
+    const src = typeof n.src === 'string'
+      && /^https:\/\/t\.me\/[A-Za-z0-9_]+\/\d+$/.test(n.src)
+      ? n.src : null;
+    if (!src) return null;
+
+    const b = document.createElement('button');
+    b.className = 'note-src';
+    b.textContent = '↩';
+    b.title = I18n.t('inf.source');
+    b.setAttribute('aria-label', I18n.t('inf.source'));
+
+    b.addEventListener('click', e => {
+      e.stopPropagation();
+      try { window.open(src, '_blank', 'noopener,noreferrer'); } catch (_) {}
+    });
+
+    return b;
+  }
+
+  /**
+   * @param {Object} n
+   * @param {boolean} isRanked
+   * @param {number} i
+   * @returns {HTMLDivElement}
    */
   function card(n, isRanked, i) {
     const el = document.createElement('div');
@@ -6907,8 +6936,13 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
     txt.textContent = n.text || '';
     el.appendChild(txt);
 
+    // ── ПОДВАЛ: две группы к краям (v1.0.9) ──
     const meta = document.createElement('div');
-    meta.className = 'note-meta';
+    meta.className = 'note-meta note-footer';
+
+    // Левая группа: идентичность + связи.
+    const left = document.createElement('div');
+    left.className = 'note-meta-left';
 
     const tag = document.createElement('span');
     if (n.own) {
@@ -6918,14 +6952,15 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
       tag.className = 'note-tag world';
       tag.textContent = '· ' + Utils.shortPk(n.owner || '');
     }
-    meta.appendChild(tag);
+    left.appendChild(tag);
 
     const hasNav = !!(n.parent && n.parent.uid);
     const res = Influence.resonance(n.uid);
     const hasResonance = res > 0;
+    const srcBtn = srcButton(n);
 
-    if (hasNav || hasResonance) {
-      meta.appendChild(createSep());
+    if (hasNav || hasResonance || srcBtn) {
+      left.appendChild(createSep());
 
       if (hasNav) {
         const link = document.createElement('button');
@@ -6951,7 +6986,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
           link.title = I18n.t('inf.orphan.hint');
         });
 
-        meta.appendChild(link);
+        left.appendChild(link);
       }
 
       if (hasResonance) {
@@ -6966,11 +7001,19 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
           showChildren(n);
         });
 
-        meta.appendChild(r);
+        left.appendChild(r);
+      }
+
+      if (srcBtn) {
+        left.appendChild(srcBtn);
       }
     }
 
-    meta.appendChild(createSep());
+    meta.appendChild(left);
+
+    // Правая группа: состояние и действие.
+    const right = document.createElement('div');
+    right.className = 'note-meta-right';
 
     if (isRanked && typeof n.score === 'number') {
       const threshold = Config.get('threshold', 0.81);
@@ -7004,14 +7047,14 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
         sim.appendChild(label);
       }
 
-      meta.appendChild(sim);
+      right.appendChild(sim);
     }
 
     const date = document.createElement('span');
     date.className = 'note-date';
     date.dataset.ts = String(n.updatedAt || n.createdAt || 0);
     date.textContent = Utils.fmtRelativeTime(n.updatedAt || n.createdAt, I18n.getLang(), I18n.t);
-    meta.appendChild(date);
+    right.appendChild(date);
 
     if (n.own) {
       const openBtn = document.createElement('button');
@@ -7025,16 +7068,19 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
         try { bus.emit('note:open', { uid: n.uid }); } catch (_) {}
       });
 
-      meta.appendChild(openBtn);
+      right.appendChild(openBtn);
     }
 
+    meta.appendChild(right);
     el.appendChild(meta);
+
     el.addEventListener('click', () => onNoteClick(n));
     return el;
   }
 
+  // ─── Тикер дат ─────────────────────────────────────────────────────────────
+
   /**
-   * Тикер дат: раз в 30с.
    */
   function startTicker() {
     if (tickerTimer) clearInterval(tickerTimer);
@@ -7049,19 +7095,17 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
     }, 30000);
   }
 
+  // ─── Рендер ────────────────────────────────────────────────────────────────
+
   /**
-   * Полный рендер.
    * @param {boolean} isLoadMore
    */
   function render(isLoadMore) {
     if (!feedEl) return;
 
-    // Якорь ДО wipe (симптом: удаление выбрасывало наверх).
     const anchor = takeAnchor();
 
     if (!isLoadMore) {
-      // Умный сброс: покрываем текущую глубину, не сжимаемся в 30
-      // (симптом: слой у дна сжимал ленту, скроллбар распухал).
       visibleCount = pageForCurrentScroll();
     }
 
@@ -7134,13 +7178,12 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
       markShownThrottled(page.map(n => n.uid));
     }
 
-    // Позиция ПОСЛЕ wipe (якорь по uid, fallback — клэмп).
     applyAnchor(anchor);
   }
 
+  // ─── Скролл ────────────────────────────────────────────────────────────────
+
   /**
-   * Скролл: LRU-отметки; (1) у дна → +страница; (2) исчерпано и
-   * хронология → слой вглубь. Дно — тихо.
    */
   function onScroll() {
     if (!feedEl) return;
@@ -7177,8 +7220,9 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
     }
   }
 
+  // ─── Инициализация/отписка ─────────────────────────────────────────────────
+
   /**
-   * Инициализация.
    */
   function init() {
     bind();
@@ -7210,7 +7254,6 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
   }
 
   /**
-   * Отписка.
    */
   function destroy() {
     unsubs.forEach(u => {
@@ -7231,19 +7274,13 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
 // ─── UI/NoteView ─── START ──────────────────────────────────────────────────
 /**
  * Полноэкранный просмотр: свои (удалить/видимость/пин/правка),
- * чужие (просмотр/пин). Lookup: notes → mirror.
+ * чужие (просмотр/пин/источник). Lookup: notes → mirror.
  *
- * КОНТРАКТ v1.0:
- * - render принимает ts — дата ЗАМЕТКИ, не Date.now() (H-02).
- * - pinAndClose: без вектора — warn-тост, пин не врёт (H-03).
- * - saveEdit: Notes.edit reject → тост + кнопка восстанавливается
- *   (спиннер не застревает, B-02). Публичные заметки НЕ
- *   редактируются (контракт модели канона: публичная версия
- *   уже разошлась в сеть).
- * - Пустой ввод при правке — warn, режим правки сохраняется
- *   (текст юзера не уничтожается).
- * - Toggle/удаление: закрытие просмотра ДО подтверждения —
- *   окей (подтверждение поверх; отмена возвращает юзера в ленту).
+ * v1.0.9: кнопка «↩ источник» в верхней панели — для заметок с
+ * валидным src (репосты бота). Двойная валидация + noopener.
+ *
+ * Контракт v1.0 сохранён: ts из заметки, пин без вектора не врёт,
+ * saveEdit восстанавливает кнопку, правка только непубличных.
  */
 DI.register('NoteView', function (DB, Notes, NoteActions, I18n, Utils, Toast, bus) {
   let root = null;
@@ -7282,9 +7319,8 @@ DI.register('NoteView', function (DB, Notes, NoteActions, I18n, Utils, Toast, bu
   }
 
   /**
-   * Открыть по uid: notes → mirror. Ничего не найдено — тихо
-   * (вытеснено/удалено в другой сессии — тост не нужен, лента
-   * перерисуется событием db:*).
+   * Открыть по uid: notes → mirror.
+   * v1.0.9: из mirror тянем src (для кнопки источника).
    */
   function open(uid) {
     if (!uid) return;
@@ -7296,6 +7332,7 @@ DI.register('NoteView', function (DB, Notes, NoteActions, I18n, Utils, Toast, bu
           owner: null,
           text: note.text,
           vector: note.vector,
+          src: null,
           visibility: note.visibility,
           ts: note.updatedAt || note.createdAt || Date.now(),
           isOwn: true,
@@ -7310,6 +7347,7 @@ DI.register('NoteView', function (DB, Notes, NoteActions, I18n, Utils, Toast, bu
             owner: m.owner,
             text: m.text,
             vector: m.vec,
+            src: typeof m.src === 'string' ? m.src : null,
             visibility: m.visibility,
             ts: m.ts || (m.version * 1000) || Date.now(),
             isOwn: false,
@@ -7320,7 +7358,7 @@ DI.register('NoteView', function (DB, Notes, NoteActions, I18n, Utils, Toast, bu
   }
 
   /**
-   * @param {Object} note - {uid, owner, text, vector, visibility, ts, isOwn}
+   * @param {Object} note - {uid, owner, text, vector, src, visibility, ts, isOwn}
    */
   function enterEditMode(editBtn) {
     if (editMode) return;
@@ -7380,7 +7418,6 @@ DI.register('NoteView', function (DB, Notes, NoteActions, I18n, Utils, Toast, bu
           editBtn.disabled = false;
           editBtn.textContent = I18n.t('btn.save');
         }
-        // textarea с текстом юзера остаётся на месте.
       });
   }
 
@@ -7395,7 +7432,7 @@ DI.register('NoteView', function (DB, Notes, NoteActions, I18n, Utils, Toast, bu
 
     if (!currentNote.vector) {
       Toast.show('warn', I18n.t('toast.pin.novector'));
-      return; // не закрываем — юзер остаётся в просмотре
+      return;
     }
 
     try {
@@ -7412,7 +7449,31 @@ DI.register('NoteView', function (DB, Notes, NoteActions, I18n, Utils, Toast, bu
   }
 
   /**
-   * @param {Object} note - {uid, owner, text, vector, visibility, ts, isOwn}
+   * Кнопка источника (v1.0.9): валидация + noopener.
+   * @returns {HTMLButtonElement|null}
+   */
+  function srcButton() {
+    if (!currentNote) return null;
+    const src = typeof currentNote.src === 'string'
+      && /^https:\/\/t\.me\/[A-Za-z0-9_]+\/\d+$/.test(currentNote.src)
+      ? currentNote.src : null;
+    if (!src) return null;
+
+    const b = document.createElement('button');
+    b.className = 'nv-act note-src-btn';
+    b.textContent = '↩ ' + I18n.t('inf.source');
+    b.title = I18n.t('inf.source');
+    b.setAttribute('aria-label', I18n.t('inf.source'));
+
+    b.addEventListener('click', () => {
+      try { window.open(src, '_blank', 'noopener,noreferrer'); } catch (_) {}
+    });
+
+    return b;
+  }
+
+  /**
+   * @param {Object} note - {uid, owner, text, vector, src, visibility, ts, isOwn}
    */
   function render(note) {
     const r = ensureRoot();
@@ -7457,7 +7518,12 @@ DI.register('NoteView', function (DB, Notes, NoteActions, I18n, Utils, Toast, bu
     pinBtn.addEventListener('click', pinAndClose);
     top.appendChild(pinBtn);
 
-    // Правка — только для своих НЕпубличных (контракт модели канона).
+    // v1.0.9: источник — между пином и правкой.
+    const srcBtn = srcButton();
+    if (srcBtn) {
+      top.appendChild(srcBtn);
+    }
+
     if (note.isOwn && note.visibility !== 'public') {
       const edit = document.createElement('button');
       edit.className = 'nv-act';
@@ -7496,7 +7562,6 @@ DI.register('NoteView', function (DB, Notes, NoteActions, I18n, Utils, Toast, bu
 
     info.appendChild(tag);
 
-    // Дата ЗАМЕТКИ, не момент открытия (H-02).
     const ts = note.ts || Date.now();
     const date = document.createElement('span');
     date.textContent = Utils.fmtDate(ts, I18n.getLang()) + ' ' + Utils.fmtTime(ts, I18n.getLang());
@@ -7563,7 +7628,7 @@ DI.register('NoteView', function (DB, Notes, NoteActions, I18n, Utils, Toast, bu
 
   return { init, destroy, open, close };
 }, ['DB', 'Notes', 'NoteActions', 'I18n', 'Utils', 'Toast', 'EventBus']);
-// ─── UI/NoteView ─── END ─────────────────══─────────────────────────────────
+// ─── UI/NoteView ─── END ────────────────────────────────────────────────────
 
 // ─── UI/NoteActions ─── START ───────────────────────────────────────────────
 /**
