@@ -31,7 +31,7 @@
 
 'use strict';
 
-const APP_VERSION = '1.0.9';
+const APP_VERSION = '1.0.10';
 
 // ═══ РЕЕСТР СОБЫТИЙ ШИНЫ (полный контракт) ════════════════════════════════════
 //
@@ -6639,14 +6639,16 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
  * Рендер ленты: хронология / пин-дрейф / ввод; карточки, связи,
  * резонанс.
  *
- * v1.0.9 — ПОДВАЛ КАРТОЧКИ (двухгрупповая раскладка, к краям):
- *   слева  [тег][↳ род][◆ резонанс][↩ источник] — идентичность+связи
- *   справа [сигнал][дата][✎] — состояние и действие
- *   ↩ — кнопка источника: только валидный src (Feed/Protocol
- *   отфильтровали), window.open с noopener (анти-вредонос).
+ * v1.0.10 — ПОДВАЛ ОДНИМ РЯДОМ (дизайн-консенсус):
+ *   [плашка: автор + время (в колонку, высота ряда)] [↳] [◆] [сигнал] [↩|✎]
+ *   Плашка всем одинакова: свои «лично/открыто», чужие pubkey;
+ *   цвета прежние (priv серый, world teal). Дата ушла в плашку —
+ *   ряд освобождён, влезает на 320px.
+ *   Правый слот: ↩ у чужих с src, ✎ у своих (взаимоисключающие);
+ *   будущих своих-со-ссылкой — оба рядом.
  *
- * Контракт v1.0.7/8 сохранён: скролл-якорь, умная страница,
- * пагинация, fetchOlder, LRU-отметки, тикер дат, древо.
+ * Контракт v1.0.7/8/9 сохранён: якорь, умная страница, пагинация,
+ * fetchOlder, LRU, тикер (теперь обновляет .note-badge-date).
  */
 DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Influence, Provenance, Modal, NetService, Toast) {
   const PAGE = 30;
@@ -6876,7 +6878,6 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
       openTreeModal('inf.ancestors', 'inf.ancestors.none', chain.length, body => {
         chain.forEach((c, i) => {
           body.appendChild(treeItem(c, '↳' + (i + 1)));
-        });
       });
     }).catch(() => {});
   }
@@ -6893,30 +6894,41 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
   }
 
   /**
-   * Кнопка источника: ↩, teal, 34px, noopener.
-   * Только при валидном src (Feed отфильтровал, тут двойной
-   * страховка regex — Закон: кнопка из данных не рисуется).
+   * Валидный src (двойная проверка — Закон 1: кнопка из данных
+   * не рисуется, данные фильтруются regex).
    * @param {Object} n
-   * @returns {HTMLButtonElement|null}
+   * @returns {string|null}
    */
-  function srcButton(n) {
-    const src = typeof n.src === 'string'
+  function validSrc(n) {
+    return typeof n.src === 'string'
       && /^https:\/\/t\.me\/[A-Za-z0-9_]+\/\d+$/.test(n.src)
       ? n.src : null;
-    if (!src) return null;
+  }
 
-    const b = document.createElement('button');
-    b.className = 'note-src';
-    b.textContent = '↩';
-    b.title = I18n.t('inf.source');
-    b.setAttribute('aria-label', I18n.t('inf.source'));
+  /**
+   * Плашка: автор + время в колонку. Всем одинаковая (v1.0.10).
+   * Свои: «лично»/«открыто» (priv серый / world teal), чужие: pubkey.
+   * @param {Object} n
+   * @returns {HTMLDivElement}
+   */
+  function authorBadge(n) {
+    const badge = document.createElement('div');
+    badge.className = 'note-badge' + (n.own ? (n.visibility === 'public' ? ' world' : ' priv') : ' world');
 
-    b.addEventListener('click', e => {
-      e.stopPropagation();
-      try { window.open(src, '_blank', 'noopener,noreferrer'); } catch (_) {}
-    });
+    const name = document.createElement('span');
+    name.className = 'note-badge-name';
+    name.textContent = n.own
+      ? I18n.t(n.visibility === 'public' ? 'base.tag.shared' : 'base.tag.private')
+      : '· ' + Utils.shortPk(n.owner || '');
+    badge.appendChild(name);
 
-    return b;
+    const date = document.createElement('span');
+    date.className = 'note-badge-date';
+    date.dataset.ts = String(n.updatedAt || n.createdAt || 0);
+    date.textContent = Utils.fmtRelativeTime(n.updatedAt || n.createdAt, I18n.getLang(), I18n.t);
+    badge.appendChild(date);
+
+    return badge;
   }
 
   /**
@@ -6936,31 +6948,20 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
     txt.textContent = n.text || '';
     el.appendChild(txt);
 
-    // ── ПОДВАЛ: две группы к краям (v1.0.9) ──
+    // ── ПОДВАЛ одним рядом (v1.0.10) ──
     const meta = document.createElement('div');
-    meta.className = 'note-meta note-footer';
+    meta.className = 'note-meta';
 
-    // Левая группа: идентичность + связи.
-    const left = document.createElement('div');
-    left.className = 'note-meta-left';
+    // 1. Плашка автор+время.
+    meta.appendChild(authorBadge(n));
 
-    const tag = document.createElement('span');
-    if (n.own) {
-      tag.className = 'note-tag ' + (n.visibility === 'public' ? 'world' : 'priv');
-      tag.textContent = n.visibility === 'public' ? I18n.t('base.tag.shared') : I18n.t('base.tag.private');
-    } else {
-      tag.className = 'note-tag world';
-      tag.textContent = '· ' + Utils.shortPk(n.owner || '');
-    }
-    left.appendChild(tag);
-
+    // 2. Связи: ↳, ◆.
     const hasNav = !!(n.parent && n.parent.uid);
     const res = Influence.resonance(n.uid);
     const hasResonance = res > 0;
-    const srcBtn = srcButton(n);
 
-    if (hasNav || hasResonance || srcBtn) {
-      left.appendChild(createSep());
+    if (hasNav || hasResonance) {
+      meta.appendChild(createSep());
 
       if (hasNav) {
         const link = document.createElement('button');
@@ -6986,7 +6987,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
           link.title = I18n.t('inf.orphan.hint');
         });
 
-        left.appendChild(link);
+        meta.appendChild(link);
       }
 
       if (hasResonance) {
@@ -7001,20 +7002,11 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
           showChildren(n);
         });
 
-        left.appendChild(r);
-      }
-
-      if (srcBtn) {
-        left.appendChild(srcBtn);
+        meta.appendChild(r);
       }
     }
 
-    meta.appendChild(left);
-
-    // Правая группа: состояние и действие.
-    const right = document.createElement('div');
-    right.className = 'note-meta-right';
-
+    // 3. Сигнал (режим поиска) — перед правым слотом.
     if (isRanked && typeof n.score === 'number') {
       const threshold = Config.get('threshold', 0.81);
       const serendipity = Config.get('serendipity', 0.07);
@@ -7047,16 +7039,28 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
         sim.appendChild(label);
       }
 
-      right.appendChild(sim);
+      meta.appendChild(sim);
     }
 
-    const date = document.createElement('span');
-    date.className = 'note-date';
-    date.dataset.ts = String(n.updatedAt || n.createdAt || 0);
-    date.textContent = Utils.fmtRelativeTime(n.updatedAt || n.createdAt, I18n.getLang(), I18n.t);
-    right.appendChild(date);
+    // 4. Правый слот: ↩ (чужие с src) ИЛИ ✎ (свои).
+    const right = document.createElement('div');
+    right.className = 'note-meta-right';
 
-    if (n.own) {
+    const src = validSrc(n);
+    if (src) {
+      const b = document.createElement('button');
+      b.className = 'note-src';
+      b.textContent = '↩';
+      b.title = I18n.t('inf.source');
+      b.setAttribute('aria-label', I18n.t('inf.source'));
+
+      b.addEventListener('click', e => {
+        e.stopPropagation();
+        try { window.open(src, '_blank', 'noopener,noreferrer'); } catch (_) {}
+      });
+
+      right.appendChild(b);
+    } else if (n.own) {
       const openBtn = document.createElement('button');
       openBtn.className = 'na';
       openBtn.textContent = '✎';
@@ -7078,7 +7082,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
     return el;
   }
 
-  // ─── Тикер дат ─────────────────────────────────────────────────────────────
+  // ─── Тикер дат (обновляет время в плашках) ────────────────────────────────
 
   /**
    */
@@ -7088,7 +7092,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
     tickerTimer = setInterval(() => {
       if (document.hidden || !feedEl) return;
       const lang = I18n.getLang();
-      feedEl.querySelectorAll('.note-date').forEach(el => {
+      feedEl.querySelectorAll('.note-badge-date').forEach(el => {
         const ts = Number(el.dataset.ts) || 0;
         if (ts) el.textContent = Utils.fmtRelativeTime(ts, lang, I18n.t);
       });
