@@ -31,7 +31,7 @@
 
 'use strict';
 
-const APP_VERSION = '1.0.10';
+const APP_VERSION = '1.0.10b';
 
 // ═══ РЕЕСТР СОБЫТИЙ ШИНЫ (полный контракт) ════════════════════════════════════
 //
@@ -6639,16 +6639,15 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
  * Рендер ленты: хронология / пин-дрейф / ввод; карточки, связи,
  * резонанс.
  *
- * v1.0.10 — ПОДВАЛ ОДНИМ РЯДОМ (дизайн-консенсус):
- *   [плашка: автор + время (в колонку, высота ряда)] [↳] [◆] [сигнал] [↩|✎]
- *   Плашка всем одинакова: свои «лично/открыто», чужие pubkey;
- *   цвета прежние (priv серый, world teal). Дата ушла в плашку —
- *   ряд освобождён, влезает на 320px.
- *   Правый слот: ↩ у чужих с src, ✎ у своих (взаимоисключающие);
- *   будущих своих-со-ссылкой — оба рядом.
+ * v1.0.10 — ПОДВАЛ ОДНИМ РЯДОМ:
+ *   [плашка: автор+время в колонку] [↳] [◆] [сигнал] [↩|✎]
+ *   Плашка всем одинакова; цвета прежние (priv/world).
+ *   Правый слот: ↩ у чужих с src, ✎ у своих.
+ * v1.0.10.2 — СИГНАЛ как индикатор линейки: полоски + подпись
+ *   в колонку, каркас кнопочный (surface-2 + бордер), высота 34.
  *
- * Контракт v1.0.7/8/9 сохранён: якорь, умная страница, пагинация,
- * fetchOlder, LRU, тикер (теперь обновляет .note-badge-date).
+ * Контракт сохранён: якорь, умная страница, пагинация,
+ * fetchOlder, LRU, тикер (.note-badge-date).
  */
 DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Influence, Provenance, Modal, NetService, Toast) {
   const PAGE = 30;
@@ -6877,7 +6876,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
     Provenance.ancestors(note.uid).then(chain => {
       openTreeModal('inf.ancestors', 'inf.ancestors.none', chain.length, body => {
         chain.forEach((c, i) => {
-          body.appendChild(treeItem(c, '↳' + (i + 1)));
+          body.appendChild(treeItem(c, '↳' + (i + 1));
         });
       });
     }).catch(() => {});
@@ -6895,8 +6894,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
   }
 
   /**
-   * Валидный src (двойная проверка — Закон 1: кнопка из данных
-   * не рисуется, данные фильтруются regex).
+   * Валидный src (двойная проверка — Закон 1).
    * @param {Object} n
    * @returns {string|null}
    */
@@ -6907,8 +6905,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
   }
 
   /**
-   * Плашка: автор + время в колонку. Всем одинаковая (v1.0.10).
-   * Свои: «лично»/«открыто» (priv серый / world teal), чужие: pubkey.
+   * Плашка: автор + время в колонку. Всем одинаковая.
    * @param {Object} n
    * @returns {HTMLDivElement}
    */
@@ -6933,6 +6930,65 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
   }
 
   /**
+   * Сигнал-индикатор: полоски + подпись в колонку, каркас 34px.
+   * @param {Object} n
+   * @param {boolean} isRanked
+   * @returns {HTMLDivElement|null}
+   */
+  function signalBadge(n, isRanked) {
+    if (!isRanked || typeof n.score !== 'number') return null;
+
+    const threshold = Config.get('threshold', 0.81);
+    const serendipity = Config.get('serendipity', 0.07);
+    const serenMid = threshold - serendipity / 2;
+    const displayMode = Config.get('similarityDisplay', 'signal');
+    const pct = Math.round(n.score * 100);
+
+    const sim = document.createElement('div');
+    sim.className = 'note-sim-info';
+
+    if (displayMode === 'percent') {
+      sim.classList.add('pct');
+      sim.title = I18n.t('sim.score');
+      const label = document.createElement('span');
+      label.className = 'sig-label';
+      label.textContent = pct + '%';
+      sim.appendChild(label);
+      return sim;
+    }
+
+    let full = 0;
+    if (n.score >= threshold) {
+      full = 3;
+      sim.title = I18n.t('sim.level.high') + ' (' + pct + '%)';
+    } else if (n.score >= serenMid) {
+      full = 2;
+      sim.title = I18n.t('sim.level.mid') + ' (' + pct + '%)';
+    } else {
+      full = 1;
+      sim.title = I18t('sim.level.low') + ' (' + pct + '%)';
+    }
+
+    const bars = document.createElement('span');
+    bars.className = 'note-sim-bars';
+    for (let b = 0; b < 3; b++) {
+      const bar = document.createElement('i');
+      bar.className = 'sig-bar' + (b < full ? ' sig-full' : ' sig-empty');
+      bars.appendChild(bar);
+    }
+    sim.appendChild(bars);
+
+    const label = document.createElement('span');
+    label.className = 'sig-label';
+    label.textContent = n.score >= threshold
+      ? I18n.t('sim.level.high')
+      : (n.score >= serenMid ? I18n.t('sim.level.mid') : I18n.t('sim.level.low'));
+    sim.appendChild(label);
+
+    return sim;
+  }
+
+  /**
    * @param {Object} n
    * @param {boolean} isRanked
    * @param {number} i
@@ -6949,7 +7005,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
     txt.textContent = n.text || '';
     el.appendChild(txt);
 
-    // ── ПОДВАЛ одним рядом (v1.0.10) ──
+    // ── ПОДВАЛ одним рядом ──
     const meta = document.createElement('div');
     meta.className = 'note-meta';
 
@@ -7007,43 +7063,11 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
       }
     }
 
-    // 3. Сигнал (режим поиска) — перед правым слотом.
-    if (isRanked && typeof n.score === 'number') {
-      const threshold = Config.get('threshold', 0.81);
-      const serendipity = Config.get('serendipity', 0.07);
-      const serenMid = threshold - serendipity / 2;
-      const displayMode = Config.get('similarityDisplay', 'signal');
-      const pct = Math.round(n.score * 100);
+    // 3. Сигнал.
+    const sig = signalBadge(n, isRanked);
+    if (sig) meta.appendChild(sig);
 
-      const sim = document.createElement('span');
-      sim.className = 'note-sim-info';
-
-      if (displayMode === 'percent') {
-        sim.textContent = pct + '%';
-        sim.title = I18n.t('sim.score');
-      } else {
-        if (n.score >= threshold) {
-          sim.innerHTML = '<span class="sig-bar sig-full"></span><span class="sig-bar sig-full"></span><span class="sig-bar sig-full"></span>';
-          sim.title = I18n.t('sim.level.high') + ' (' + pct + '%)';
-        } else if (n.score >= serenMid) {
-          sim.innerHTML = '<span class="sig-bar sig-full"></span><span class="sig-bar sig-full"></span><span class="sig-bar sig-empty"></span>';
-          sim.title = I18n.t('sim.level.mid') + ' (' + pct + '%)';
-        } else {
-          sim.innerHTML = '<span class="sig-bar sig-full"></span><span class="sig-bar sig-empty"></span><span class="sig-bar sig-empty"></span>';
-          sim.title = I18n.t('sim.level.low') + ' (' + pct + '%)';
-        }
-        const label = document.createElement('span');
-        label.className = 'sig-label';
-        label.textContent = n.score >= threshold
-          ? I18n.t('sim.level.high')
-          : (n.score >= serenMid ? I18n.t('sim.level.mid') : I18n.t('sim.level.low'));
-        sim.appendChild(label);
-      }
-
-      meta.appendChild(sim);
-    }
-
-    // 4. Правый слот: ↩ (чужие с src) ИЛИ ✎ (свои).
+    // 4. Правый слот: ↩ ИЛИ ✎.
     const right = document.createElement('div');
     right.className = 'note-meta-right';
 
@@ -7083,7 +7107,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
     return el;
   }
 
-  // ─── Тикер дат (обновляет время в плашках) ────────────────────────────────
+  // ─── Тикер дат ─────────────────────────────────────────────────────────────
 
   /**
    */
