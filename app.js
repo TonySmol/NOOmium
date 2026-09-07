@@ -31,7 +31,7 @@
 
 'use strict';
 
-const APP_VERSION = '1.0.10b2';
+const APP_VERSION = '1.0.11';
 
 // ═══ РЕЕСТР СОБЫТИЙ ШИНЫ (полный контракт) ════════════════════════════════════
 //
@@ -6636,18 +6636,18 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
 
 // ─── UI/FeedView ─── START ──────────────────────────────────────────────────
 /**
- * Рендер ленты: хронология / пин-дрейф / ввод; карточки, связи,
+ * Рендер лента: хронология / пин-дрейф / ввод; карточки, связи,
  * резонанс.
  *
  * v1.0.10 — ПОДВАЛ ОДНИМ РЯДОМ:
  *   [плашка: автор+время в колонку] [↳] [◆] [сигнал] [↩|✎]
  *   Плашка всем одинакова; цвета прежние (priv/world).
- *   Правый слот: ↩ у чужих с src, ✎ у своих.
- * v1.0.10.2 — СИГНАЛ как индикатор линейки: полоски + подпись
- *   в колонку, каркас кнопочный (surface-2 + бордер), высота 34.
+ *   Правый слот: ↩ у чужих с src, ✎ у своих (взаимоисключающие).
+ * v1.0.10.2 — СИГНАЛ-индикатор линейки: полоски + подпись в
+ *   колонку, каркас кнопочный (surface-2 + бордер), высота 34.
  *
- * Контракт сохранён: якорь, умная страница, пагинация,
- * fetchOlder, LRU, тикер (.note-badge-date).
+ * Контракт сохранён: якорь, умная страница, пагинация, fetchOlder,
+ * LRU, тикер (.note-badge-date).
  */
 DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Influence, Provenance, Modal, NetService, Toast) {
   const PAGE = 30;
@@ -6680,7 +6680,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
   }
 
   /**
-   * Коалесценция рендеров.
+   * Коалесценция рендеров через rAF.
    */
   function scheduleRender() {
     if (rafPending) return;
@@ -6692,6 +6692,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
   }
 
   /**
+   * Карточка закреплена сейчас?
    * @param {Object} n
    * @returns {boolean}
    */
@@ -6701,6 +6702,8 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
   }
 
   /**
+   * Клик по карточке: повторный по пину — снять; иначе — пин.
+   * Без вектора — честный warn.
    * @param {Object} n
    */
   function onNoteClick(n) {
@@ -6721,6 +6724,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
   // ─── LRU: отметки показа ──────────────────────────────────────────────────
 
   /**
+   * Отметить показанные (троттлинг 2с — транзакции не чаще).
    * @param {Array<string>} uids
    */
   function markShownThrottled(uids) {
@@ -6732,6 +6736,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
   }
 
   /**
+   * uid карточек в текущем viewport'е ленты.
    * @returns {Array<string>}
    */
   function visibleUids() {
@@ -6752,9 +6757,10 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
     return out;
   }
 
-  // ─── Скролл-якорь ──────────────────────────────────────────────────────────
+  // ─── Скролл-якорь: позиция переживает пересборку ──────────────────────────
 
   /**
+   * Якорь: uid + офсет первой видимой карточки.
    * @returns {{uid: string, offset: number}|null}
    */
   function takeAnchor() {
@@ -6773,6 +6779,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
   }
 
   /**
+   * Восстановление позиции по якорю; fallback — клэмп.
    * @param {{uid: string, offset: number}|null} anchor
    */
   function applyAnchor(anchor) {
@@ -6781,8 +6788,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
     if (anchor) {
       const el = feedEl.querySelector('[data-uid="' + anchor.uid + '"]');
       if (el) {
-        const target = el.offsetTop - anchor.offset;
-        feedEl.scrollTop = Math.max(0, target);
+        feedEl.scrollTop = Math.max(0, el.offsetTop - anchor.offset);
         return;
       }
     }
@@ -6791,6 +6797,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
   }
 
   /**
+   * Страница, покрывающая текущую глубину прокрутки + экран.
    * @returns {number}
    */
   function pageForCurrentScroll() {
@@ -6804,6 +6811,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
   // ─── Древо ────────────────────────────────────────────────────────────────
 
   /**
+   * Карточка древа: метка поколения слева + текст.
    * @param {Object} note
    * @param {string} genLabel
    * @returns {HTMLButtonElement}
@@ -6831,6 +6839,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
   }
 
   /**
+   * Модалка древа: каркас с раздельными ключами.
    * @param {string} titleKey
    * @param {string} emptyKey
    * @param {number} count
@@ -6857,6 +6866,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
   }
 
   /**
+   * Потомки: полное поддерево, метки →N.
    * @param {Object} note
    */
   function showChildren(note) {
@@ -6870,13 +6880,14 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
   }
 
   /**
+   * Предки: цепочка вверх, метки ↳N.
    * @param {Object} note
    */
   function showAncestors(note) {
     Provenance.ancestors(note.uid).then(chain => {
       openTreeModal('inf.ancestors', 'inf.ancestors.none', chain.length, body => {
         chain.forEach((c, i) => {
-          body.appendChild(treeItem(c, '↳' + (i + 1));
+          body.appendChild(treeItem(c, '↳' + (i + 1)));
         });
       });
     }).catch(() => {});
@@ -6885,6 +6896,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
   // ─── Карточка ──────────────────────────────────────────────────────────────
 
   /**
+   * Разделитель мета-строки.
    * @returns {HTMLSpanElement}
    */
   function createSep() {
@@ -6905,7 +6917,8 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
   }
 
   /**
-   * Плашка: автор + время в колонку. Всем одинаковая.
+   * Плашка автор+время в колонку. Всем одинаковая (v1.0.10):
+   * свои «лично/открыто», чужие pubkey; priv/world — прежние цвета.
    * @param {Object} n
    * @returns {HTMLDivElement}
    */
@@ -6930,7 +6943,8 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
   }
 
   /**
-   * Сигнал-индикатор: полоски + подпись в колонку, каркас 34px.
+   * Сигнал-индикатор (v1.0.10.2): полоски + подпись в колонку,
+   * каркас кнопочный 34px. Percent-режим — число по центру.
    * @param {Object} n
    * @param {boolean} isRanked
    * @returns {HTMLDivElement|null}
@@ -6966,7 +6980,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
       sim.title = I18n.t('sim.level.mid') + ' (' + pct + '%)';
     } else {
       full = 1;
-      sim.title = I18t('sim.level.low') + ' (' + pct + '%)';
+      sim.title = I18n.t('sim.level.low') + ' (' + pct + '%)';
     }
 
     const bars = document.createElement('span');
@@ -6989,6 +7003,8 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
   }
 
   /**
+   * Карточка: текст + подвал одним рядом
+   * [плашка][↳][◆][сигнал][↩|✎].
    * @param {Object} n
    * @param {boolean} isRanked
    * @param {number} i
@@ -7005,14 +7021,13 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
     txt.textContent = n.text || '';
     el.appendChild(txt);
 
-    // ── ПОДВАЛ одним рядом ──
     const meta = document.createElement('div');
     meta.className = 'note-meta';
 
-    // 1. Плашка автор+время.
+    // Плашка автор+время.
     meta.appendChild(authorBadge(n));
 
-    // 2. Связи: ↳, ◆.
+    // Связи: ↳, ◆.
     const hasNav = !!(n.parent && n.parent.uid);
     const res = Influence.resonance(n.uid);
     const hasResonance = res > 0;
@@ -7063,11 +7078,11 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
       }
     }
 
-    // 3. Сигнал.
+    // Сигнал (только ranked).
     const sig = signalBadge(n, isRanked);
     if (sig) meta.appendChild(sig);
 
-    // 4. Правый слот: ↩ ИЛИ ✎.
+    // Правый слот: ↩ ИЛИ ✎.
     const right = document.createElement('div');
     right.className = 'note-meta-right';
 
@@ -7107,9 +7122,10 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
     return el;
   }
 
-  // ─── Тикер дат ─────────────────────────────────────────────────────────────
+  // ─── Тикер дат (обновляет .note-badge-date) ───────────────────────────────
 
   /**
+   * Раз в 30с — только текст плашек, без пересборки.
    */
   function startTicker() {
     if (tickerTimer) clearInterval(tickerTimer);
@@ -7127,6 +7143,8 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
   // ─── Рендер ────────────────────────────────────────────────────────────────
 
   /**
+   * Полный рендер. isLoadMore=true — догрузка скроллом (без
+   * сброса страницы). Якорь переживает wipe.
    * @param {boolean} isLoadMore
    */
   function render(isLoadMore) {
@@ -7210,9 +7228,11 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
     applyAnchor(anchor);
   }
 
-  // ─── Скролл ────────────────────────────────────────────────────────────────
+  // ─── Скролл: пагинация + глубина ──────────────────────────────────────────
 
   /**
+   * (1) у дна → +страница; (2) исчерпано и хронология → слой
+   * вглубь. Дно — тихо. LRU-отметки видимых.
    */
   function onScroll() {
     if (!feedEl) return;
@@ -7252,6 +7272,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
   // ─── Инициализация/отписка ─────────────────────────────────────────────────
 
   /**
+   * Подписки, скролл-листенер, рендер, тикер.
    */
   function init() {
     bind();
@@ -7283,6 +7304,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
   }
 
   /**
+   * Отписки + тикер.
    */
   function destroy() {
     unsubs.forEach(u => {
