@@ -101,8 +101,8 @@
 
 ## 📎 Ссылки
 
-- [WEB версия (PWA)](https://tonysmol.github.io/NOOmium/) *(замените на актуальную ссылку)*
-- [Telegram Mini App](https://t.me/noomium_bot) *(пример)*
+- [WEB версия (PWA)](https://tonysmol.github.io/NOOmium/) *(можно установить как приложение)*
+- [Telegram Mini App](https://t.me/noomium_bot) *(работает нативно в telegram)*
 - [Исходный код](#) *(ссылка на репозиторий)*
 
 ---
