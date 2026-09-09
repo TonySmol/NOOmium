@@ -1,6 +1,16 @@
 // ═════════════════════════════════════════════════════════════════════════════
-// NOOmium — app.js v1.0.0 «Чистый лист»
+// NOOmium — app.js v1.1.0 «Большая чистка» (сборка 87)
 // Соцсеть смыслов: мысли ищутся по значению, а не по словам.
+//
+// ИСТОРИЯ ВЕРСИЙ (кратко):
+// v1.1.0 (сборка 87) — релиз по итогам глубокого аудита v1.0.11:
+//   закрыты все 68 находок (SEC: хранение ключа, верификация fetchOlder,
+//   CSP; BUG: backfill lost-update, gate-копирование, reconnect-менеджер;
+//   PERF: кэш Provenance, компараторы Store, центроиды debounce;
+//   CLEAN: ~300 строк мёртвого кода, мёртвый CSS, хвосты i18n;
+//   A11Y: фокус-трап, клавиатура карточек, aria, reduced-motion).
+// v1.0.11 — последний патч линейке 1.0.x (базовая точка аудита).
+// v1.0.0 «Чистый лист» — старт модели v1.
 //
 // МОДЕЛЬ v1 (унаследована от v0.9):
 // - Заметка = (uid, owner). Истина — у владельца. Канон kind 30078, d = uid.
@@ -31,7 +41,7 @@
 
 'use strict';
 
-const APP_VERSION = '1.0.11';
+const APP_VERSION = '1.1.0';
 
 // ═══ РЕЕСТР СОБЫТИЙ ШИНЫ (полный контракт) ════════════════════════════════════
 //
@@ -103,19 +113,16 @@ const DI = (() => {
 // ─── CORE/EventBus ─── START ────────────────────────────────────────────────
 /**
  * Шина событий. Контракт — см. РЕЕСТР в шапке файла.
- * on/once/off/emit, wildcard '*'. Ошибки обработчиков изолированы.
- * Итерация по копии множества: подписка/отписка внутри emit безопасны.
+ * on/emit; on() возвращает функцию отписки. Ошибки обработчиков
+ * изолированы. Итерация по копии множества: подписка/отписка внутри
+ * emit безопасны. (v1.1.0: once/off/wildcard '*' удалены — 0
+ * потребителей; расширяйте по мере надобности.)
  */
 DI.register('EventBus', function () {
   const map = new Map();
-  const wild = new Set();
 
   function on(event, fn) {
     if (typeof fn !== 'function') return () => {};
-    if (event === '*') {
-      wild.add(fn);
-      return () => wild.delete(fn);
-    }
     if (!map.has(event)) map.set(event, new Set());
     map.get(event).add(fn);
     return () => {
@@ -127,26 +134,6 @@ DI.register('EventBus', function () {
     };
   }
 
-  function once(event, fn) {
-    const off = on(event, (...a) => {
-      off();
-      fn(...a);
-    });
-    return off;
-  }
-
-  function off(event, fn) {
-    if (event === '*') {
-      wild.delete(fn);
-      return;
-    }
-    const s = map.get(event);
-    if (s) {
-      s.delete(fn);
-      if (!s.size) map.delete(event);
-    }
-  }
-
   function emit(event, payload) {
     const s = map.get(event);
     if (s) {
@@ -154,22 +141,18 @@ DI.register('EventBus', function () {
         try { fn(payload); } catch (e) { console.error('[bus:' + event + ']', e); }
       }
     }
-    if (wild.size) {
-      for (const fn of Array.from(wild)) {
-        try { fn(event, payload); } catch (e) { console.error('[bus:*]', e); }
-      }
-    }
   }
 
-  return { on, once, off, emit };
+  return { on, emit };
 }, []);
 // ─── CORE/EventBus ─── END ──────────────────────────────────────────────────
 
 // ─── CORE/Logger ─── START ──────────────────────────────────────────────────
 /**
- * Уровни debug/info/warn/error, кольцевой буфер 200, цветной вывод,
- * history()/dump() — инфраструктура «пришлите логи» для баг-репортов.
- * Порог читается из Config при создании; setLevel — на лету.
+ * Уровни debug/info/warn/error, цветной вывод. Порог читается из
+ * Config при создании. (v1.1.0: setLevel/history()/dump() и кольцевой
+ * буфер удалены — инфраструктура «пришлите логи» была недостижима
+ * из UI, 0 вызовов.)
  */
 DI.register('Logger', function (Config) {
   const LEVELS = { debug: 10, info: 20, warn: 30, error: 40 };
@@ -182,63 +165,40 @@ DI.register('Logger', function (Config) {
 
   let threshold = LEVELS[Config.get('logLevel', 'info')] || LEVELS.info;
 
-  const ring = [];
-  const RING_MAX = 200;
-
   const ts = () => new Date().toISOString().slice(11, 23);
 
   function write(level, msg, data) {
-    const time = ts();
-    ring.push({ ts: time, level, msg, data });
-    if (ring.length > RING_MAX) ring.shift();
-
     if (LEVELS[level] < threshold) return;
     const fn = console[level] || console.log;
-    const prefix = '%c[' + time + '][' + level.toUpperCase() + ']';
+    const prefix = '%c[' + ts() + '][' + level.toUpperCase() + ']';
     if (data === undefined) fn(prefix, COLORS[level], msg);
     else fn(prefix, COLORS[level], msg, data);
   }
 
   return {
-    setLevel(l) { if (LEVELS[l]) threshold = LEVELS[l]; },
     debug(m, d) { write('debug', m, d); },
     info(m, d) { write('info', m, d); },
     warn(m, d) { write('warn', m, d); },
     error(m, d) { write('error', m, d); },
-    history() { return ring.slice(); },
-    dump() {
-      for (const r of ring) {
-        const fn = console[r.level] || console.log;
-        fn('[' + r.ts + '][' + r.level.toUpperCase() + ']',
-          r.msg, r.data === undefined ? '' : r.data);
-      }
-    },
   };
 }, ['Config']);
 // ─── CORE/Logger ─── END ────────────────────────────────────────────────────
 
 // ─── CORE/Utils ─── START ───────────────────────────────────────────────────
 /**
- * esc (зарезервирован законом 1), escRe, plural, word, fmtDate/fmtTime/
- * fmtRelativeTime, shortPk, uid (crypto), debounce (с cancel).
+ * plural, word, fmtDate/fmtTime/fmtRelativeTime, shortPk, uid
+ * (crypto), debounce (с cancel).
  *
- * ИЗМЕНЕНИЯ v1.0 против v0.9.9:
- * - uid: crypto.getRandomValues (6 случайных байт) вместо Math.random —
- *   коллизии на одной миллисекунде практически исключены.
+ * v1.1.0 (чистка аудита):
+ * - uid: полная энтропия 6 байт (12 base36-символов) — раньше
+ *   обрезалось до 6 символов (24 бита), комментарий завышал гарантию;
+ * - удалены esc/escRe/words.peers/thoughts/descendants — 0 вызовов
+ *   на 9819 строках (закон 1 (XSS) выполняется textContent'ом, esc
+ *   так и не понадобился).
  * - fmtRelativeTime: ts из будущего (разошедшиеся часы клиента/релея)
  *   возвращает fmtDate вместо пустой строки — дата не «исчезает».
  */
 DI.register('Utils', function () {
-  const ESC = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
-
-  function esc(s) {
-    return String(s == null ? '' : s).replace(/[&<>"']/g, c => ESC[c]);
-  }
-
-  function escRe(s) {
-    return String(s == null ? '' : s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  }
-
   function plural(n, one, few, many) {
     n = Math.abs(n);
     const a = n % 10, b = n % 100;
@@ -249,9 +209,6 @@ DI.register('Utils', function () {
 
   const words = {
     symbols: (n, l) => n + ' ' + (l === 'en' ? plural(n, 'char', 'chars', 'chars') : plural(n, 'символ', 'символа', 'символов')),
-    peers: (n, l) => n + ' ' + (l === 'en' ? plural(n, 'peer', 'peers', 'peers') : plural(n, 'узел', 'узла', 'узлов')),
-    thoughts: (n, l) => n + ' ' + (l === 'en' ? plural(n, 'note', 'notes', 'notes') : plural(n, 'мысль', 'мысли', 'мыслей')),
-    descendants: (n, l) => n + ' ' + (l === 'en' ? plural(n, 'heir', 'heirs', 'heirs') : plural(n, 'потомок', 'потомка', 'потомков')),
   };
 
   function word(key, n, lang) {
@@ -307,14 +264,15 @@ DI.register('Utils', function () {
   const shortPk = pk => (pk ? pk.slice(0, 8) + '…' : '');
 
   function uid(prefix) {
+    // 6 случайных байт → 12 base36-символов (полная энтропия 2^48 на мс;
+    // v1.1.0: раньше обрезалось до 6 символов = 24 бита).
     let rand = '';
     try {
       const b = new Uint8Array(6);
       crypto.getRandomValues(b);
       for (let i = 0; i < b.length; i++) rand += b[i].toString(36).padStart(2, '0');
-      rand = rand.slice(0, 6);
     } catch (_) {
-      rand = Math.random().toString(36).slice(2, 8); // очень старые окружения
+      rand = Math.random().toString(36).slice(2, 14); // очень старые окружения
     }
     return (prefix || 'n') + Date.now().toString(36) + rand;
   }
@@ -337,7 +295,7 @@ DI.register('Utils', function () {
     return debounced;
   }
 
-  return { esc, escRe, plural, word, fmtDate, fmtTime, fmtRelativeTime, shortPk, uid, debounce };
+  return { plural, word, fmtDate, fmtTime, fmtRelativeTime, shortPk, uid, debounce };
 }, []);
 // ─── CORE/Utils ─── END ─────────────────────────────────────────────────────
 
@@ -346,20 +304,14 @@ DI.register('Utils', function () {
  * Интернационализация ru/en.
  * t(): каскад текущий → en → fallback → ключ; format {param}.
  * applyToDOM: data-i18n / data-i18n-ph / data-i18n-aria.
- * setLang: persist в Config + applyToDOM + onChange + bus 'i18n:change'.
+ * setLang: persist в Config + applyToDOM + bus 'i18n:change'.
  *
- * v1.0.3:
- * + inf.ancestors ('Предки'/'Ancestors') — парный к inf.children;
- * + inf.noancestors.short → заменён финально на inf.ancestors.none
- *   ('Предков пока нет') — парный к inf.nochildren;
- * − inf.lineage, inf.noancestors (легаси старой модалки каскада:
- *   заглушка попадала в заголовок при живой цепочке — баг v1.0.2);
- * − net.loadmore / net.loading (кнопка истории удалена);
- * + gate.* (гейт первого запуска).
+ * v1.1.0 (чистка аудита): onChange()-канал удалён (0 подписчиков —
+ * дублировал bus 'i18n:change'); словари вычищены от 10 мёртвых
+ * ключей и пополнены aria-ключами и ключами защиты ключа.
  */
 DI.register('I18n', function (Config, bus) {
   const dicts = Object.create(null);
-  const listeners = [];
   let current = 'ru';
 
   const saved = Config.get('lang', null);
@@ -411,17 +363,10 @@ DI.register('I18n', function (Config, bus) {
     current = lang;
     Config.set('lang', current);
     applyToDOM();
-    for (const fn of listeners.slice()) {
-      try { fn(current); } catch (_) {}
-    }
     try { bus.emit('i18n:change', { lang: current }); } catch (_) {}
   }
 
   const getLang = () => current;
-
-  function onChange(fn) {
-    if (typeof fn === 'function') listeners.push(fn);
-  }
 
   addDict('ru', {
     'st.net': 'сеть',
@@ -894,23 +839,34 @@ DI.register('I18n', function (Config, bus) {
     applyToDOM();
   }
 
-  return { t, addDict, setLang, getLang, onChange, applyToDOM, init };
+  return { t, addDict, setLang, getLang, applyToDOM, init };
 }, ['Config', 'EventBus']);
 // ─── CORE/I18n ─── END ──────────────────────────────────────────────────────
 
 // ─── CORE/Config ─── START ──────────────────────────────────────────────────
 /**
- * Конфигурация: localStorage 'noomium:cfg', схема v10.
- * v9 → v10: identity-миграция (поля не менялись; версия поднята
- * для новой эпохи сборки). Загрузка с проверкой типов: значение
- * битого типа не копируется — остаётся default.
- * При битом JSON — бэкап сырой строки в 'noomium:cfg.broken'
- * (Logger недоступен из-за цикла зависимостей — console напрямую).
+ * Конфигурация: localStorage 'noomium:cfg', схема v11.
+ * v10 → v11: вычищены мёртвые ключи dim, maxAnswerTextLength,
+ * maxIncomingNotesPerPeer (хвосты удалённых фич — не читались).
+ * Загрузка с проверкой типов: значение битого типа не копируется —
+ * остаётся default. При битом JSON — бэкап сырой строки в
+ * 'noomium:cfg.broken' (Logger недоступен из-за цикла зависимостей —
+ * console напрямую).
+ *
+ * v1.1.0 (чистка аудита): экспорты save/all/schemaVersion/reset
+ * удалены (0 вызовов; fullReset делает свою ручную очистку).
+ *
+ * ЛИМИТЫ ДЛИНЫ ТЕКСТА (осознанное решение, не дрейф):
+ * - maxPostLength (2500) — лимит СОЗДАНИЯ в композере (UX-граница,
+ *   чтобы вектор оставался точным);
+ * - maxNoteTextLength (10000) — лимит ХРАНЕНИЯ/СЕТИ (импорт и
+ *   Protocol): чужие заметки длиннее 2500 легальны, но создать
+ *   такую из UI нельзя. Оба значения читаются только через Config.
  */
 DI.register('Config', function () {
   const KEY = 'noomium:cfg';
   const BROKEN_KEY = 'noomium:cfg.broken';
-  const SCHEMA_VERSION = 10;
+  const SCHEMA_VERSION = 11;
 
   const defaults = Object.freeze({
     schemaVersion: SCHEMA_VERSION,
@@ -922,7 +878,6 @@ DI.register('Config', function () {
     logLevel: 'info',
 
     model: 'onnx-community/granite-embedding-97m-multilingual-r2-ONNX',
-    dim: 384,
     aiCacheLimit: 300,
     aiEmbedTimeout: 15000,
 
@@ -959,9 +914,7 @@ DI.register('Config', function () {
     reconnectBaseDelay: 1000,
     reconnectMaxDelay: 60000,
     seenMaxSize: 1000,
-    maxAnswerTextLength: 10000,
     maxNoteTextLength: 10000,
-    maxIncomingNotesPerPeer: 20,
 
     dbName: 'noomium_v3',
     notesStore: 'notes',
@@ -1028,6 +981,13 @@ DI.register('Config', function () {
       return s;
     },
     10: s => s, // identity: поля и формат не менялись
+    11: s => {
+      // v1.1.0: хвосты удалённых фич (не читались ни одним Config.get).
+      ['dim', 'maxAnswerTextLength', 'maxIncomingNotesPerPeer'].forEach(k => {
+        delete s[k];
+      });
+      return s;
+    },
   };
 
   const state = Object.assign({}, defaults);
@@ -1078,15 +1038,12 @@ DI.register('Config', function () {
 
   return {
     get(k, def) { return (k in state) ? state[k] : def; },
-    set(k, v) { state[k] = v; persist(); },
-    save: persist,
-    defaults() { return Object.assign({}, defaults); },
-    all() { return Object.assign({}, state); },
-    schemaVersion() { return SCHEMA_VERSION; },
-    reset() {
-      for (const k of Object.keys(defaults)) state[k] = defaults[k];
+    set(k, v) {
+      if (Object.is(state[k], v)) return; // no-op set — без лишней записи
+      state[k] = v;
       persist();
     },
+    defaults() { return Object.assign({}, defaults); },
   };
 });
 // ─── CORE/Config ─── END ────────────────────────────────────────────────────
@@ -1157,7 +1114,16 @@ DI.register('Store', function () {
   }
 
   const getState = () => snapshot();
-  const get = k => state[k];
+  // v1.1.0: объектные слайсы (context) отдаются замороженной копией —
+  // живая ссылка наружу больше не утекает (контракт «context только
+  // заменяется» теперь enforce'ится). Примитивы — как есть.
+  const get = k => {
+    const v = state[k];
+    if (v && typeof v === 'object' && !Array.isArray(v)) {
+      return Object.freeze(Object.assign({}, v));
+    }
+    return v;
+  };
 
   function setState(partial) {
     if (!partial || typeof partial !== 'object' || Array.isArray(partial)) return;
@@ -1198,10 +1164,16 @@ DI.register('Store', function () {
 
 // ─── DATA/Vec ─── START ─────────────────────────────────────────────────────
 /**
- * Векторные операции: квантование base64 (int16), косинус (dot по
- * min-длине — контракт: все векторы нормализованы), нормализация,
- * sqDist, kmeans (farthest-first, детерминированный).
+ * Векторные операции: квантование base64 (int16), косинус
+ * (истинный: dot / (|a|·|b|), длины обязаны совпадать),
+ * нормализация, sqDist, kmeans (farthest-first, детерминированный).
  * Формат без изменений от v0.9.9 — round-trip с канонами на релеях.
+ *
+ * v1.1.0 (аудит F-30): раньше «косинус» был голым dot по min-длине —
+ * молчаливо неверные score для ненормализованных/размерно-разных
+ * входов (query 21000, чужие каноны). Теперь: длины обязаны
+ * совпадать, иначе 0; делим на нормы. Для нормализованных векторов
+ * (все свои) результат не изменился.
  */
 DI.register('Vec', function () {
   /**
@@ -1266,23 +1238,30 @@ DI.register('Vec', function () {
   }
 
   /**
-   * Косинус = dot product по min-длине (векторы нормализованы).
-   * Нулевые/пустые → 0.
+   * Истинный косинус: dot / (|a|·|b|). Требует равных длин —
+   * разные размерности дают 0 (защита от тихо неверных score).
+   * Нулевые/пустые → 0. Для нормализованных векторов равен dot.
    * @param {Float32Array|Array<number>} a
    * @param {Float32Array|Array<number>} b
    * @returns {number}
    */
   function cosine(a, b) {
     if (!a || !b) return 0;
-    const n = Math.min(a.length, b.length);
-    if (!n) return 0;
+    if (a.length !== b.length || !a.length) return 0;
 
-    let s = 0;
-    for (let i = 0; i < n; i++) {
-      s += a[i] * b[i];
+    let dot = 0, na = 0, nb = 0;
+    for (let i = 0; i < a.length; i++) {
+      dot += a[i] * b[i];
+      na += a[i] * a[i];
+      nb += b[i] * b[i];
     }
 
-    return s;
+    const denom = Math.sqrt(na) * Math.sqrt(nb);
+    if (!denom) return 0;
+
+    // Небольшой clamp от накопления ошибки округления в [-1, 1].
+    const s = dot / denom;
+    return s > 1 ? 1 : (s < -1 ? -1 : s);
   }
 
   /**
@@ -1314,6 +1293,7 @@ DI.register('Vec', function () {
    * @returns {number}
    */
   function sqDist(a, b) {
+    if (!a || !b) return Infinity; // v1.1.0: null-гард (kmeans не падает)
     const n = Math.min(a.length, b.length);
     let s = 0;
 
@@ -1335,12 +1315,16 @@ DI.register('Vec', function () {
    */
   function kmeans(vectors, k, iterations) {
     const iters = iterations || 10;
+    // v1.1.0: игнорируем векторы чужой размерности — NaN-центроиды
+    // исключены; dim считается по первому валидному вектору.
+    const dim0 = vectors && vectors[0] ? vectors[0].length : 0;
+    vectors = (vectors || []).filter(v => v && v.length === dim0);
     const n = vectors.length;
 
     if (!n || !k) return [];
     if (n <= k) return vectors.map(v => f32(v));
 
-    const dim = vectors[0].length;
+    const dim = dim0;
 
     const cents = [f32(vectors[0])];
     while (cents.length < k) {
@@ -1490,6 +1474,8 @@ DI.register('DB', function (Config, bus, Logger) {
         return resolve(null);
       }
 
+      let blockedFallback = false; // v1.1.0: поздний onsuccess после mem-fallback игнорируем
+
       try {
         const req = indexedDB.open(Config.get('dbName', 'noomium_v3'), 1);
 
@@ -1507,7 +1493,22 @@ DI.register('DB', function (Config, bus, Logger) {
         };
 
         req.onsuccess = e => {
+          if (blockedFallback) {
+            // Блок не снялся за 10с, уже живём в памяти: не создаём
+            // гибридное состояние — закрываем опоздавшее соединение.
+            try { e.target.result.close(); } catch (_) {}
+            return resolve(null);
+          }
           db = e.target.result;
+          // v1.1.0 (F-53): multi-tab — другая вкладка подняла version/
+          // deleteDatabase: освобождаем соединение, следующая операция
+          // откроет заново (fullReset больше не висит до закрытия нас).
+          db.onversionchange = () => {
+            Logger.warn('DB: versionchange извне — закрываю соединение');
+            try { db.close(); } catch (_) {}
+            db = null;
+            openPromise = null;
+          };
           buildIndexes().then(() => resolve(db)).catch(() => resolve(db));
         };
 
@@ -1522,6 +1523,7 @@ DI.register('DB', function (Config, bus, Logger) {
           Logger.warn('DB: открытие заблокировано (другая вкладка?), жду 10с');
           setTimeout(() => {
             if (db) return;
+            blockedFallback = true;
             memNotes = new Map();
             memMirror = new Map();
             Logger.warn('DB: блок не снят, fallback в память');
@@ -1585,13 +1587,40 @@ DI.register('DB', function (Config, bus, Logger) {
   }
 
   /**
+   * v1.1.0 (F-52): write-вариант — резолв по tx.oncomplete, а не по
+   * request.onsuccess. putNote/delNote больше не эмитят db:change до
+   * фактического коммита (abort на commit больше не «уже сохранено»).
+   * @param {string} store
+   * @param {Function} fn
+   * @param {Function} memFn
+   * @returns {Promise<*>}
+   */
+  function withStoreWrite(store, fn, memFn) {
+    return open().then(d => {
+      if (!d) return memFn();
+
+      return new Promise((res, rej) => {
+        try {
+          const tx = d.transaction(store, 'readwrite');
+          const r = fn(tx.objectStore(store));
+          r.onerror = () => rej(r.error);
+          tx.oncomplete = () => res(r.result);
+          tx.onerror = () => rej(tx.error || r.error);
+          tx.onabort = () => rej(tx.error || r.error);
+        } catch (e) {
+          rej(e);
+        }
+      });
+    });
+  }
+
+  /**
    * @param {Object} note
    * @returns {Promise<string>}
    */
   function putNote(note) {
-    return withStore(
+    return withStoreWrite(
       NOTES(),
-      'readwrite',
       s => s.put(note),
       () => { memNotes.set(note.uid, note); return note.uid; }
     ).then(res => {
@@ -1619,9 +1648,8 @@ DI.register('DB', function (Config, bus, Logger) {
    * @returns {Promise<*>}
    */
   function delNote(uid) {
-    return withStore(
+    return withStoreWrite(
       NOTES(),
-      'readwrite',
       s => s.delete(uid),
       () => { memNotes.delete(uid); }
     ).then(res => {
@@ -1724,7 +1752,17 @@ DI.register('DB', function (Config, bus, Logger) {
     const xv = effVersion(existing);
 
     if (entry.deleted) {
-      return ev >= xv ? entry : null;
+      if (ev >= xv) {
+        // v1.1.0 (F-13): надгробие сохраняет LRU-отметку живой записи —
+        // воскрешённая заметка не становится «никогда не показанной».
+        // Контент (text/vec/parent) в надгробие НЕ заимствуем —
+        // удаление не должно сохранять текст.
+        if (typeof existing.lastShownStamp === 'number') {
+          entry.lastShownStamp = existing.lastShownStamp;
+        }
+        return entry;
+      }
+      return null;
     }
 
     if (existing.deleted) {
@@ -1935,7 +1973,14 @@ DI.register('DB', function (Config, bus, Logger) {
 
   /**
    * Эвикция зеркала: жёсткий потолок для чужих записей. Свои
-   * не трогаем. Мера — «забытость» (LRU, потом ts). Тихая.
+   * не трогаем. Мера — «забытость»: сначала показанные давно,
+   * среди равных — старее по ts; никогда не показанные уходят
+   * последними (свежий фонд цел). Тихая.
+   *
+   * v1.1.0 (аудит F-13 + перф): компаратор без Infinity (NaN при
+   * сравнении двух «никогда не показанных» ломал сортировку —
+   * порядок эвикции был произвольным); все жертвы — одной
+   * транзакцией + один db:mirror вместо N×(транзакция+событие).
    * @param {number} [limit]
    * @returns {Promise<number>} Сколько выкинули.
    */
@@ -1955,18 +2000,47 @@ DI.register('DB', function (Config, bus, Logger) {
     const excess = foreign.length - L;
     const now = Date.now();
 
-    const score = m => (m.lastShownStamp ? now - m.lastShownStamp : Infinity) * 1e10
-      + (m.ts || (m.version || 0) * 1000);
+    // Ключ сортировки (убывание = выкидываем первыми):
+    // 1) показанные давно (большой now - lastShownStamp);
+    // 2) при равенстве — старее по ts;
+    // никогда не показанные (lastShownStamp нет) получают ключ
+    // заведомо меньше любого показанного — фонд новичка цел.
+    const NEVER_SHOWN = -1;
+    const key = m => {
+      const shown = typeof m.lastShownStamp === 'number' && m.lastShownStamp > 0
+        ? (now - m.lastShownStamp)
+        : NEVER_SHOWN;
+      return shown * 1e10 + (m.ts || (m.version || 0) * 1000);
+    };
 
-    const sorted = foreign.slice().sort((a, b) => score(b) - score(a));
-    const victims = sorted.slice(0, excess);
+    const sorted = foreign.slice().sort((a, b) => key(b) - key(a));
+    const victims = sorted.slice(0, excess).map(m => m.uid);
 
     let removed = 0;
-    for (const m of victims) {
-      try {
-        await delMirror(m.uid);
-        removed++;
-      } catch (_) {}
+    const d = await open().catch(() => null);
+    if (!d) {
+      for (const uid of victims) {
+        if (memMirror.delete(uid)) { mirrorUids.delete(uid); removed++; }
+      }
+      if (removed) emitMirror();
+    } else {
+      removed = await new Promise(resolve => {
+        let n = 0;
+        try {
+          const tx = d.transaction(MIRROR(), 'readwrite');
+          const store = tx.objectStore(MIRROR());
+          for (const uid of victims) {
+            store.delete(uid);
+            n++;
+            mirrorUids.delete(uid);
+          }
+          tx.oncomplete = () => resolve(n);
+          tx.onerror = () => resolve(0);
+          tx.onabort = () => resolve(0);
+        } catch (_) {
+          resolve(0);
+        }
+      });
     }
 
     if (removed) Logger.info('DB: эвикция зеркала — ' + removed + ' (свежий фонд цел)');
@@ -2055,6 +2129,15 @@ DI.register('DB', function (Config, bus, Logger) {
  * - Таймаут загрузки 120с: НЕ убивает воркер — stalled:true (воркер
  *   докачивает в фоне; если добьётся — штатный переход в model).
  *   Ретрай после фатальной ошибки — только перезапуском приложения.
+ * - v1.1.0 (F-23): крах воркера ПОСЛЕ готовности больше не оставляет
+ *   «живой» Embedder — режим переводится в loading+stalled («ии нет
+ *   до перезапуска»), embed() отвечает null сразу, без 15с ожидания.
+ * - v1.1.0 (F-05): transformers.js пинирован на мажор @3 (было @latest —
+ *   breaking-change библиотеки укладывал всех юзеров разом) +
+ *   fallback на второй CDN.
+ * - v1.1.0: load()/embed() — дедупликация параллельных одинаковых
+ *   embed-запросов (in-flight map); blob workerUrl revoke'ется после
+ *   успешной загрузки (была утечка до закрытия вкладки).
  * - Кэш LRU 300, только настоящие векторы, чистится при старте загрузки.
  * - getState(): {mode, percent, stalled} — снимок для UI-инициализации.
  */
@@ -2065,12 +2148,32 @@ let extractor = null;
 let ready = false;
 let files = new Map();
 
+// v1.1.0 (F-05): пин мажора @3 + fallback на второй CDN. Плавающий
+// @latest убран: breaking-change библиотеки не должен ронять всех
+// пользователей одновременно; патчи внутри мажора — безопасны.
+const TRANSFORMERS_URLS = [
+  'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3',
+  'https://unpkg.com/@huggingface/transformers@3',
+];
+
+async function importTransformers() {
+  let lastErr = null;
+  for (const url of TRANSFORMERS_URLS) {
+    try {
+      return await import(url);
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr || new Error('transformers.js unavailable');
+}
+
 self.onmessage = async function (e) {
   const msg = e.data;
 
   if (msg.type === 'load') {
     try {
-      const mod = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@latest');
+      const mod = await importTransformers();
       mod.env.allowLocalModels = false;
       mod.env.useBrowserCache = true;
 
@@ -2156,10 +2259,10 @@ self.onmessage = async function (e) {
   let readyEmitted = false;
   let nextId = 0;
 
-  /** @type {Map<number, {resolve: Function, timer: number}>} */
+  /** @type {Map<number, {resolve: Function, timer: number, text: string}>} */
   const pending = new Map();
-  /** @type {Array<Function>} */
-  const progressFns = [];
+  /** @type {Map<string, Promise<Float32Array|null>>} v1.1.0: in-flight дедуп */
+  const inFlight = new Map();
   /** @type {Map<string, Float32Array>} */
   const cache = new Map();
 
@@ -2271,13 +2374,21 @@ self.onmessage = async function (e) {
 
       worker.onerror = err => {
         if (loadSettled) {
-          // краш после готовности: гасим только pending
-          pending.forEach(p => {
-            clearTimeout(p.timer);
-            p.resolve(null);
-          });
-          pending.clear();
-          Logger.warn('Embedder: воркер упал после загрузки', String(err && err.message || err));
+          // v1.1.0 (F-23): краш после готовности — Embedder честно уходит
+          // в «ии недоступен до перезапуска»: воркер убивается (embed()
+          // отвечает null мгновенно, а не после 15с таймаута), статус
+          // переотправляется. mode='model' при этом сбрасывается — иначе
+          // каждый embed платил бы aiEmbedTimeout за запрос в мёртвый
+          // воркер.
+          const wasModel = (mode === 'model');
+          cleanup();
+          if (wasModel) {
+            mode = 'loading';
+            stalled = true;
+            emitStatus();
+          }
+          Logger.warn('Embedder: воркер упал после загрузки — ии недоступен до перезапуска',
+            String(err && err.message || err));
           return;
         }
         clearTimeout(loadTimer);
@@ -2292,9 +2403,6 @@ self.onmessage = async function (e) {
           lastPct = msg.pct;
           stalled = false;
 
-          for (const fn of progressFns.slice()) {
-            try { fn(msg); } catch (_) {}
-          }
           try { bus.emit('ai:progress', msg); } catch (_) {}
           emitStatus({ loadedMB: msg.loadedMB, totalMB: msg.totalMB, model: msg.model });
         }
@@ -2305,6 +2413,13 @@ self.onmessage = async function (e) {
           mode = 'model';
           stalled = false;
           lastPct = 100;
+
+          // v1.1.0 (F-63в): blob-URL воркера больше не нужен — releases.
+          if (workerUrl) {
+            try { URL.revokeObjectURL(workerUrl); } catch (_) {}
+            workerUrl = null;
+          }
+
           emitStatus();
 
           if (!readyEmitted) {
@@ -2351,23 +2466,13 @@ self.onmessage = async function (e) {
 
   return {
     /**
-     * Запуск загрузки. Идемпотентен.
-     * @param {Function} [onProgress] - подписка на прогресс (снимается
-     *   после завершения загрузки).
+     * Запуск загрузки. Идемпотентен (single-flight).
+     * v1.1.0: параметр onProgress удалён — мёртвое API (0 вызовов;
+     * прогресс идёт через bus 'ai:progress').
      * @returns {Promise<void>}
      */
-    load(onProgress) {
-      let off = null;
-      if (typeof onProgress === 'function') {
-        progressFns.push(onProgress);
-        off = () => {
-          const i = progressFns.indexOf(onProgress);
-          if (i > -1) progressFns.splice(i, 1);
-        };
-      }
-
+    load() {
       if (mode === 'model') {
-        if (off) off();
         return Promise.resolve();
       }
 
@@ -2382,7 +2487,6 @@ self.onmessage = async function (e) {
       loadPromise = doLoad().then(() => {
         loadSettled = true;
         loadPromise = null;
-        if (off) off();
       });
 
       return loadPromise;
@@ -2403,32 +2507,29 @@ self.onmessage = async function (e) {
       const cached = cacheGet(t);
       if (cached) return Promise.resolve(cached);
 
-      const id = nextId++;
-      return new Promise(resolve => {
+      // v1.1.0: параллельные запросы одного текста — один проход модели.
+      const flying = inFlight.get(t);
+      if (flying) return flying;
+
+      const p = new Promise(resolve => {
+        const id = nextId++;
+        const settle = v => {
+          inFlight.delete(t);
+          resolve(v);
+        };
         const timer = setTimeout(() => {
           if (pending.delete(id)) {
             Logger.warn('Embedder: таймаут embed');
-            resolve(null);
+            settle(null);
           }
         }, Config.get('aiEmbedTimeout', 15000));
 
-        pending.set(id, { resolve, timer, text: t });
+        pending.set(id, { resolve: settle, timer, text: t });
         worker.postMessage({ type: 'embed', id, text: t });
       });
-    },
 
-    /**
-     * @returns {boolean}
-     */
-    ready() {
-      return mode === 'model';
-    },
-
-    /**
-     * @returns {'loading'|'model'}
-     */
-    getMode() {
-      return mode;
+      inFlight.set(t, p);
+      return p;
     },
 
     /**
@@ -2437,20 +2538,6 @@ self.onmessage = async function (e) {
      */
     getState() {
       return { mode, percent: lastPct, stalled };
-    },
-
-    /**
-     * Подписка на прогресс с отпиской.
-     * @param {Function} fn
-     * @returns {Function} off
-     */
-    onProgress(fn) {
-      if (typeof fn !== 'function') return () => {};
-      progressFns.push(fn);
-      return () => {
-        const i = progressFns.indexOf(fn);
-        if (i > -1) progressFns.splice(i, 1);
-      };
     },
   };
 }, ['Config', 'EventBus', 'Logger']);
@@ -2461,6 +2548,9 @@ self.onmessage = async function (e) {
  * Ранжирование: пакетный косинус, пороги relevant/seren, дубликаты.
  * Пороги читаются из Config при каждом вызове — настройки применяются
  * без перезагрузки.
+ * v1.1.0 (F-62в): bounds() — единый источник порогов для UI (граница
+ * серендипити-полосы сигнала больше не дублируется самодельной
+ * формулой в FeedView).
  */
 DI.register('Ranker', function (Vec, Config) {
   /**
@@ -2529,7 +2619,23 @@ DI.register('Ranker', function (Vec, Config) {
     return Vec.cosine(a, b) >= Config.get('duplicateThreshold', 0.88);
   }
 
-  return { cosineBatch, split, isSimilar };
+  /**
+   * Пороги сигнала для UI-индикатора: нижняя граница озарений и
+   * середина полосы. Единственный источник формулы (раньше FeedView
+   * держал собственную копию threshold - serendipity/2 — дрейф).
+   * @returns {{threshold: number, lowerBound: number, midBound: number}}
+   */
+  function bounds() {
+    const threshold = Config.get('threshold', 0.81);
+    const serendipity = Config.get('serendipity', 0.07);
+    return {
+      threshold,
+      lowerBound: threshold - serendipity,
+      midBound: threshold - serendipity / 2,
+    };
+  }
+
+  return { cosineBatch, split, isSimilar, bounds };
 }, ['Vec', 'Config']);
 // ─── AI/Ranker ─── END ──────────────────────────────────────────────────────
 
@@ -2549,7 +2655,18 @@ DI.register('Ranker', function (Vec, Config) {
  * Побочный эффект: недобор N при падении части досок — reject,
  * вызывающий оставит запись в очереди (ретраи доконают).
  *
- * Остальной контракт v1.0 без изменений.
+ * v1.1.0 (аудит):
+ * - F-02: ключ на диске может храниться в NIP-49-обёртке (ncryptsec).
+ *   Формат 'noomium:sk': hex-строка (легаси, plaintext) ИЛИ строка
+ *   ncryptsec1… (зашифрован паролем). При wrapped-формате автологина
+ *   нет — Boot показывает гейт в режиме разблокировки, расшифрованный
+ *   ключ живёт только в памяти сессии. Обёртка ставится через
+ *   wrapStoredKey(passphrase) (Меню → Аккаунт и ключ).
+ * - F-03: verify(ev) — обёртка nostr-tools verifyEvent: прямые
+ *   подписки (fetchOlder) теперь обязаны верифицировать события, как
+ *   это делает SimplePool.
+ * - Экспорт sign() удалён (внешних вызовов не было, публикация —
+ *   только через publish).
  */
 DI.register('Nostr', function (Config, bus, Logger) {
   const CDN = 'https://cdn.jsdelivr.net/npm/nostr-tools@2.7.2/+esm';
@@ -2567,16 +2684,33 @@ DI.register('Nostr', function (Config, bus, Logger) {
   let initPromise = null;
 
   /**
-   * @returns {Uint8Array|null}
+   * @returns {Uint8Array|null} hex-SK или null; wrapped-ключ НЕ
+   *   расшифровывает молча (нужен пароль).
    */
   function loadKey() {
     try {
-      const hex = localStorage.getItem(SK_KEY);
-      if (hex && /^[0-9a-f]{64}$/i.test(hex)) {
-        return new Uint8Array(hex.match(/.{1,2}/g).map(b => parseInt(b, 16)));
+      const raw = localStorage.getItem(SK_KEY);
+      if (raw && /^[0-9a-f]{64}$/i.test(raw)) {
+        return new Uint8Array(raw.match(/.{1,2}/g).map(b => parseInt(b, 16)));
       }
     } catch (_) {}
     return null;
+  }
+
+  /**
+   * v1.1.0 (F-02): формат ключа на диске.
+   * @returns {'none'|'plain'|'wrapped'}
+   */
+  function storedKeyFormat() {
+    try {
+      const raw = localStorage.getItem(SK_KEY);
+      if (!raw) return 'none';
+      if (typeof raw === 'string' && raw.indexOf('ncryptsec1') === 0) return 'wrapped';
+      if (/^[0-9a-f]{64}$/i.test(raw)) return 'plain';
+      return 'none';
+    } catch (_) {
+      return 'none';
+    }
   }
 
   /**
@@ -2594,8 +2728,11 @@ DI.register('Nostr', function (Config, bus, Logger) {
   }
 
   /**
-   * Инициализация (контракт v1.0).
-   * @returns {Promise<string>}
+   * Инициализация (контракт v1.0 + F-02).
+   * При wrapped-ключе НЕ генерирует новый и НЕ затирает обёртку:
+   * сессия остаётся без ключа до unlockStoredKey(passphrase)
+   * (гейт разблокировки). Возвращает pubkey или null.
+   * @returns {Promise<string|null>}
    */
   function init() {
     if (initPromise) return initPromise;
@@ -2609,16 +2746,25 @@ DI.register('Nostr', function (Config, bus, Logger) {
         throw new Error('nostr-tools: несовместимый модуль');
       }
 
-      sk = loadKey();
-      if (!sk) {
-        sk = nostr.generateSecretKey();
-        saveKey(sk);
+      const fmt = storedKeyFormat();
+      if (fmt === 'wrapped') {
+        // Ключ под паролем: без passphrase не расшифровываем.
+        // FirstRunGate покажет экран разблокировки и вызовет
+        // unlockStoredKey(); до этого pubkey = null.
+        sk = null;
+        pk = null;
+      } else {
+        sk = loadKey();
+        if (!sk) {
+          sk = nostr.generateSecretKey();
+          saveKey(sk);
+        }
+        pk = nostr.getPublicKey(sk);
       }
 
-      pk = nostr.getPublicKey(sk);
       pool = new nostr.SimplePool();
 
-      Logger.info('Nostr: готов, pubkey ' + pk.slice(0, 8) + '…');
+      Logger.info('Nostr: готов' + (pk ? ', pubkey ' + pk.slice(0, 8) + '…' : ' (ключ под паролем)'));
       return pk;
     }).catch(err => {
       initPromise = null;
@@ -2657,9 +2803,86 @@ DI.register('Nostr', function (Config, bus, Logger) {
 
     sk = newSk;
     pk = nostr.getPublicKey(sk);
-    saveKey(sk);
+    saveKey(sk); // замена аккаунта — plaintext по умолчанию (как раньше)
     Logger.info('Nostr: ключ заменён, pubkey ' + pk.slice(0, 8) + '…');
     return pk;
+  }
+
+  /**
+   * v1.1.0 (F-02): обернуть ТЕКУЩИЙ ключ паролем (NIP-49) и заменить
+   * plaintext в хранилище на ncryptsec. Пустой пароль запрещён —
+   * «шифрование без секрета» хуже честного plaintext (F-29а).
+   * @param {string} passphrase
+   * @returns {Promise<boolean>}
+   */
+  async function wrapStoredKey(passphrase) {
+    const pass = String(passphrase || '');
+    if (!pass) {
+      Logger.warn('Nostr: wrapStoredKey — пустой пароль запрещён');
+      return false;
+    }
+    if (!nostr || !sk || !nostr.nip49 || typeof nostr.nip49.encrypt !== 'function') {
+      Logger.warn('Nostr: NIP-49 недоступен — обёртка невозможна');
+      return false;
+    }
+    try {
+      const nc = nostr.nip49.encrypt(sk, pass);
+      if (!nc || typeof nc !== 'string') return false;
+      localStorage.setItem(SK_KEY, nc);
+      Logger.info('Nostr: ключ сохранён в NIP-49-обёртке');
+      return true;
+    } catch (e) {
+      Logger.warn('Nostr: wrapStoredKey', String(e && e.message || e));
+      return false;
+    }
+  }
+
+  /**
+   * v1.1.0 (F-02): разблокировать wrapped-ключ паролем. Расшифрованный
+   * ключ остаётся ТОЛЬКО в памяти сессии — на диске обёртка не
+   * заменяется на plaintext.
+   * @param {string} passphrase
+   * @returns {Promise<boolean>} true — ключ разблокирован.
+   */
+  async function unlockStoredKey(passphrase) {
+    if (!nostr) return false;
+    const raw = storedKeyFormat() === 'wrapped'
+      ? localStorage.getItem(SK_KEY)
+      : null;
+    if (!raw) return false;
+    if (!nostr.nip49 || typeof nostr.nip49.decrypt !== 'function') {
+      Logger.warn('Nostr: NIP-49 недоступен — разблокировка невозможна');
+      return false;
+    }
+    try {
+      const key = nostr.nip49.decrypt(raw, String(passphrase || ''));
+      const bytes = (key instanceof Uint8Array) ? key
+        : (key && key.secretKey instanceof Uint8Array ? key.secretKey
+        : (key && key.data instanceof Uint8Array ? key.data : null));
+      if (!bytes || bytes.length !== 32) return false;
+
+      sk = bytes;
+      pk = nostr.getPublicKey(sk);
+      Logger.info('Nostr: ключ разблокирован, pubkey ' + pk.slice(0, 8) + '…');
+      return true;
+    } catch (_) {
+      return false; // неверный пароль — штатный случай, тихо
+    }
+  }
+
+  /**
+   * v1.1.0 (F-03): верификация подписи события (nostr-tools
+   * verifyEvent). Обязательна для всех ПРЯМЫХ подписок (минуя
+   * SimplePool, который верифицирует сам).
+   * @param {Object} ev
+   * @returns {boolean}
+   */
+  function verify(ev) {
+    try {
+      return !!(nostr && typeof nostr.verifyEvent === 'function' && ev && nostr.verifyEvent(ev));
+    } catch (_) {
+      return false;
+    }
   }
 
   /**
@@ -2777,7 +3000,6 @@ DI.register('Nostr', function (Config, bus, Logger) {
 
   return {
     init,
-    sign,
     publish,
     subscribe,
     ensureRelay(url) {
@@ -2787,6 +3009,10 @@ DI.register('Nostr', function (Config, bus, Logger) {
     getPubkey,
     getSecretKey,
     setKey,
+    storedKeyFormat,
+    wrapStoredKey,
+    unlockStoredKey,
+    verify,
     lib,
     isReady,
     relays,
@@ -2929,12 +3155,19 @@ DI.register('Crypto', function (Nostr, Logger) {
    * @param {Uint8Array} sk
    * @param {string} password
    * @returns {Promise<string|null>} ncryptsec.
+   * v1.1.0 (F-29а): пустой пароль отклоняется — ncryptsec с пустым
+   * паролем создаёт иллюзию защиты (расшифровывается кем угодно).
    */
   async function encryptKey(sk, password) {
+    const pass = String(password || '');
+    if (!pass) {
+      Logger.warn('Crypto: пустой пароль — NIP-49-обёртка отклонена');
+      return null;
+    }
     try {
       const n = await lib();
       if (!n.nip49 || typeof n.nip49.encrypt !== 'function') return null;
-      return n.nip49.encrypt(sk, String(password || ''));
+      return n.nip49.encrypt(sk, pass);
     } catch (e) {
       Logger.warn('Crypto: encryptKey', String(e && e.message || e));
       return null;
@@ -2958,7 +3191,9 @@ DI.register('Crypto', function (Nostr, Logger) {
       if (res && res.data instanceof Uint8Array && res.data.length === 32) return res.data;
 
       return null;
-    } catch (_) {
+    } catch (e) {
+      // v1.1.0: doc-контракт «null-возврат + warn» выполняется и здесь
+      Logger.warn('Crypto: decryptKey — неверный пароль или битый ncryptsec');
       return null;
     }
   }
