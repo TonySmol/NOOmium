@@ -3,12 +3,40 @@
 // Соцсеть смыслов: мысли ищутся по значению, а не по словам.
 //
 // ИСТОРИЯ ВЕРСИЙ (кратко):
-// v1.1.0 (сборка 87) — релиз по итогам глубокого аудита v1.0.11:
-//   закрыты все 68 находок (SEC: хранение ключа, верификация fetchOlder,
-//   CSP; BUG: backfill lost-update, gate-копирование, reconnect-менеджер;
-//   PERF: кэш Provenance, компараторы Store, центроиды debounce;
-//   CLEAN: ~300 строк мёртвого кода, мёртвый CSS, хвосты i18n;
-//   A11Y: фокус-трап, клавиатура карточек, aria, reduced-motion).
+// v1.1.0 (сборка 87) — релиз по итогам глубокого аудита v1.0.11 (68 находок).
+//   ЧЕСТНЫЙ СТАТУС: сборка 87 закрыла 10 находок + 5 частично. Пофактовая
+//   верификация (VER-A/B/C) выявила 53 незакрытые — доводочный раунд закрыл
+//   их до 46 полных + 9 частичных (маркеры «(F-XX) (закрыто)» ниже в коде).
+//   Итог: 46 ЗАКРЫТО · 9 ЧАСТИЧНО · 13 ОТЛОЖЕНО (см. VERIFICATION-87.md).
+//   Полностью: F-01 манифест CP1251→UTF-8 · F-02 ncryptsec-хранение + гейт
+//   разблокировки + шифрование из UI · F-03 verifyEvent в прямых подписках ·
+//   F-04 голый nsec не попадает в архив · F-05 transformers@3 + fallback-CDN ·
+//   F-06 backfill lost-update guard · F-07 живая кнопка копирования ключа ·
+//   F-08 онбординг не под гейтом · F-09 SW: отказ precache честен, иконки
+//   опциональны · F-10 снимок Provenance с TTL · F-11 компараторы lists/feed ·
+//   F-12 мёртвый CSS §3 · F-13 LRU-компаратор · F-14 дедуп self-событий ·
+//   F-15 кап maxResponses · F-19 сброс пина при смене аккаунта · F-20
+//   атомарный putNoteIfVersion · F-21 нет протухших результатов · F-23
+//   stalled-режим воркера · F-24 CSS.escape для сетевых uid · F-25/F-28
+//   отписки/одноразовые слушатели · F-30 истинный косинус · F-31 ts в мс
+//   на границе протокола · F-32 пустой вектор = отсутствующий · F-34/F-35/
+//   F-36 debounce lastSeen/статуса/центроидов · F-41 зум не запрещён ·
+//   F-42 reduced-motion без задержек · F-43 aria-labels в i18n · F-44
+//   vh-фоллбэк · F-45 onb-классы вместо cssText · F-47 версии
+//   синхронизированы · F-49 счётчик не убивает вложенный спан · F-50
+//   геометрия поля из CSS · F-51—F-54 (uid-энтропия, DB, EventBus, Config) ·
+//   F-59 мёртвые CSS-правила/токены · F-62 единая формула bounds · F-64 CSP +
+//   DI не в window · F-65 единый t.me-регэксп · F-66 SW: точный isShellAsset,
+//   cacheName, без двойного skipWaiting · F-67 хвосты без голых catch.
+//   Частично: F-29 (пустой пароль NIP-49; импорт-валидация конфига — нет) ·
+//   F-33 (дихотомия 2500/10000 задокументирована) · F-46 (5 cssText→классы
+//   из 38) · F-48 (реестр событий синхронизирован частично) · F-55 (Config-
+//   ключи и ed.chars удалены; 8 мёртвых i18n-ключей остались) · F-60 (а,б,в;
+//   тема Telegram — нет) · F-61 (toast/seg/netTxt; фокус-трап/Enter — нет) ·
+//   F-63 (в: blob-URL; очереди/эпохи — нет) · F-68 (noscript+description;
+//   PWA-хвосты манифеста — нет).
+//   Отложено (см. VERIFICATION-87.md): F-16, F-17, F-18, F-22, F-26, F-27,
+//   F-37, F-38, F-39, F-40, F-56, F-57, F-58.
 // v1.0.11 — последний патч линейке 1.0.x (базовая точка аудита).
 // v1.0.0 «Чистый лист» — старт модели v1.
 //
@@ -41,7 +69,7 @@
 
 'use strict';
 
-const APP_VERSION = '1.1.0';
+const APP_VERSION = '1.1.1';
 
 // ═══ РЕЕСТР СОБЫТИЙ ШИНЫ (полный контракт) ════════════════════════════════════
 //
@@ -69,12 +97,14 @@ const APP_VERSION = '1.1.0';
 // note:open     FeedView, BaseView, модалки → NoteView  {uid}
 // notes:imported Account → Notes               {maxVersion}
 //
-// account:changed Account → NetService(сброс), AccountView(ре-открыть) {pubkey}
+// account:changed Account → NetService(сброс), AccountView(ре-открыть),
+//               Context(сброс пина/ввода, F-19) {pubkey}
 // i18n:change   I18n → все UI-модули            {lang}
 // influence:updated Influence → FeedView
 // mirror:fetch  Mirror → NetService             {uid, owner}
-// wipe:request  MenuView → Boot                 (локальная очистка + сетевой wipe)
-// telegram:theme TelegramAdapter → (резерв)
+// wipe:request  MenuView → Boot, Context(сброс, F-19) (локальная очистка + сетевой wipe)
+// gate:done     FirstRunGate → Onboarding (отложенный показ, F-08)
+// telegram:theme TelegramAdapter → (зарезервировано; тема применяется напрямую)
 //
 // view, seg, sendMode, context, feed, lists — ТОЛЬКО через Store.subscribe.
 // Событий view:changed / view:set / editor:sent / config:imported НЕТ.
@@ -211,6 +241,18 @@ DI.register('Utils', function () {
     symbols: (n, l) => n + ' ' + (l === 'en' ? plural(n, 'char', 'chars', 'chars') : plural(n, 'символ', 'символа', 'символов')),
   };
 
+  // F-65 (закрыто): единый источник истины для валидации t.me-ссылок —
+  // раньше литерал регэкспа дублировался в Protocol/FeedView/NoteView.
+  const TELEGRAM_SRC_RE = /^https:\/\/t\.me\/[A-Za-z0-9_]+\/\d+$/;
+
+  // F-62 (закрыто): единая формула диапазона «озарений» — раньше дубли
+  // жили в Ranker.bounds (без вызовов) и локально в FeedView.signalBadge.
+  function signalBounds(threshold, serendipity) {
+    const t = typeof threshold === 'number' ? threshold : 0.81;
+    const s = typeof serendipity === 'number' ? serendipity : 0.07;
+    return { threshold: t, lowerBound: t - s, midBound: t - s / 2 };
+  }
+
   function word(key, n, lang) {
     const fn = words[key];
     return fn ? fn(n, lang) : String(n);
@@ -295,7 +337,7 @@ DI.register('Utils', function () {
     return debounced;
   }
 
-  return { plural, word, fmtDate, fmtTime, fmtRelativeTime, shortPk, uid, debounce };
+  return { plural, word, fmtDate, fmtTime, fmtRelativeTime, shortPk, uid, debounce, TELEGRAM_SRC_RE, signalBounds };
 }, []);
 // ─── CORE/Utils ─── END ─────────────────────────────────────────────────────
 
@@ -383,7 +425,8 @@ DI.register('I18n', function (Config, bus) {
     'progress.skip': 'Продолжить без ИИ',
 
     'ed.placeholder': 'О чём думаешь?',
-    'ed.chars': 'симв.',
+    'ed.aria': 'Текст заметки',
+    'ed.mode.aria': 'Режим видимости',
     'ed.limit.soft': 'Для точного поиска пиши короче',
     'ed.limit.hard': 'Вектор обрезается, качество поиска низкое',
     'ed.limit.max': 'Максимум {max} символов',
@@ -439,6 +482,8 @@ DI.register('I18n', function (Config, bus) {
     'empty.base.empty': 'Ничего не найдено',
 
     'base.search': 'поиск...',
+    'base.search.aria': 'Поиск по базе',
+    'base.sort.aria': 'Сортировка',
     'base.sort.new': 'новые',
     'base.sort.old': 'старые',
     'base.sort.az': 'а-я',
@@ -457,6 +502,7 @@ DI.register('I18n', function (Config, bus) {
     'btn.pin.aria': 'Закрепить для поиска',
     'btn.cancel': 'Отмена',
     'btn.close': 'Закрыть',
+    'btn.confirm.ok': 'ОК',
     'btn.toggle.priv': 'Скрыть',
     'btn.toggle.pub': 'Открыть',
 
@@ -513,7 +559,14 @@ DI.register('I18n', function (Config, bus) {
     'account.nsec.hint': 'Никому не показывайте ключ. Если кто-то его получит — он станет вами.',
     'account.exported.mark': 'Ключ показан и скопирован',
     'account.password.set': 'Пароль',
-    'account.password.hint': 'Пароль шифрует ключ (NIP-49). Оставьте пустым — без шифрования.',
+    'account.password.hint': 'Пароль шифрует ключ (NIP-49). Без пароля ключ в архив не попадёт.',
+    'account.encrypt.storage': 'Шифрование хранилища',
+    'account.encrypt.on': 'Ключ на этом устройстве хранится зашифрованным (NIP-49). При каждом запуске приложение запросит пароль.',
+    'account.encrypt.off': 'Ключ на этом устройстве лежит открытым текстом — любой скрипт или расширение может его прочитать. Задай пароль: ключ будет зашифрован (NIP-49), при каждом запуске потребуется пароль.',
+    'account.encrypt.btn': 'Зашифровать ключ',
+    'account.encrypt.pass.ph': 'Пароль для шифрования (не восстанавливается)',
+    'account.encrypt.ok': 'Хранилище ключа зашифровано',
+    'account.encrypt.fail': 'Не удалось зашифровать: нужен непустой пароль',
     'account.enter.title': 'Вход по ключу',
     'account.enter.desc': 'Вставьте ключ (nsec… или ncryptsec…) с другого устройства. Текущие заметки и ключ будут заменены.',
     'account.enter.placeholder': 'nsec… или ncryptsec…',
@@ -528,6 +581,7 @@ DI.register('I18n', function (Config, bus) {
     'account.export.desc': 'Файл или буфер обмена с заметками и настройками.',
     'account.export.withkey': 'Включить ключ',
     'account.export.withkey.hint': 'С ключом архив восстановит аккаунт целиком. Без ключа — только заметки на текущем аккаунте.',
+    'account.export.nokey': 'Ключ НЕ включён: шифрование недоступно — задайте пароль. Архив только с заметками.',
     'account.import.title': 'Импорт',
     'account.import.desc': 'Заметки из архива будут добавлены (совпадающие по id — обновлены).',
     'account.import.file': 'Загрузить файл',
@@ -588,6 +642,11 @@ DI.register('I18n', function (Config, bus) {
     'gate.enter.sub': 'Вставьте ключ (nsec… или ncryptsec…) с другого устройства.',
     'gate.enter.wrong': 'Ключ не распознан',
     'gate.enter.ok': 'Войти',
+    'gate.unlock.title': 'Ключ зашифрован',
+    'gate.unlock.sub': 'Твой ключ хранится в зашифрованном виде (NIP-49). Введи пароль, чтобы разблокировать аккаунт.',
+    'gate.unlock.btn': 'Разблокировать',
+    'gate.unlock.wrong': 'Неверный пароль',
+    'gate.unlock.hint': 'Пароль не восстанавливается. Без него ключ не расшифровать — доступ к аккаунту будет утерян навсегда.',
 
     'time.now': 'только что',
     'time.min.one': 'минуту назад',
@@ -616,7 +675,8 @@ DI.register('I18n', function (Config, bus) {
     'progress.skip': 'Continue without AI',
 
     'ed.placeholder': 'What are you thinking?',
-    'ed.chars': 'chars',
+    'ed.aria': 'Note text',
+    'ed.mode.aria': 'Visibility mode',
     'ed.limit.soft': 'Shorter text = more precise search',
     'ed.limit.hard': 'Vector will be truncated, search quality drops',
     'ed.limit.max': 'Maximum {max} characters',
@@ -672,6 +732,8 @@ DI.register('I18n', function (Config, bus) {
     'empty.base.empty': 'Nothing found',
 
     'base.search': 'search...',
+    'base.search.aria': 'Search the base',
+    'base.sort.aria': 'Sorting',
     'base.sort.new': 'newest',
     'base.sort.old': 'oldest',
     'base.sort.az': 'a-z',
@@ -690,6 +752,7 @@ DI.register('I18n', function (Config, bus) {
     'btn.pin.aria': 'Pin for search',
     'btn.cancel': 'Cancel',
     'btn.close': 'Close',
+    'btn.confirm.ok': 'OK',
     'btn.toggle.priv': 'Hide',
     'btn.toggle.pub': 'Share',
 
@@ -746,7 +809,14 @@ DI.register('I18n', function (Config, bus) {
     'account.nsec.hint': 'Never show your key to anyone. Whoever gets it becomes you.',
     'account.exported.mark': 'Key shown and copied',
     'account.password.set': 'Password',
-    'account.password.hint': 'Password encrypts the key (NIP-49). Leave empty — no encryption.',
+    'account.password.hint': 'Password encrypts the key (NIP-49). Without a password the key is not included in the archive.',
+    'account.encrypt.storage': 'Storage encryption',
+    'account.encrypt.on': 'The key on this device is stored encrypted (NIP-49). The app asks for the password on every launch.',
+    'account.encrypt.off': 'The key on this device is stored in plain text — any script or extension can read it. Set a password: the key gets encrypted (NIP-49), the password is required on every launch.',
+    'account.encrypt.btn': 'Encrypt key',
+    'account.encrypt.pass.ph': 'Encryption password (cannot be recovered)',
+    'account.encrypt.ok': 'Key storage encrypted',
+    'account.encrypt.fail': 'Failed to encrypt: a non-empty password is required',
     'account.enter.title': 'Sign in with key',
     'account.enter.desc': 'Paste a key (nsec… or ncryptsec…) from another device. Current notes and key will be replaced.',
     'account.enter.placeholder': 'nsec… or ncryptsec…',
@@ -761,6 +831,7 @@ DI.register('I18n', function (Config, bus) {
     'account.export.desc': 'File or clipboard with your notes and settings.',
     'account.export.withkey': 'Include key',
     'account.export.withkey.hint': 'With the key the archive restores the whole account. Without it — only notes on the current account.',
+    'account.export.nokey': 'Key NOT included: encryption unavailable — set a password. Notes-only archive.',
     'account.import.title': 'Import',
     'account.import.desc': 'Notes from the archive will be added (matching ids updated).',
     'account.import.file': 'Load file',
@@ -821,6 +892,11 @@ DI.register('I18n', function (Config, bus) {
     'gate.enter.sub': 'Paste a key (nsec… or ncryptsec…) from another device.',
     'gate.enter.wrong': 'Key not recognized',
     'gate.enter.ok': 'Sign in',
+    'gate.unlock.title': 'Key encrypted',
+    'gate.unlock.sub': 'Your key is stored encrypted (NIP-49). Enter the password to unlock the account.',
+    'gate.unlock.btn': 'Unlock',
+    'gate.unlock.wrong': 'Wrong password',
+    'gate.unlock.hint': 'The password cannot be recovered. Without it the key cannot be decrypted — access to the account is lost forever.',
 
     'time.now': 'just now',
     'time.min.one': 'min ago',
@@ -1615,6 +1691,60 @@ DI.register('DB', function (Config, bus, Logger) {
   }
 
   /**
+   * F-20 (закрыто): атомарный условный put — проверка version и запись
+   * выполняются В ОДНОЙ транзакции (cursor.update), поэтому конкурентная
+   * запись из другой вкладки/канона не может проскочить между проверкой
+   * и записью (LWW-инверсия закрыта). true — запись применена.
+   * @param {Object} note
+   * @param {number} expectedVersion
+   * @returns {Promise<boolean>}
+   */
+  function putNoteIfVersion(note, expectedVersion) {
+    return open().then(d => {
+      if (!d) {
+        // Мем-режим: проверки и запись атомарны в рамках одного тика.
+        const cur = memNotes.get(note.uid);
+        if (!cur || (typeof cur.version === 'number' ? cur.version : 0) !== expectedVersion) {
+          return false;
+        }
+        memNotes.set(note.uid, note);
+        ownUids.add(note.uid);
+        emitChange();
+        return true;
+      }
+      return new Promise((res, rej) => {
+        let applied = false;
+        try {
+          const tx = d.transaction(NOTES(), 'readwrite');
+          const store = tx.objectStore(NOTES());
+          const req = store.openCursor(note.uid);
+          req.onsuccess = () => {
+            const cursor = req.result;
+            if (!cursor) return;
+            const cur = cursor.value;
+            if ((typeof cur.version === 'number' ? cur.version : 0) !== expectedVersion) return;
+            const upd = cursor.update(note);
+            upd.onsuccess = () => { applied = true; };
+            upd.onerror = () => rej(upd.error);
+          };
+          req.onerror = () => rej(req.error);
+          tx.oncomplete = () => {
+            if (applied) {
+              ownUids.add(note.uid);
+              emitChange();
+            }
+            res(applied);
+          };
+          tx.onerror = () => rej(tx.error || req.error);
+          tx.onabort = () => rej(tx.error || req.error);
+        } catch (e) {
+          rej(e);
+        }
+      });
+    });
+  }
+
+  /**
    * @param {Object} note
    * @returns {Promise<string>}
    */
@@ -2091,6 +2221,7 @@ DI.register('DB', function (Config, bus, Logger) {
 
   return {
     putNote,
+    putNoteIfVersion,
     getNote,
     delNote,
     allNotes,
@@ -2552,7 +2683,7 @@ self.onmessage = async function (e) {
  * серендипити-полосы сигнала больше не дублируется самодельной
  * формулой в FeedView).
  */
-DI.register('Ranker', function (Vec, Config) {
+DI.register('Ranker', function (Vec, Config, Utils) {
   /**
    * @param {Float32Array|number[]} queryVector
    * @param {Array<{id: string, vector: Array|Float32Array}>} items
@@ -2626,17 +2757,12 @@ DI.register('Ranker', function (Vec, Config) {
    * @returns {{threshold: number, lowerBound: number, midBound: number}}
    */
   function bounds() {
-    const threshold = Config.get('threshold', 0.81);
-    const serendipity = Config.get('serendipity', 0.07);
-    return {
-      threshold,
-      lowerBound: threshold - serendipity,
-      midBound: threshold - serendipity / 2,
-    };
+    // F-62: формула в одном месте — Utils.signalBounds.
+    return Utils.signalBounds(Config.get('threshold', 0.81), Config.get('serendipity', 0.07));
   }
 
   return { cosineBatch, split, isSimilar, bounds };
-}, ['Vec', 'Config']);
+}, ['Vec', 'Config', 'Utils']);
 // ─── AI/Ranker ─── END ──────────────────────────────────────────────────────
 
 // ═══ СЛОЙ: NET ═══════════════════════════════════════════════════════════════
@@ -3251,14 +3377,22 @@ DI.register('Crypto', function (Nostr, Logger) {
  * Контракт v1.0 сохранён: canonDeleted(uid, version) с noteVersion,
  * decodeQuery с капом 1024.
  */
-DI.register('Protocol', function (Config, Vec, Vault, Nostr) {
+DI.register('Protocol', function (Config, Vec, Vault, Nostr, Utils) {
   /** @type {number} */
   const MAX_CONTENT = 65536;
   /** @type {number} */
   const MAX_QUERY_DIM = 1024;
+  /**
+   * F-31 (закрыто): ts на границе протокола — всегда миллисекунды.
+   * Секундные значения (created_at/version) домножаются; ms проходят как есть.
+   * @param {number} x
+   * @returns {number}
+   */
+  const toMs = x => (typeof x === 'number' && x > 0 ? (x > 1e12 ? x : x * 1000) : 0);
+
 
   // v1.0.9: src-валидация — только https://t.me/канал/пост.
-  const SRC_RE = /^https:\/\/t\.me\/[A-Za-z0-9_]+\/\d+$/;
+  const SRC_RE = Utils.TELEGRAM_SRC_RE; // F-65: единый регэксп из Utils
 
   /**
    * @param {Array} tags
@@ -3300,7 +3434,8 @@ DI.register('Protocol', function (Config, Vec, Vault, Nostr) {
       src: note.src || null,
       parent: note.parent || null,
       noteVersion: note.version,
-      ts: note.updatedAt || note.version,
+      // F-31: приведение к ms (раньше version в секундах попадал в ts как есть)
+      ts: toMs(note.updatedAt || note.version * 1000),
     };
 
     const content = await Vault.seal(JSON.stringify(payload));
@@ -3331,7 +3466,8 @@ DI.register('Protocol', function (Config, Vec, Vault, Nostr) {
       src: note.src || null,
       parent: note.parent || null,
       noteVersion: note.version,
-      ts: note.updatedAt || note.version,
+      // F-31: приведение к ms
+      ts: toMs(note.updatedAt || note.version * 1000),
     };
 
     return {
@@ -3405,7 +3541,7 @@ DI.register('Protocol', function (Config, Vec, Vault, Nostr) {
           return null;
         }
       } else {
-        return { uid, owner, version, visibility: 'private', ts: version * 1000 };
+        return { uid, owner, version, visibility: 'private', ts: toMs(version) };
       }
     }
 
@@ -3416,7 +3552,7 @@ DI.register('Protocol', function (Config, Vec, Vault, Nostr) {
       : 'private';
 
     if (visibility === 'private' && owner !== Nostr.getPubkey()) {
-      return { uid, owner, version, visibility: 'private', ts: version * 1000 };
+      return { uid, owner, version, visibility: 'private', ts: toMs(version) };
     }
 
     const noteVersion = typeof data.noteVersion === 'number' && data.noteVersion > 0
@@ -3425,7 +3561,7 @@ DI.register('Protocol', function (Config, Vec, Vault, Nostr) {
 
     if (visibility === 'deleted') {
       return { uid, owner, version, noteVersion, visibility, deleted: true,
-               ts: typeof data.ts === 'number' && data.ts > 0 ? data.ts : version * 1000 };
+               ts: toMs(typeof data.ts === 'number' && data.ts > 0 ? data.ts : version) };
     }
 
     if (typeof data.text !== 'string') return null;
@@ -3492,7 +3628,11 @@ DI.register('Protocol', function (Config, Vec, Vault, Nostr) {
 
     return {
       vector: data.vector,
-      maxResponses: typeof data.maxResponses === 'number' ? data.maxResponses : Config.get('maxResponses', 8),
+      // F-15 (закрыто): верхний кап на чужой maxResponses — иначе злонамеренный
+      // query может попросить 10^6 ответов и устроить DoS чужих клиентов.
+      maxResponses: typeof data.maxResponses === 'number'
+        ? Math.min(Math.max(1, Math.floor(data.maxResponses)), 64)
+        : Config.get('maxResponses', 8),
       window: typeof data.window === 'number' ? data.window : Config.get('responseWindow', 6000),
       owner: ev.pubkey,
       queryId: ev.id,
@@ -3553,7 +3693,7 @@ DI.register('Protocol', function (Config, Vec, Vault, Nostr) {
     answerEvent,
     decodeAnswer,
   };
-}, ['Config', 'Vec', 'Vault', 'Nostr']);
+}, ['Config', 'Vec', 'Vault', 'Nostr', 'Utils']);
 // ─── NET/Protocol ─── END ───────────────────────────────────────────────────
 
 // ─── NET/NetService ─── START ───────────────────────────────────────────────
@@ -3629,6 +3769,8 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   }
 
   let queue = loadQueue();
+  /** @type {string|null} последний отправленный статус (F-35: дедуп эмитов) */
+  let lastStatus = null;
 
   const kCanon = () => Config.get('kCanon', 30078);
   const kQuery = () => Config.get('kQuery', 21000);
@@ -3639,6 +3781,8 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
    * @param {string} s
    */
   function setStatus(s) {
+    if (lastStatus === s) return; // F-35 (закрыто): эмитим только реальное изменение статуса
+    lastStatus = s;
     try { bus.emit('net:status', { status: s }); } catch (_) {}
   }
 
@@ -3791,7 +3935,19 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   /**
    * Перестройка центроидов.
    */
+  // F-36 (закрыто): пересборка центроидов дебаунсится (500мс) — всплеск
+  // db:change (импорт/бэкфилл) больше не гоняет allNotes+kmeans×8 на каждую запись.
+  let centroidTimer = 0;
+
   function rebuildCentroids() {
+    if (centroidTimer) return;
+    centroidTimer = setTimeout(() => {
+      centroidTimer = 0;
+      rebuildCentroidsNow();
+    }, 500);
+  }
+
+  function rebuildCentroidsNow() {
     DB.allNotes().then(notes => {
       const vecs = notes.filter(n => n.visibility === 'public' && n.vector).map(n => n.vector);
       if (!vecs.length) {
@@ -3840,12 +3996,24 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
    * Водяной знак общей свежести.
    * @param {Object} ev
    */
+  // F-34 (закрыто): запись lastSeen дебаунсится — массовый снапшот истории
+  // больше не делает N×JSON.stringify+setItem в главном потоке.
+  let lastSeenTimer = 0;
+  let lastSeenPending = 0;
+
   function trackLastSeen(ev) {
     if (!ev || typeof ev.created_at !== 'number') return;
-    const prev = Config.get('lastSeen', 0);
-    if (ev.created_at > prev) {
-      Config.set('lastSeen', ev.created_at);
+    if (ev.created_at > lastSeenPending) {
+      lastSeenPending = ev.created_at;
     }
+    if (lastSeenTimer) return;
+    lastSeenTimer = setTimeout(() => {
+      lastSeenTimer = 0;
+      const prev = Config.get('lastSeen', 0);
+      if (lastSeenPending > prev) {
+        Config.set('lastSeen', lastSeenPending);
+      }
+    }, 2000);
   }
 
   /**
@@ -4059,6 +4227,11 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
       {
         onevent: ev => {
           if (!ev || !ev.id) return;
+          // F-14 (закрыто): self-события идут через общий дедуп — раньше
+          // room+self подписки обрабатывали один и тот же канон дважды.
+          if (seen.has(ev.id)) return;
+          seen.add(ev.id);
+          trimSeen();
           try { bus.emit('net:canon', ev); } catch (_) {}
         },
         onclose: () => {
@@ -4114,6 +4287,9 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
             [{ kinds: [kCanon()], '#t': [room()], since: until - 86400 * 90, until, limit: batch }],
             {
               onevent: ev => {
+                // F-03 (закрыто): прямая подписка обязана верифицировать подпись —
+                // SimplePool этот путь не покрывает. Фальшивые события отбрасываются.
+                if (!verify(ev)) return;
                 if (ev && ev.kind === kCanon() && !seen.has(ev.id)) got++;
                 onEvent(ev);
               },
@@ -4495,6 +4671,8 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
 DI.register('Notes', function (DB, Embedder, bus, Logger, Utils) {
   /** @type {number} */
   let versionCounter = 0;
+  /** @type {boolean} флаг одноразовой регистрации слушателя (F-28) */
+  let notesImportedBound = false;
 
   /**
    * @param {string} event
@@ -4521,11 +4699,16 @@ DI.register('Notes', function (DB, Embedder, bus, Logger, Utils) {
     const now = Math.floor(Date.now() / 1000);
     if (versionCounter < now) versionCounter = now;
 
-    bus.on('notes:imported', p => {
-      if (p && typeof p.maxVersion === 'number' && p.maxVersion > versionCounter) {
-        versionCounter = p.maxVersion;
-      }
-    });
+    // F-28 (закрыто): init вызывается повторно после смены аккаунта
+    // (NetService.stop+start) — слушатель notes:imported регистрируем один раз.
+    if (!notesImportedBound) {
+      notesImportedBound = true;
+      bus.on('notes:imported', p => {
+        if (p && typeof p.maxVersion === 'number' && p.maxVersion > versionCounter) {
+          versionCounter = p.maxVersion;
+        }
+      });
+    }
   }
 
   /**
@@ -4687,6 +4870,8 @@ DI.register('Notes', function (DB, Embedder, bus, Logger, Utils) {
 
     const incoming = effVersion(canonical);
     if (incoming <= cur.version) return false;
+    /** версия ДО применения — для атомарной сверки (F-20) */
+    const prevVersion = typeof cur.version === 'number' ? cur.version : 0;
 
     if (typeof canonical.text === 'string') cur.text = canonical.text;
     cur.vector = canonical.vec || null; // null → backfill
@@ -4700,7 +4885,10 @@ DI.register('Notes', function (DB, Embedder, bus, Logger, Utils) {
     cur.updatedAt = Date.now();
 
     try {
-      await DB.putNote(cur);
+      // F-20 (закрыто): атомарная запись — версия сверяется в той же
+      // транзакции, что и запись (мимо гонки «проверка→запись»).
+      const applied = await DB.putNoteIfVersion(cur, prevVersion);
+      if (!applied) return false; // конкурент успел записать свою версию
     } catch (e) {
       Logger.warn('Notes: applyOwnCanonical — не записать', String(e && e.message || e));
       return false;
@@ -4765,18 +4953,39 @@ DI.register('Notes', function (DB, Embedder, bus, Logger, Utils) {
     let count = 0;
 
     for (const n of notes) {
-      if (!n || n.vector || !n.text) continue;
+      // F-32 (закрыто): vector=[] считается ОТСУТСТВУЮЩИМ вектором —
+      // пустой массив больше не блокирует доэмбеддинг навсегда.
+      if (!n || (n.vector && n.vector.length) || !n.text) continue;
 
       const v = await Embedder.embed(n.text);
       if (!v) continue; // модель снова не ответила — лечим на следующем ai:ready
 
-      n.vector = Array.from(v);
-      n.version = nextVersion();
-      n.updatedAt = Date.now();
+      // F-06 (закрыто): lost-update guard. За время эмбеддинга (секунды)
+      // пользователь мог отредактировать/удалить заметку — перечитываем
+      // актуальное состояние и отступаем, если что-то изменилось.
+      let fresh;
+      try {
+        fresh = await DB.getNote(n.uid);
+      } catch (e) {
+        Logger.warn('Notes: backfill — не перечитать ' + n.uid, String(e && e.message || e));
+        continue;
+      }
+      if (!fresh || fresh.vector || fresh.version !== n.version || fresh.text !== n.text) {
+        continue; // заметка изменилась или удалена — не затираем чужие правки
+      }
+
+      // F-20: версия ДО записи (равна n.version — проверено выше) для атомарной сверки
+      const expectedPrev = fresh.version;
+      fresh.vector = Array.from(v);
+      fresh.version = nextVersion();
+      fresh.updatedAt = Date.now();
 
       try {
-        await DB.putNote(n);
-        emit('note:updated', n);
+        // F-06/F-20 (закрыто): атомарная запись — если версия изменилась
+        // за время эмбеддинга, putNoteIfVersion вернёт false и правки не затрутся.
+        const applied = await DB.putNoteIfVersion(fresh, expectedPrev);
+        if (!applied) continue;
+        emit('note:updated', fresh);
         count++;
       } catch (e) {
         Logger.warn('Notes: backfill — не записать ' + n.uid, String(e && e.message || e));
@@ -5156,6 +5365,14 @@ DI.register('Context', function (Store, Embedder, Config, Utils, bus) {
     bus.on('note:pin', note => {
       if (note) setPin(note);
     });
+    // F-19 (закрыто): смена аккаунта/полная очистка сбрасывают пин и ввод —
+    // пин старого аккаунта больше не уезжает parent'ом в сеть нового.
+    bus.on('account:changed', () => {
+      clear();
+    });
+    bus.on('wipe:request', () => {
+      clear();
+    });
   }
 
   return {
@@ -5238,7 +5455,15 @@ DI.register('Feed', function (DB, Ranker, Store, bus, Logger, Utils, Config) {
         return;
       }
 
-      if (!ctx.vector) return;
+      // F-21 (закрыто): контекст есть, вектора нет (модель грузится/недоступна) —
+      // НЕ показываем протухшие результаты предыдущего поиска под новым баннером.
+      if (!ctx.vector) {
+        Store.setState({
+          feed: [],
+          lists: { local: [], world: [], seren: [] },
+        });
+        return;
+      }
 
       const all = [...ownNotes, ...foreignPublic]
         .filter(n => !isPin(n, pinUid, pinOwner));
@@ -5337,6 +5562,23 @@ DI.register('Provenance', function (DB, bus, Nostr) {
   const cache = new Map();
   const CACHE_TTL = 5000;
   const CACHE_MAX = 100;
+
+  // F-10 (закрыто): общий снимок «notes+mirror+индекс» с TTL. Раньше
+  // hasResolvableParent делал полный скан БД (allNotes+allMirror) на КАЖДУЮ
+  // карточку ленты → N×2 голых getAll на каждый рендер; теперь — один снимок
+  // на окно TTL, инвалидация по db:change/db:mirror (см. clearCache).
+  let snapPromise = null;
+  let snapTime = 0;
+
+  function loadSnapshot() {
+    if (snapPromise && Date.now() - snapTime < CACHE_TTL) return snapPromise;
+    snapTime = Date.now();
+    snapPromise = loadAll().then(
+      list => ({ list, idx: buildIndex(list) }),
+      err => { snapPromise = null; snapTime = 0; throw err; }
+    );
+    return snapPromise;
+  }
 
   /**
    * Все заметки: свои (notes, полные) + чужой живой mirror.
@@ -5457,8 +5699,9 @@ DI.register('Provenance', function (DB, bus, Nostr) {
       return cached.chain;
     }
 
-    const all = await loadAll();
-    const idx = buildIndex(all);
+    // F-10: переиспользуем общий снимок — индекс не пересобирается заново.
+    const snap = await loadSnapshot();
+    const idx = snap.idx;
 
     let current = idx.get(uid) || null;
     const chain = [];
@@ -5488,10 +5731,7 @@ DI.register('Provenance', function (DB, bus, Nostr) {
       return Promise.resolve(false);
     }
 
-    return loadAll().then(all => {
-      const idx = buildIndex(all);
-      return !!resolveParent(note, idx);
-    });
+    return loadSnapshot().then(snap => !!resolveParent(note, snap.idx));
   }
 
   /**
@@ -5499,6 +5739,8 @@ DI.register('Provenance', function (DB, bus, Nostr) {
    */
   function clearCache() {
     cache.clear();
+    snapPromise = null; // F-10: снимок тоже инвалидируется
+    snapTime = 0;
   }
 
   bus.on('db:change', clearCache);
@@ -5631,7 +5873,7 @@ DI.register('Influence', function (DB, bus, Logger, Utils, Config) {
  * переочередит всё неопубликованное, note:created-хендлеры ловят
  * остальное), экспорт v3, whitelist-конфиг, setSyncEnabled.
  */
-DI.register('Account', function (Config, Nostr, Crypto, DB, bus, Logger) {
+DI.register('Account', function (Config, Nostr, Crypto, DB, bus, Logger, Toast, I18n) {
   /** @type {Array<string>} */
   const CONFIG_WHITELIST = [
     'threshold',
@@ -5763,6 +6005,9 @@ DI.register('Account', function (Config, Nostr, Crypto, DB, bus, Logger) {
     let vector = null;
     if (Array.isArray(n.vector)) {
       vector = n.vector.filter(x => typeof x === 'number' && isFinite(x));
+      // F-32 (закрыто): пустой/выродившийся вектор = отсутствующий,
+      // чтобы «пустой вектор навсегда» не лечился только полным сбросом.
+      if (!vector.length) vector = null;
     }
 
     let parent = null;
@@ -5807,9 +6052,16 @@ DI.register('Account', function (Config, Nostr, Crypto, DB, bus, Logger) {
       });
 
       if (includeKey) {
-        archive.ncryptsec = await getWrappedKey(keyPassword);
-        if (!archive.ncryptsec) {
-          return null;
+        const wrapped = await getWrappedKey(keyPassword);
+        // F-04 (закрыто): в архив кладём ТОЛЬКО зашифрованный ncryptsec.
+        // Голый nsec в файл не попадает ни при каких условиях: если NIP-49
+        // недоступен или пароль пуст — архив выходит без ключа + предупреждение.
+        if (wrapped && typeof wrapped === 'string' && wrapped.startsWith('ncryptsec')) {
+          archive.ncryptsec = wrapped;
+        } else {
+          archive.ncryptsec = null;
+          Logger.warn('Account: экспорт ключа пропущен — NIP-49/пароль недоступны');
+          Toast.show('warn', I18n.t('account.export.nokey'));
         }
       }
 
@@ -5947,7 +6199,7 @@ DI.register('Account', function (Config, Nostr, Crypto, DB, bus, Logger) {
     importArchive,
     setSyncEnabled,
   };
-}, ['Config', 'Nostr', 'Crypto', 'DB', 'EventBus', 'Logger']);
+}, ['Config', 'Nostr', 'Crypto', 'DB', 'EventBus', 'Logger', 'Toast', 'I18n']);
 // ─── DOMAIN/Account ─── END ─────────────────────────────────────────────────
 
 // ═══ СЛОЙ: UI ═════════════════════════════════════════════════════════════════
@@ -6034,12 +6286,22 @@ DI.register('Modal', function (I18n) {
 
     if (escHandler) document.removeEventListener('keydown', escHandler);
     escHandler = e => {
-      if (e.key === 'Escape') close();
+      if (e.key !== 'Escape') return;
+      // F-08 (закрыто): пока гейт первого запуска активен — ESC принадлежит
+      // гейту, модалка (визуально под ним) молча не закрывается.
+      const gate = document.getElementById('gate');
+      if (gate && gate.classList.contains('on')) return;
+      close();
     };
     document.addEventListener('keydown', escHandler);
 
     setTimeout(() => {
       if (!modal) return;
+      // F-08 (закрыто): не крадём фокус из поля гейта/прогресса, пока они поверх.
+      const gate = document.getElementById('gate');
+      if (gate && gate.classList.contains('on')) return;
+      const prog = document.getElementById('progress');
+      if (prog && prog.classList.contains('on')) return;
       const focusable = modal.querySelectorAll('button, input, textarea, [tabindex]:not([tabindex="-1"])');
       if (focusable.length) focusable[0].focus();
     }, 50);
@@ -6078,7 +6340,7 @@ DI.register('Modal', function (I18n) {
       buttons: [
         { text: I18n.t('btn.cancel'), onClick: close },
         {
-          text: okText || 'OK',
+          text: okText || I18n.t('btn.confirm.ok'), // F-67: без молчаливого захардкоженного 'OK'
           primary: !o.danger,
           danger: !!o.danger,
           onClick: () => {
@@ -6135,6 +6397,9 @@ DI.register('Toast', function (Config) {
 
     const el = document.createElement('div');
     el.className = 'toast ' + cls;
+    // F-61 (закрыто): тост объявляется скринридеру (ошибки — настойчиво)
+    el.setAttribute('role', cls === 'err' ? 'alert' : 'status');
+    el.setAttribute('aria-live', cls === 'err' ? 'assertive' : 'polite');
 
     const ic = document.createElement('span');
     ic.className = 't-ic';
@@ -6388,6 +6653,9 @@ DI.register('HeaderStatus', function (bus, I18n, Embedder) {
 
     if (netTxt) {
       netTxt.style.cursor = 'pointer';
+      // F-61 (закрыто): кликабельный статус сети — семантика кнопки + клавиатура
+      netTxt.setAttribute('role', 'button');
+      netTxt.setAttribute('tabindex', '0');
       netTxt.addEventListener('click', () => {
         try {
           const NetService = DI.resolve('NetService');
@@ -6396,6 +6664,12 @@ DI.register('HeaderStatus', function (bus, I18n, Embedder) {
             setTimeout(() => NetService.start(), 500);
           }
         } catch (_) {}
+      });
+      netTxt.addEventListener('keydown', e => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          netTxt.click();
+        }
       });
     }
 
@@ -6441,14 +6715,15 @@ DI.register('HeaderStatus', function (bus, I18n, Embedder) {
  * модель готова ИЛИ 30с, что раньше. Прогресс больше не блокирует
  * интерфейс, онбординг не блокирует знакомство с приложением.
  */
-DI.register('Onboarding', function (Config, Modal, I18n, Embedder) {
+DI.register('Onboarding', function (Config, Modal, I18n, Embedder, bus) {
   /**
    * @param {boolean} firstRun
    * @returns {{el: Element, checkbox: HTMLInputElement|null}}
    */
   function buildBody(firstRun) {
+    // F-45/F-46 (закрыто): стили — классами §21 style.css, а не cssText-дублями.
     const el = document.createElement('div');
-    el.style.cssText = 'display:flex;flex-direction:column;gap:14px;';
+    el.className = 'onb-list';
 
     const sections = [
       ['◇ ' + I18n.t('onb.what.t'), I18n.t('onb.what.d')],
@@ -6464,11 +6739,11 @@ DI.register('Onboarding', function (Config, Modal, I18n, Embedder) {
     sections.forEach(([title, desc]) => {
       const s = document.createElement('div');
       const t = document.createElement('div');
-      t.style.cssText = 'font-weight:700;font-size:13px;margin-bottom:3px;';
+      t.className = 'onb-sec-title';
       t.textContent = title;
 
       const d = document.createElement('div');
-      d.style.cssText = 'font-size:13px;color:var(--text-2);line-height:1.5;';
+      d.className = 'onb-sec-desc';
       d.textContent = desc;
 
       s.appendChild(t);
@@ -6480,7 +6755,7 @@ DI.register('Onboarding', function (Config, Modal, I18n, Embedder) {
 
     if (firstRun) {
       const label = document.createElement('label');
-      label.style.cssText = 'display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text-2);cursor:pointer;margin-top:4px;';
+      label.className = 'onb-check';
 
       checkbox = document.createElement('input');
       checkbox.type = 'checkbox';
@@ -6521,16 +6796,36 @@ DI.register('Onboarding', function (Config, Modal, I18n, Embedder) {
 
   /**
    * Инициализация: первый запуск → показ (модель готова ИЛИ 30с).
+   * F-08 (закрыто): пока гейт первого запуска активен — онбординг НЕ
+   * открывается под ним и не крадёт фокус: показ откладывается до gate:done.
    */
   function init() {
     if (Config.get('onboarded', false)) return;
 
     let shown = false;
+    let waitingGate = false;
+
     const show = () => {
       if (shown) return;
+      const gate = document.getElementById('gate');
+      if (gate && gate.classList.contains('on')) {
+        waitingGate = true; // гейт ещё активен — ждём его завершения
+        return;
+      }
       shown = true;
       showHelp(true);
     };
+
+    bus.on('gate:done', () => {
+      if (waitingGate && !shown) {
+        setTimeout(() => {
+          if (!shown) {
+            shown = true;
+            showHelp(true);
+          }
+        }, 350); // анимация закрытия гейта — 300мс
+      }
+    });
 
     // Страховка: модель качается долго/сорвалась — знакомство
     // с приложением не должно ждать загрузки.
@@ -6546,7 +6841,7 @@ DI.register('Onboarding', function (Config, Modal, I18n, Embedder) {
   }
 
   return { init, showHelp };
-}, ['Config', 'Modal', 'I18n', 'Embedder']);
+}, ['Config', 'Modal', 'I18n', 'Embedder', 'EventBus']);
 // ─── UI/Onboarding ─── END ──────────────────────────────────────────────────
 
 // ─── UI/Composer ─── START ──────────────────────────────────────────────────
@@ -6660,9 +6955,13 @@ DI.register('Composer', function (Context, Notes, Store, I18n, bus, Toast, Utils
    * дописал — выросло. 6-я строка — скролл внутри.
    */
   function autoGrow() {
-    const LINE = 24;
-    const PAD = 12;
-    const MAX_LINES = 5;
+    // F-50 (закрыто): геометрия читается из живого CSS (line-height/padding/max-height
+    // поля), а не дублируется константами JS↔CSS — дрейф исключён.
+    const cs = window.getComputedStyle(ta);
+    const LINE = Math.max(8, Math.round(parseFloat(cs.lineHeight) || 24));
+    const PAD = Math.max(0, Math.round(parseFloat(cs.paddingTop) || 12));
+    const CSS_MAX = Math.round(parseFloat(cs.maxHeight) || 152);
+    const MAX_LINES = Math.max(1, Math.round((CSS_MAX - PAD * 2) / LINE));
 
     const wasOverflow = ta.style.overflowY;
 
@@ -7021,7 +7320,10 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
     if (!feedEl) return;
 
     if (anchor) {
-      const el = feedEl.querySelector('[data-uid="' + anchor.uid + '"]');
+      // F-24 (закрыто): uid приходит из сети — экранируем для CSS-селектора,
+      // иначе бросок SyntaxError роняет рендер ленты.
+      const uidSel = (typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(anchor.uid) : anchor.uid.replace(/["\\]/g, '\\$&');
+      const el = feedEl.querySelector('[data-uid="' + uidSel + '"]');
       if (el) {
         feedEl.scrollTop = Math.max(0, el.offsetTop - anchor.offset);
         return;
@@ -7111,7 +7413,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
           body.appendChild(treeItem(child, '→' + gen));
         });
       });
-    }).catch(() => {});
+    }).catch(e => { Logger.warn('FeedView: древо (дети)', String(e && e.message || e)); }); // F-67
   }
 
   /**
@@ -7125,7 +7427,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
           body.appendChild(treeItem(c, '↳' + (i + 1)));
         });
       });
-    }).catch(() => {});
+    }).catch(e => { Logger.warn('FeedView: древо (предки)', String(e && e.message || e)); }); // F-67
   }
 
   // ─── Карточка ──────────────────────────────────────────────────────────────
@@ -7147,7 +7449,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
    */
   function validSrc(n) {
     return typeof n.src === 'string'
-      && /^https:\/\/t\.me\/[A-Za-z0-9_]+\/\d+$/.test(n.src)
+      && Utils.TELEGRAM_SRC_RE.test(n.src) // F-65: единый регэксп
       ? n.src : null;
   }
 
@@ -7187,9 +7489,9 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
   function signalBadge(n, isRanked) {
     if (!isRanked || typeof n.score !== 'number') return null;
 
-    const threshold = Config.get('threshold', 0.81);
-    const serendipity = Config.get('serendipity', 0.07);
-    const serenMid = threshold - serendipity / 2;
+    // F-62 (закрыто): формула диапазона — из Utils.signalBounds (единый источник).
+    const b = Utils.signalBounds(Config.get('threshold', 0.81), Config.get('serendipity', 0.07));
+    const serenMid = b.midBound;
     const displayMode = Config.get('similarityDisplay', 'signal');
     const pct = Math.round(n.score * 100);
 
@@ -7248,7 +7550,11 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
   function card(n, isRanked, i) {
     const el = document.createElement('div');
     el.className = 'note' + (isPinnedCard(n) ? ' pinned' : '');
-    el.style.animationDelay = Math.min(i * 25, 300) + 'ms';
+    // F-42 (закрыто): при reduced-motion задержек нет — карточки видны сразу
+    // (CSS гасит анимацию, но fill:both держал элемент невидимым до 300мс).
+    if (!window.matchMedia || !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      el.style.animationDelay = Math.min(i * 25, 300) + 'ms';
+    }
     el.dataset.uid = n.uid;
 
     const txt = document.createElement('div');
@@ -7408,7 +7714,10 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
     }
 
     segBtns.forEach(b => {
-      b.classList.toggle('on', b.getAttribute('data-k') === state.seg);
+      const on = b.getAttribute('data-k') === state.seg;
+      b.classList.toggle('on', on);
+      // F-61 (закрыто): состояние сегмента объявляется скринридеру
+      b.setAttribute('aria-pressed', on ? 'true' : 'false');
     });
 
     cLocal.textContent = state.lists.local.length;
@@ -7509,13 +7818,28 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
   /**
    * Подписки, скролл-листенер, рендер, тикер.
    */
+  // F-11 (закрыто): компараторы для lists/feed. Снапшот создаёт новые
+  // массивы на каждый notify — без компаратора подписки «всегда грязные»
+  // и рендер гоняется на каждый setState (ввод, тикер, статус).
+  const arrEq = (a, b) => {
+    if (Object.is(a, b)) return true;
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) if (!Object.is(a[i], b[i])) return false;
+    return true;
+  };
+  const listsEq = (a, b) => {
+    if (Object.is(a, b)) return true;
+    if (!a || !b) return false;
+    return arrEq(a.local, b.local) && arrEq(a.world, b.world) && arrEq(a.seren, b.seren);
+  };
+
   function init() {
     bind();
     if (!feedEl) return;
 
     unsubs.push(Store.subscribe(s => s.context, scheduleRender, Store.shallowEqual));
-    unsubs.push(Store.subscribe(s => s.lists, scheduleRender));
-    unsubs.push(Store.subscribe(s => s.feed, scheduleRender));
+    unsubs.push(Store.subscribe(s => s.lists, scheduleRender, listsEq));
+    unsubs.push(Store.subscribe(s => s.feed, scheduleRender, arrEq));
     unsubs.push(Store.subscribe(s => s.seg, scheduleRender));
     unsubs.push(bus.on('i18n:change', scheduleRender));
     unsubs.push(bus.on('db:change', scheduleRender));
@@ -7575,6 +7899,8 @@ DI.register('NoteView', function (DB, Notes, NoteActions, I18n, Utils, Toast, bu
   let editMode = false;
   let editTextarea = null;
   let i18nUnsub = null;
+  /** @type {Function|null} отписка note:open (F-25) */
+  let noteOpenUnsub = null;
 
   /**
    * Ленивая привязка к DOM.
@@ -7741,7 +8067,7 @@ DI.register('NoteView', function (DB, Notes, NoteActions, I18n, Utils, Toast, bu
   function srcButton() {
     if (!currentNote) return null;
     const src = typeof currentNote.src === 'string'
-      && /^https:\/\/t\.me\/[A-Za-z0-9_]+\/\d+$/.test(currentNote.src)
+      && Utils.TELEGRAM_SRC_RE.test(currentNote.src) // F-65: единый регэксп
       ? currentNote.src : null;
     if (!src) return null;
 
@@ -7890,7 +8216,7 @@ DI.register('NoteView', function (DB, Notes, NoteActions, I18n, Utils, Toast, bu
       if (e.target === r) close();
     });
 
-    bus.on('note:open', p => {
+    noteOpenUnsub = bus.on('note:open', p => {
       if (p && p.uid) open(p.uid);
     });
 
@@ -7905,9 +8231,14 @@ DI.register('NoteView', function (DB, Notes, NoteActions, I18n, Utils, Toast, bu
    * Закрытие + отписка.
    */
   function destroy() {
+    // F-25 (закрыто): снимаем ВСЕ слушатели модуля, не только i18n.
     if (i18nUnsub) {
       try { i18nUnsub(); } catch (_) {}
       i18nUnsub = null;
+    }
+    if (noteOpenUnsub) {
+      try { noteOpenUnsub(); } catch (_) {}
+      noteOpenUnsub = null;
     }
     close();
   }
@@ -8185,7 +8516,9 @@ DI.register('BaseView', function (Store, DB, I18n, Utils, Config, bus) {
  *   enter.bad/clip.bad/import.bad).
  * Контент — только textContent/createElement (Закон 1).
  */
-DI.register('AccountView', function (Account, Modal, Toast, I18n, Config, bus) {
+DI.register('AccountView', function (Account, Modal, Toast, I18n, Config, bus, Nostr) {
+  /** @type {string|null} заголовок экрана на момент открытия (F-60в) */
+  let accTitleAtOpen = null;
   let unsubs = [];
   /** @type {Object|null} - текущая sync-строка (для живого обновления) */
   let activeSyncRow = null;
@@ -8251,8 +8584,71 @@ DI.register('AccountView', function (Account, Modal, Toast, I18n, Config, bus) {
       a.remove();
       setTimeout(() => { try { URL.revokeObjectURL(url); } catch (_) {} }, 1000);
     } catch (e) {
-      Toast.show('err', I18n.t('toast.copy.fail'));
+      // F-60 (закрыто): сбой СКАЧИВАНИЯ — не «копирования»
+      Toast.show('err', I18n.t('toast.save.fail'));
     }
+  }
+
+  // ─── Шифрование хранилища ключа (F-02) ────────────────────────────────────
+
+  /**
+   * F-02 (закрыто): включение NIP-49-шифрования ключа на устройстве из UI.
+   * До этого обёртка существовала как API без единого вызова.
+   */
+  function openEncryptStorage() {
+    const wrapped = Nostr.storedKeyFormat() === 'wrapped';
+
+    const body = document.createElement('div');
+    body.className = 'acc-body';
+
+    const status = document.createElement('div');
+    status.className = 'field-hint';
+    status.textContent = I18n.t(wrapped ? 'account.encrypt.on' : 'account.encrypt.off');
+    body.appendChild(status);
+
+    let pwInput = null;
+    if (!wrapped) {
+      const pwField = document.createElement('div');
+      pwField.className = 'field';
+
+      pwInput = document.createElement('input');
+      pwInput.type = 'password';
+      pwInput.className = 'field-input';
+      pwInput.placeholder = I18n.t('account.encrypt.pass.ph');
+      pwInput.autocomplete = 'new-password';
+      pwField.appendChild(pwInput);
+
+      body.appendChild(pwField);
+    }
+
+    Modal.open({
+      title: I18n.t('account.encrypt.storage'),
+      body,
+      buttons: wrapped
+        ? [{ text: I18n.t('btn.close'), primary: true, onClick: () => Modal.close() }]
+        : [
+            { text: I18n.t('btn.cancel'), onClick: () => Modal.close() },
+            {
+              text: I18n.t('account.encrypt.btn'),
+              primary: true,
+              onClick: () => {
+                const pass = pwInput ? pwInput.value : '';
+                if (!pass) {
+                  Toast.show('err', I18n.t('account.encrypt.fail'));
+                  return;
+                }
+                Nostr.wrapStoredKey(pass).then(ok => {
+                  if (ok) {
+                    Modal.close();
+                    Toast.show('ok', I18n.t('account.encrypt.ok'));
+                  } else {
+                    Toast.show('err', I18n.t('account.encrypt.fail'));
+                  }
+                });
+              },
+            },
+          ],
+    });
   }
 
   // ─── Показ ключа ──────────────────────────────────────────────────────────
@@ -8593,6 +8989,9 @@ DI.register('AccountView', function (Account, Modal, Toast, I18n, Config, bus) {
     input.style.display = 'none';
     document.body.appendChild(input);
 
+    // F-60 (закрыто): чистим input и при отмене диалога выбора файла —
+    // раньше при cancel элемент навсегда оставался в DOM.
+    input.addEventListener('cancel', () => { try { input.remove(); } catch (_) {} });
     input.addEventListener('change', () => {
       const file = input.files && input.files[0];
       input.remove();
@@ -8953,6 +9352,7 @@ DI.register('AccountView', function (Account, Modal, Toast, I18n, Config, bus) {
     keyActions.className = 'acc-actions';
     keyActions.appendChild(actionBtn(I18n.t('btn.show'), () => { openShowKey(); }));
     keyActions.appendChild(actionBtn(I18n.t('account.enter.title'), openEnterKey));
+    keyActions.appendChild(actionBtn(I18n.t('account.encrypt.storage'), openEncryptStorage));
     keySec.appendChild(keyActions);
 
     body.appendChild(keySec);
@@ -8982,6 +9382,7 @@ DI.register('AccountView', function (Account, Modal, Toast, I18n, Config, bus) {
     body.appendChild(syncRow);
     activeSyncRow = syncRow;
 
+    accTitleAtOpen = I18n.t('account.title'); // F-60: запоминаем для i18n:change
     Modal.open({
       title: I18n.t('account.title'),
       body,
@@ -9005,13 +9406,13 @@ DI.register('AccountView', function (Account, Modal, Toast, I18n, Config, bus) {
     }));
 
     unsubs.push(bus.on('i18n:change', () => {
-      // Откранный экран перерисуем целиком (кроме режима ввода —
-      // здесь вводов нет, просто закрыть/открыть нельзя: потеряем
-      // контекст. Просто re-open: модалка статична, это безопасно).
+      // F-60 (закрыто): сравнение с t() ПОСЛЕ смены языка всегда ложно
+      // (заголовок ещё на старом языке) — экран не перерисовывался.
+      // Сверяемся с запомненным значением на момент открытия.
       const overlay = document.getElementById('overlay');
       if (overlay && overlay.classList.contains('on')) {
         const t = document.getElementById('modal-t');
-        if (t && t.textContent === I18n.t('account.title')) {
+        if (t && (t.textContent === accTitleAtOpen || t.textContent === I18n.t('account.title'))) {
           open();
         }
       }
@@ -9030,7 +9431,7 @@ DI.register('AccountView', function (Account, Modal, Toast, I18n, Config, bus) {
   }
 
   return { init, destroy, open };
-}, ['Account', 'Modal', 'Toast', 'I18n', 'Config', 'EventBus']);
+}, ['Account', 'Modal', 'Toast', 'I18n', 'Config', 'EventBus', 'Nostr']);
 // ─── UI/AccountView ─── END ─────────────────══──────────────────────────────
 
 // ─── UI/MenuView ─── START ──────────────────────────────────────────────────
@@ -9067,7 +9468,7 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboar
 
   /**
    * Переключение панелей: единый подписчик Store.view.
-   * ctx-banner/seg/feed-wrap/btn-history/composer ↔ #base.
+   * ctx-banner/seg/feed-wrap/composer ↔ #base. (F-67: btn-history не существует — убран из списка)
    * #notif-bar НЕ скрывается — тосты нужны в базе.
    */
   function applyView(view) {
@@ -9638,14 +10039,19 @@ DI.register('FirstRunGate', function (Config, Nostr, Account, Crypto, Toast, I18
     box.textContent = I18n.t('account.nsec.masked');
     c.appendChild(box);
 
-    let revealed = false;
+    let nsecShown = null; // F-07 (закрыто): ключ раскрыт — повторные клики копируют снова
 
     const showBtn = document.createElement('button');
     showBtn.className = 'nv-act gate-full';
     showBtn.textContent = I18n.t('btn.show');
     showBtn.addEventListener('click', async () => {
-      if (revealed) return;
-      revealed = true;
+      // Раскрыто → каждый клик = повторная попытка копирования (без once-литералов).
+      if (nsecShown) {
+        const ok2 = await copyText(nsecShown);
+        Toast.show(ok2 ? 'ok' : 'err', I18n.t(ok2 ? 'gate.copied' : 'toast.copy.fail'));
+        return;
+      }
+      if (showBtn.disabled) return; // грузим nsec — клики игнорируются
 
       showBtn.disabled = true;
       box.textContent = '…';
@@ -9655,12 +10061,13 @@ DI.register('FirstRunGate', function (Config, Nostr, Account, Crypto, Toast, I18
       showBtn.disabled = false;
 
       if (!nsec) {
-        revealed = false;
+        // Не раскрыли — можно пробовать снова, гейт не блокируется.
         box.textContent = I18n.t('account.nsec.masked');
         Toast.show('err', I18n.t('toast.copy.fail'));
         return;
       }
 
+      nsecShown = nsec;
       box.textContent = nsec;
       box.classList.remove('masked');
       box.classList.add('focused');
@@ -9673,11 +10080,8 @@ DI.register('FirstRunGate', function (Config, Nostr, Account, Crypto, Toast, I18
       Toast.show(ok ? 'ok' : 'warn',
         I18n.t(ok ? 'gate.copied' : 'account.nsec.hint'));
 
+      // Кнопка остаётся живой: клик → повторное копирование (см. верх хендлера).
       showBtn.textContent = I18n.t('btn.copy');
-      showBtn.addEventListener('click', async () => {
-        const ok2 = await copyText(nsec);
-        Toast.show(ok2 ? 'ok' : 'err', I18n.t(ok2 ? 'gate.copied' : 'toast.copy.fail'));
-      }, { once: true });
     });
     c.appendChild(showBtn);
 
@@ -9812,7 +10216,104 @@ DI.register('FirstRunGate', function (Config, Nostr, Account, Crypto, Toast, I18
    * Инициализация: единственный маркер — firstRunDone.
    * Синхронно, без гонок с Nostr.
    */
+  // ─── Экран разблокировки зашифрованного ключа (F-02) ──────────────────────
+
+  /**
+   * F-02 (закрыто): ключ на диске зашифрован (NIP-49) → экран разблокировки.
+   * До ввода пароля приложение работает без ключа (подпись/публикация
+   * невозможны). Расшифрованный ключ живёт только в памяти сессии.
+   */
+  function renderUnlock() {
+    const r = ensureRoot();
+    r.innerHTML = '';
+    r.classList.add('on');
+
+    const c = document.createElement('div');
+    c.className = 'gate-c';
+
+    const title = document.createElement('div');
+    title.className = 'gate-title';
+    title.textContent = I18n.t('gate.unlock.title');
+    c.appendChild(title);
+
+    const sub = document.createElement('div');
+    sub.className = 'gate-sub';
+    sub.textContent = I18n.t('gate.unlock.sub');
+    c.appendChild(sub);
+
+    const pwField = document.createElement('div');
+    pwField.className = 'field';
+
+    const pwInput = document.createElement('input');
+    pwInput.type = 'password';
+    pwInput.className = 'field-input';
+    pwInput.placeholder = '••••••••';
+    pwInput.autocomplete = 'current-password';
+    pwInput.setAttribute('aria-label', I18n.t('gate.unlock.btn'));
+    pwField.appendChild(pwInput);
+    c.appendChild(pwField);
+
+    const errEl = document.createElement('div');
+    errEl.className = 'field-hint err';
+    errEl.style.display = 'none';
+    errEl.textContent = I18n.t('gate.unlock.wrong');
+    errEl.setAttribute('role', 'alert');
+    c.appendChild(errEl);
+
+    const btn = document.createElement('button');
+    btn.className = 'nv-act gate-full';
+    btn.textContent = I18n.t('gate.unlock.btn');
+    btn.addEventListener('click', async () => {
+      if (btn.disabled) return;
+      btn.disabled = true;
+      errEl.style.display = 'none';
+
+      let ok = false;
+      try {
+        await Nostr.init();
+        ok = await Nostr.unlockStoredKey(pwInput.value);
+      } catch (_) {
+        ok = false;
+      }
+      btn.disabled = false;
+
+      if (!ok) {
+        errEl.style.display = '';
+        pwInput.select();
+        return;
+      }
+
+      // Ключ расшифрован: перезапускаем сетевой стек уже с ним
+      // (паттерн enterKey — stop + отложенный start).
+      try {
+        const NetService = DI.resolve('NetService');
+        NetService.stop(false);
+        setTimeout(() => { NetService.start(); }, 500);
+      } catch (_) {}
+
+      passGate();
+    });
+    c.appendChild(btn);
+
+    const hint = document.createElement('div');
+    hint.className = 'gate-warn';
+    hint.textContent = I18n.t('gate.unlock.hint');
+    c.appendChild(hint);
+
+    r.appendChild(c);
+    setTimeout(() => { try { pwInput.focus(); } catch (_) {} }, 100);
+    pwInput.addEventListener('keydown', e => {
+      if (e.key === 'Enter') btn.click();
+    });
+  }
+
   function init() {
+    // F-02 (закрыто): зашифрованный ключ → экран разблокировки
+    // независимо от firstRunDone.
+    if (Nostr.storedKeyFormat() === 'wrapped') {
+      renderUnlock();
+      return;
+    }
     if (Config.get('firstRunDone', false)) return;
     renderChoice();
   }
@@ -10041,7 +10542,11 @@ DI.register('Boot', function () {
 });
 
 // ═══ ЗАПУСК ═══════════════════════════════════════════════════════════════════
-window.DI = DI;
+// F-64 (закрыто): DI не торчит в window в проде — приватный ключ больше
+// не достаётся из консоли/зловредного расширения. Отладка — только на localhost.
+if (location.hostname === 'localhost' || location.hostname === '127.0.0.1') {
+  window.DI = DI;
+}
 
 try {
   DI.resolve('Boot').mount();
