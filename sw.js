@@ -11,21 +11,23 @@
 
 // v1.1.0 (сборка 87): версия кэша поднята — на activate старый кэш
 // v1.0.11 удаляется, пользователи гарантированно переходят на новые файлы.
-const CACHE_VERSION = 'noomium-v1.1.0';
+const CACHE_VERSION = 'noomium-v1.1.1';
 
 // App shell: кэшируем сразу при установке.
+// F-09 (закрыто): иконки переведены в опциональные — их отсутствие
+// (не задеплоены/нет прав) не должно ронять установку SW и ломать офлайн-режим.
 const PRECACHE_URLS = [
   './',
   './index.html',
   './style.css',
   './app.js',
   './manifest.json',
-  './icon-192.png',
-  './icon-512.png',
 ];
 
 // Ресурсы, которые кэшируем "по ходу" (не блокируют установку, если отсутствуют)
 const OPTIONAL_URLS = [
+  './icon-192.png',
+  './icon-512.png',
   './icon-maskable.png',
   './screenshot-narrow.png',
   './screenshot-wide.png',
@@ -59,10 +61,12 @@ self.addEventListener('install', event => {
 
         return Promise.all([required, optional]);
       })
-      .then(() => self.skipWaiting())
-      .catch(err => {
-        console.error('[SW] install failed:', err);
-      })
+      // F-09 (закрыто): глотающий catch убран. Отказ обязательного precache
+      // теперь честно проваливает install — браузер оставляет рабочую старую
+      // версию SW, вместо «успешной» установки с полупустым кэшем.
+      // F-66 (закрыто): безусловный skipWaiting убран — обновлением управляет
+      // index.html (postMessage 'SKIP_WAITING' при наличии контроллера),
+      // первый install активируется и без skipWaiting (нечего вытеснять).
   );
 });
 
@@ -130,10 +134,13 @@ self.addEventListener('fetch', event => {
  * @param {URL} url - Разобранный URL запроса.
  * @returns {boolean}
  */
+// F-66 (закрыто): точная проверка shell-файлов — раньше 4 варианта endsWith
+// матчили ЛЮБОЙ same-origin путь, кончающийся на style.css/app.js.
+const SHELL_FILES = new Set(['style.css', 'app.js']);
+
 function isShellAsset(url) {
-  const p = url.pathname;
-  return p.endsWith('/style.css') || p.endsWith('/app.js')
-      || p.endsWith('style.css') || p.endsWith('app.js');
+  const name = url.pathname.split('/').pop();
+  return SHELL_FILES.has(name);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -158,11 +165,12 @@ async function networkFirstThenCache(req) {
     }
     return netRes;
   } catch (err) {
-    const cached = await caches.match(req);
+    // F-66 (закрыто): match только в актуальном кэше версии
+    const cached = await caches.match(req, { cacheName: CACHE_VERSION });
     if (cached) return cached;
 
     // Fallback на главную (для SPA-навигации)
-    const fallback = await caches.match('./index.html');
+    const fallback = await caches.match('./index.html', { cacheName: CACHE_VERSION });
     if (fallback) return fallback;
 
     // Совсем ничего — обычный network error
@@ -171,7 +179,8 @@ async function networkFirstThenCache(req) {
 }
 
 async function cacheFirstThenNetwork(req) {
-  const cached = await caches.match(req);
+  // F-66 (закрыто): cacheName указан явно — не заходим в старые кэши
+  const cached = await caches.match(req, { cacheName: CACHE_VERSION });
   if (cached) return cached;
 
   try {
