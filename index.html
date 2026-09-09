@@ -3,39 +3,29 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<!-- F-41 (закрыто): maximum-scale/user-scalable убраны — зум доступен (WCAG 1.4.4) -->
-<!-- F-64 (закрыто): CSP — внешние скрипты только с доверенных CDN; инлайн-скрипты
-     зафиксированы sha256-хэшами; WASM-компиляция для onnxruntime разрешена точечно.
-     connect-src намеренно широкий (https:/wss:): хостинг модели HF редиректит на
-     разные CDN (cdn-lfs/cas-bridge), список релеев может расширяться. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'sha256-/UrPA1JDb6+zGHoApazCQq0iY0+VXVISuKjW32In0ls=' 'sha256-+FNrdD+v//Izu/1BOa7RXRAI3CNzJJ5rBkuiilmi0qU=' 'sha256-OiU/cDX1hkZXt8zR9Jax+87j9Ag3uxL9/QLBBoz+a5E=' 'wasm-unsafe-eval' blob: https://cdn.jsdelivr.net https://unpkg.com https://telegram.org; worker-src 'self' blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self' https: wss:; object-src 'none'; base-uri 'self'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'sha256-/UrPA1JDb6+zGHoApazCQq0iY0+VXVISuKjW32In0ls=' 'sha256-mi5IRzd/qA2KRjjDBe0Rd3ytg48DkY0dXHiX0PtTSl0=' 'sha256-OiU/cDX1hkZXt8zR9Jax+87j9Ag3uxL9/QLBBoz+a5E=' 'wasm-unsafe-eval' blob: https://cdn.jsdelivr.net https://unpkg.com https://telegram.org; worker-src 'self' blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self' https: wss:; object-src 'none'; base-uri 'self'">
 <meta name="description" content="NOOmium — соцсеть смыслового поиска: мысли ищутся по значению, а не по словам. Приватно, офлайн-first, без серверов.">
 <meta name="theme-color" content="#0a0a0b">
 <title>NOOmium</title>
 
-<!-- ═══ PWA: манифест и иконки ═══ -->
 <link rel="manifest" href="./manifest.json">
 <link rel="icon" type="image/png" sizes="192x192" href="./icon-192.png">
 <link rel="apple-touch-icon" sizes="192x192" href="./icon-192.png">
 
-<!-- ═══ iOS PWA meta-теги ═══ -->
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="NOOmium">
 <meta name="mobile-web-app-capable" content="yes">
 
-<!-- ═══ Шрифты: Inter + JetBrains Mono (латиница + кириллица) ═══ -->
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap">
 
-<!-- ═══ Стили ═══ -->
 <link rel="stylesheet" href="./style.css">
 </head>
 <body data-theme="dark">
 
 <div id="app">
-  <!-- ШАПКА -->
   <header id="hdr">
     <div class="logo">NOO<b>·</b>mium</div>
     <div id="hdr-status">
@@ -54,21 +44,17 @@
     </button>
   </header>
 
-  <!-- ОФФЛАЙН БАР -->
   <div id="offline-bar">
     <span id="offline-text" data-i18n="net.offline">офлайн — заметки сохраняются локально</span>
   </div>
 
-  <!-- ОСНОВНОЙ КОНТЕНТ -->
   <div id="main">
-    <!-- Баннер контекста -->
     <div id="ctx-banner">
       <span class="ctx-src" id="ctx-src"></span>
       <span class="ctx-txt" id="ctx-txt"></span>
       <button class="ctx-x" id="ctx-x" data-i18n-aria="btn.ctx.clear.aria" aria-label="Снять контекст">✕</button>
     </div>
 
-    <!-- Сегменты (табы) -->
     <div id="seg">
       <button class="seg-b on" data-k="local">
         <span data-i18n="seg.local">Моё</span>
@@ -84,7 +70,6 @@
       </button>
     </div>
 
-    <!-- Лента -->
     <div id="feed-wrap">
       <div id="feed"></div>
       <div id="feed-empty">
@@ -93,12 +78,10 @@
       </div>
     </div>
 
-    <!-- Блок уведомлений (fixed, поверх всего — см. style.css) -->
     <div id="notif-bar">
       <div id="toasts"></div>
     </div>
 
-    <!-- Композер (иконка отправки вставляется из Composer.init) -->
     <div id="composer">
       <textarea id="ed-ta" rows="1" data-i18n-ph="ed.placeholder" data-i18n-aria="ed.aria" aria-label="Текст заметки"></textarea>
       <div id="ed-foot">
@@ -116,7 +99,6 @@
       </div>
     </div>
 
-    <!-- База -->
     <div id="base">
       <div id="base-h">
         <div id="base-stats">
@@ -147,7 +129,6 @@
   </div>
 </div>
 
-<!-- МОДАЛЬНЫЕ ОКНА -->
 <div id="overlay" role="dialog" aria-modal="true">
   <div id="modal">
     <div id="modal-h">
@@ -159,8 +140,7 @@
   </div>
 </div>
 
-<!-- ПРОГРЕСС -->
-<div id="progress" role="alert" aria-live="polite">
+<div id="progress" role="status" aria-live="polite">
   <div class="prog-c">
     <div class="prog-title" data-i18n="progress.title">Загружаем модель</div>
     <div class="prog-sub" id="prog-info"></div>
@@ -171,10 +151,8 @@
   </div>
 </div>
 
-<!-- ПРОСМОТР ЗАМЕТКИ -->
 <div id="noteview" role="dialog" aria-modal="true"></div>
 
-<!-- ═══ РЕГИСТРАЦИЯ SERVICE WORKER ═══ -->
 <script>
   if ('serviceWorker' in navigator) {
     window.addEventListener('load', () => {
@@ -214,7 +192,6 @@
 </script>
 
 <script>
-  // Проверяем обновления каждые 30 минут
   if ('serviceWorker' in navigator) {
     setInterval(() => {
       navigator.serviceWorker.ready.then(reg => {
@@ -224,7 +201,6 @@
   }
 </script>
 
-<!-- ═══ TELEGRAM WEB APP API (безопасная загрузка + сигнал готовности) ═══ -->
 <script>
   (function () {
     try {
@@ -244,8 +220,6 @@
   })();
 </script>
 
-<!-- ═══ ПРИЛОЖЕНИЕ ═══ -->
-<!-- F-68 (закрыто): честное сообщение при выключенном JS вместо пустого экрана -->
 <noscript>
   <div style="padding:24px;font-family:system-ui;color:#e8e8ea;background:#0a0a0b;min-height:100vh">
     NOOmium — приложение на JavaScript. Включите JS в браузере и обновите страницу.
