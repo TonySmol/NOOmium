@@ -49,9 +49,7 @@
 /* ═══ 1. ЦВЕТОВАЯ СИСТЕМА ═══ */
 
 :root {
-  --bg: #0a0a0b;
-  --bg-2: #111113;
-  --surface: #141417;
+  --bg: #0a0a0b;  --surface: #141417;
   --surface-2: #1c1c20;
   --surface-3: #26262c;
 
@@ -69,12 +67,8 @@
 
   --teal: #14b8a6;
   --teal-glow: rgba(20, 184, 166, 0.12);
-  --teal-hover: #0d9488;
-
   --rose: #f43f5e;
   --rose-glow: rgba(244, 63, 94, 0.12);
-  --rose-hover: #e11d48;
-
   --green: #22c55e;
   --green-glow: rgba(34, 197, 94, 0.12);
 
@@ -93,9 +87,7 @@
   --safe-bot: env(safe-area-inset-bottom, 0px);
 
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
-  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.25);
-  --shadow-lg: 0 16px 40px rgba(0, 0, 0, 0.4);
-  --shadow-xl: 0 24px 64px rgba(0, 0, 0, 0.5);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.25);  --shadow-xl: 0 24px 64px rgba(0, 0, 0, 0.5);
 }
 
 [data-theme="light"] {
@@ -225,79 +217,10 @@ select:focus-visible {
   background: rgba(180, 83, 9, 0.18);
 }
 
-/* ═══ 3. УНИВЕРСАЛЬНАЯ СИСТЕМА КНОПОК ═══ */
-
-.btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  min-height: 40px;
-  padding: 8px 16px;
-  border-radius: var(--r-sm);
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--text-2);
-  background: var(--surface-2);
-  border: 1px solid var(--line);
-  transition: background 0.12s var(--ease),
-              color 0.12s var(--ease),
-              border-color 0.12s var(--ease),
-              transform 0.1s var(--ease);
-  -webkit-user-select: none;
-  user-select: none;
-  white-space: nowrap;
-  line-height: 1;
-}
-
-.btn:hover:not(:disabled) {
-  background: var(--surface-3);
-  color: var(--text);
-  border-color: var(--line-2);
-}
-
-.btn:active:not(:disabled) { transform: scale(0.97); }
-
-.btn.primary {
-  background: var(--amber-btn);
-  color: #1a1206;
-  border-color: transparent;
-  box-shadow: var(--shadow-sm);
-}
-
-.btn.primary:hover:not(:disabled) {
-  background: var(--amber-hover);
-  color: #1a1206;
-}
-
-.btn.danger {
-  color: var(--rose);
-  background: var(--rose-glow);
-  border-color: transparent;
-}
-
-.btn.danger:hover:not(:disabled) {
-  background: var(--rose);
-  color: #fff;
-}
-
-.btn.ghost {
-  background: transparent;
-  border-color: transparent;
-}
-
-.btn.ghost:hover:not(:disabled) { background: var(--surface-2); }
-
-.btn.icon {
-  width: 40px;
-  padding: 0;
-}
-
-.btn svg {
-  width: 16px;
-  height: 16px;
-  flex-shrink: 0;
-}
+/* ═══ 3. СПИННЕР КНОПКИ ═══ */
+/* F-12 (закрыто): 11 мёртвых правил .btn/.primary/.danger/.ghost/.icon/.svg
+   удалены — ни один элемент в app.js/index.html не использует токен 'btn'.
+   Живой потребитель §3 — только спиннер отправки. */
 
 .btn-spinner {
   display: block;
@@ -319,6 +242,9 @@ select:focus-visible {
 #app {
   display: none;
   flex-direction: column;
+  /* F-44 (закрыто): vh-фоллбэк для старых WebView без dvh */
+  height: 100vh;
+  max-height: 100vh;
   height: 100dvh;
   max-height: 100dvh;
   position: relative;
@@ -1886,7 +1812,7 @@ body.ready #app { display: flex; }
 .field-input:focus { border-color: var(--amber); }
 .field-input::placeholder { color: var(--text-3); }
 
-.field-input.err { border-color: var(--rose); }
+/* F-59: .field-input.err — удалено (никогда не применялось) */
 
 .field-hint {
   font-size: 11px;
@@ -2076,9 +2002,7 @@ body.ready #app { display: flex; }
   white-space: nowrap;
 }
 
-.tree-item.root {
-  border-color: var(--line-2);
-}
+/* F-59: .tree-item.root — удалено (класс 'root' не создаётся) */
 
 .modal-empty {
   color: var(--text-3);
@@ -2140,6 +2064,7 @@ body.ready #app { display: flex; }
   border-radius: var(--r);
   box-shadow: var(--shadow-xl);
   width: min(400px, 100%);
+  max-height: calc(100vh - 40px); /* F-44: фоллбэк */
   max-height: calc(100dvh - 40px);
   overflow-y: auto;
   padding: 24px;
@@ -2259,18 +2184,7 @@ body.ready #app { display: flex; }
   background: var(--amber-hover);
 }
 
-.gate-back {
-  background: none;
-  border: none;
-  color: var(--text-3);
-  font-size: 12px;
-  font-weight: 500;
-  padding: 8px;
-  cursor: pointer;
-  transition: color 0.12s var(--ease);
-}
-
-.gate-back:hover { color: var(--text); }
+/* F-59: .gate-back + :hover — удалено (0 потребителей) */
 
 @media (max-width: 480px) {
   .gate-actions { grid-template-columns: 1fr; }
