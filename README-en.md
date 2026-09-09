@@ -190,9 +190,6 @@ flowchart TB
 **— Is it free? What does it cost?**
 There is nothing to pay for: no server, no subscription, no ads. The app is a static site, the network is public relays, the model downloads from an open CDN.
 
-**— Where are my notes stored?**
-In your browser (IndexedDB). Public copies spread across Nostr relays — removing them from "the world" is not possible (that's how the protocol works). Private notes never leave your device in the clear.
-
 **— What if I lose my key?**
 Nobody can recover it: not us, not the relays — nobody at all. The key is the account. That's why you export it right after signup.
 
@@ -210,19 +207,6 @@ Yes: nsec, hex or ncryptsec. One key — one Nostr identity.
 
 **— How do I delete everything?**
 Menu → "Full reset": notes, cache, model — everything is wiped from the browser, back to first-launch state. Deleted public notes go out to the network as deletion facts — other users' mirrors clean them up on their own.
-
----
-
-## 🆕 What's new in 1.1.0
-
-The "Big cleanup" release — following a full code audit (68 findings closed):
-
-- 🔐 **Key in a vault:** optional encrypted key storage (ncryptsec + passphrase)
-- 🛡 **Signature verification** of every incoming event — forged records are discarded
-- 🐛 Fixed: a rare loss of edits during background vectorization, the "Copy" button on first launch, connection recovery after a long offline period
-- ⚡ The feed is noticeably lighter at scale (genealogy caching, surgical updates instead of full rebuilds)
-- ⌨️ Accessibility: keyboard navigation for cards, focus traps in dialogs, reduced-motion support
-- 🧹 ~300 lines of dead code removed
 
 ---
 
