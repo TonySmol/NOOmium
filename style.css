@@ -1,25 +1,21 @@
-/* ═══════════════════════════════════════════════════════════════════
-   NOOmium — Design System «Quiet Room» v2.3 (v1.1.2)
-   Мысль важнее интерфейса: интерфейс почти невидим и вспыхивает
-   янтарным только там, где живёт смысл.
+/* ═══════════════════════════════════════════════════════════════════════════════
+   NOOmium — Design System «Quiet Room» v2.2 (1.0.3)
+   Мысль важнее интерфейса: интерфейс почти невидим и вспыхивает янтарным
+   только там, где живёт смысл.
 
    ПРИНЦИПЫ
    1. Контент — единственный источник света. Поверхности различаются
-      бордерами, не тенями. Тени: sm (интерактив), md (тосты),
-      xl (модалка, гейт, прогресс).
+      бордерами, не тенями. Тени: sm (интерактив), md (тосты), xl (модалка).
    2. Один акцент за раз. Янтарный = действие. Бирюзовый = сеть.
       Розовый = деструкция. Зелёный = статус (никогда кнопка).
-   3. Тишина движения. 0.12–0.25с, один ease. Пульсация — только
-      точки индикаторов. Hover не двигает (только фон/цвет),
-      active сжимает 0.97.
+   3. Тишина движения. 0.12–0.25с, один ease. Пульсация — только точки
+      индикаторов. Hover не двигает (только фон/цвет), active сжимает 0.97.
    4. Моно — голос машины (время, ключи, числа, статусы, поколения),
       Inter — голос человека (мысли, кнопки). Не смешивать.
-   5. Ровность важнее красоты. Uppercase 0.05em. Ряды равных
-      кнопок — grid. Неровность = баг.
+   5. Ровность важнее красоты. Шкала высот: 34/40/46/50/56. Uppercase
+      0.05em. Ряды равных кнопок — grid. Неровность = баг.
    6. ТАЧ ≥ 34px без исключений. Слайдеры ≥ 24px.
    7. Инлайн-стили в JS запрещены — всё через классы этой системы.
-      Исключения — только динамические величины: высота поля,
-      задержки анимации, ширина прогресса.
    8. Пустые состояния — единый ритм: иконка/текст, центр, text-2.
    9. disabled — один вес 0.4 (исключение: edit-поле 0.6 — текст жив).
    10. Целые пиксели в геометрии строк: line-height кратен 24.
@@ -28,31 +24,16 @@
    12. Клавиатурный фокус (focus-visible) — единственный источник
        янтарного outline. Мышь/тап рамок не рисует.
    13. Ряды кнопок: ≥480px — в ряд с равными долями; <480px — весь
-       ряд в стек на всю ширину. «Две в ряду + одна одинокая»
-       запрещено.
+       ряд в стек на всю ширину. «Две в ряду + одна одинокая» запрещено.
    14. Кнопка не знает, где она: лейаут решает контейнер. Новый
        элемент = существующий класс + существующий контейнер.
 
-   ТИПОГРАФИКА (Inter — человек, JetBrains Mono — машина)
-   - Мысль: 15px / 1.55; просмотр 16px / 1.6.
-   - Кнопки/ряды: 13px 600; мелкие тумблеры 12px 600.
-   - Подписи/хинты: 11–12px, text-3 / text-2.
-   - Мета-моно: 11px; даты 10px; счётчики 10px 600.
-   - Заголовки: логотип 18/22px 600, модалка 16px, секции 13px 700.
-   - Буквы: uppercase 0.04–0.05em; логотип −0.02em.
-
-   ШКАЛЫ (канон, не менять точечно)
-   - Радиусы: 6 (мелкое: --r-xs) / 8 (кнопки, поля: --r-sm) /
-     12 (карточки, панели: --r) / 999 (пилюли).
-   - Зазоры: 6 (в рядах) / 8 (блоки в модалках) / 10 (карточки
-     ленты) / 12 (межзонный) / 14 (боковые поля ленты) / 16 (тело
-     модалки) / 18 (группы настроек) / 24 (гейт) / 26 (прогресс).
-   - Высоты: 34 (тач-мин, подвалы карточек) / 40 (кнопки, поля) /
-     46 (menu-row) / 50 (панельные футеры) / 56 (шапка, шапки
-     noteview).
-   - Z-индексы (токены --z-*): hdr 10 < noteview 900 < overlay 1000
-     < progress 1200 < gate 1250 < toasts 1300. Новый слой — только
-     через новый токен.
+   ШКАЛЫ (канон, не менять точечно):
+   - Радиусы: 6 (мелкое) / 8 (кнопки, поля) / 12 (карточки, панели) / 999.
+   - Зазоры: 6 (в рядах) / 8 (блоки в модалках) / 10 (карточки ленты) /
+     12 (межзонный) / 14 (боковые поля ленты).
+   - Высоты: 34 (тач-мин) / 40 (кнопки, поля) / 46 (menu-row) /
+     50 (панельные футеры) / 56 (шапка).
 
    ПРАВИЛА UI
    - Primary: bg --amber-btn, текст #1a1206, одна на экран.
@@ -62,21 +43,14 @@
 
    ПРАВИЛА UX
    - Деструкция — только через confirm (danger розовая).
-   - Отклик ≤ 300мс. Escape закрывает ручное; ввод юзера
-     неприкосновенен.
-
-   СЕКЦИИ ФАЙЛА
-   1 цвета · 2 сброс · 3 спиннер · 4 структура · 5 шапка · 6 офлайн ·
-   7 контент/сегменты · 8 лента · 9 композер · 10 база · 11 модалки ·
-   12 тосты · 13 прогресс · 14 noteview · 15 настройки · 16 аккаунт ·
-   17 поля · 18 утилиты/адаптив · 19 меню · 20 древо · 21 онбординг ·
-   22 гейт
-   ═══════════════════════════════════════════════════════════════════ */
+   - Отклик ≤ 300мс. Escape закрывает ручное; ввод юзера неприкосновенен.
+   ═══════════════════════════════════════════════════════════════════════════════ */
 
 /* ═══ 1. ЦВЕТОВАЯ СИСТЕМА ═══ */
 
 :root {
   --bg: #0a0a0b;
+  --bg-2: #111113;
   --surface: #141417;
   --surface-2: #1c1c20;
   --surface-3: #26262c;
@@ -95,8 +69,12 @@
 
   --teal: #14b8a6;
   --teal-glow: rgba(20, 184, 166, 0.12);
+  --teal-hover: #0d9488;
+
   --rose: #f43f5e;
   --rose-glow: rgba(244, 63, 94, 0.12);
+  --rose-hover: #e11d48;
+
   --green: #22c55e;
   --green-glow: rgba(34, 197, 94, 0.12);
 
@@ -111,23 +89,18 @@
   --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
 
-  --z-hdr: 10;
-  --z-noteview: 900;
-  --z-overlay: 1000;
-  --z-progress: 1200;
-  --z-gate: 1250;
-  --z-toasts: 1300;
-
   --safe-top: env(safe-area-inset-top, 0px);
   --safe-bot: env(safe-area-inset-bottom, 0px);
 
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
   --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.25);
+  --shadow-lg: 0 16px 40px rgba(0, 0, 0, 0.4);
   --shadow-xl: 0 24px 64px rgba(0, 0, 0, 0.5);
 }
 
 [data-theme="light"] {
   --bg: #f4f4f5;
+  --bg-2: #ffffff;
   --surface: #ffffff;
   --surface-2: #f4f4f5;
   --surface-3: #e4e4e7;
@@ -146,15 +119,18 @@
 
   --teal: #0d9488;
   --teal-glow: rgba(13, 148, 136, 0.12);
+  --teal-hover: #0f766e;
 
   --rose: #e11d48;
   --rose-glow: rgba(225, 29, 72, 0.10);
+  --rose-hover: #be123c;
 
   --green: #16a34a;
   --green-glow: rgba(22, 163, 74, 0.12);
 
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
   --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.08);
+  --shadow-lg: 0 16px 40px rgba(0, 0, 0, 0.12);
   --shadow-xl: 0 24px 64px rgba(0, 0, 0, 0.16);
 }
 
@@ -249,7 +225,79 @@ select:focus-visible {
   background: rgba(180, 83, 9, 0.18);
 }
 
-/* ═══ 3. СПИННЕР КНОПКИ ═══ */
+/* ═══ 3. УНИВЕРСАЛЬНАЯ СИСТЕМА КНОПОК ═══ */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 40px;
+  padding: 8px 16px;
+  border-radius: var(--r-sm);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-2);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  transition: background 0.12s var(--ease),
+              color 0.12s var(--ease),
+              border-color 0.12s var(--ease),
+              transform 0.1s var(--ease);
+  -webkit-user-select: none;
+  user-select: none;
+  white-space: nowrap;
+  line-height: 1;
+}
+
+.btn:hover:not(:disabled) {
+  background: var(--surface-3);
+  color: var(--text);
+  border-color: var(--line-2);
+}
+
+.btn:active:not(:disabled) { transform: scale(0.97); }
+
+.btn.primary {
+  background: var(--amber-btn);
+  color: #1a1206;
+  border-color: transparent;
+  box-shadow: var(--shadow-sm);
+}
+
+.btn.primary:hover:not(:disabled) {
+  background: var(--amber-hover);
+  color: #1a1206;
+}
+
+.btn.danger {
+  color: var(--rose);
+  background: var(--rose-glow);
+  border-color: transparent;
+}
+
+.btn.danger:hover:not(:disabled) {
+  background: var(--rose);
+  color: #fff;
+}
+
+.btn.ghost {
+  background: transparent;
+  border-color: transparent;
+}
+
+.btn.ghost:hover:not(:disabled) { background: var(--surface-2); }
+
+.btn.icon {
+  width: 40px;
+  padding: 0;
+}
+
+.btn svg {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
 
 .btn-spinner {
   display: block;
@@ -271,8 +319,6 @@ select:focus-visible {
 #app {
   display: none;
   flex-direction: column;
-  height: 100vh;
-  max-height: 100vh;
   height: 100dvh;
   max-height: 100dvh;
   position: relative;
@@ -294,7 +340,7 @@ body.ready #app { display: flex; }
   border-bottom: 1px solid var(--line);
   flex-shrink: 0;
   position: relative;
-  z-index: var(--z-hdr);
+  z-index: 10;
 }
 
 .logo {
@@ -583,7 +629,7 @@ body.ready #app { display: flex; }
   line-height: 1.55;
 }
 
-/* Подвал карточки одним рядом:
+/* ── ПОДВАЛ одним рядом (v1.0.10.2):
    [плашка: автор+время] [↳] [◆] [сигнал] [↩|✎] */
 .note-meta {
   display: flex;
@@ -735,8 +781,8 @@ body.ready #app { display: flex; }
   pointer-events: none;
 }
 
-/* Индикатор сигнала: полоски + подпись в колонку, каркас кнопочный,
-   высота 34. */
+/* Индикатор сигнала (v1.0.10.2): полоски + подпись в колонку,
+   каркас кнопочный (surface-2 + бордер), высота 34. */
 .note-sim-info {
   display: flex;
   flex-direction: column;
@@ -826,7 +872,7 @@ body.ready #app { display: flex; }
 
 #composer {
   position: relative;
-  margin: 12px 14px;
+  margin: 12px 14px 12px;
   padding: 0 12px;
   background: var(--surface);
   border: 1px solid var(--line);
@@ -888,7 +934,7 @@ body.ready #app { display: flex; }
 }
 
 #ed-hint.warn { color: var(--amber); }
-#ed-hint.err { color: var(--rose); }
+#ed-hint.err  { color: var(--rose); }
 
 #ed-acts {
   display: flex;
@@ -1143,7 +1189,7 @@ body.ready #app { display: flex; }
   align-items: center;
   justify-content: center;
   padding: 16px;
-  z-index: var(--z-overlay);
+  z-index: 1000;
   animation: overlayIn 0.2s var(--ease-out);
 }
 
@@ -1287,7 +1333,7 @@ body.ready #app { display: flex; }
   margin: 0;
   min-height: 0;
   flex-shrink: 0;
-  z-index: var(--z-toasts);
+  z-index: 1300;
   pointer-events: none;
 }
 
@@ -1346,7 +1392,7 @@ body.ready #app { display: flex; }
   display: none;
   align-items: center;
   justify-content: center;
-  z-index: var(--z-progress);
+  z-index: 1200;
   padding: 20px;
 }
 
@@ -1429,7 +1475,7 @@ body.ready #app { display: flex; }
   position: fixed;
   inset: 0;
   background: var(--bg);
-  z-index: var(--z-noteview);
+  z-index: 900;
   display: none;
   flex-direction: column;
   animation: nvIn 0.2s var(--ease-out);
@@ -1530,7 +1576,7 @@ body.ready #app { display: flex; }
   color: #fff;
 }
 
-/* Кнопка источника в просмотре — teal-акцент на базе
+/* v1.0.9: кнопка источника в просмотре — teal-акцент на базе
    .nv-act (геометрия/паттерны системы, только цвет и hover). */
 .nv-act.note-src-btn {
   color: var(--teal);
@@ -1840,6 +1886,8 @@ body.ready #app { display: flex; }
 .field-input:focus { border-color: var(--amber); }
 .field-input::placeholder { color: var(--text-3); }
 
+.field-input.err { border-color: var(--rose); }
+
 .field-hint {
   font-size: 11px;
   color: var(--text-3);
@@ -1864,6 +1912,7 @@ body.ready #app { display: flex; }
 
   .note:hover,
   .icon-btn,
+  .btn,
   .mbtn,
   .nv-act,
   .na,
@@ -2027,6 +2076,10 @@ body.ready #app { display: flex; }
   white-space: nowrap;
 }
 
+.tree-item.root {
+  border-color: var(--line-2);
+}
+
 .modal-empty {
   color: var(--text-3);
   font-size: 13px;
@@ -2071,7 +2124,7 @@ body.ready #app { display: flex; }
   position: fixed;
   inset: 0;
   background: var(--bg);
-  z-index: var(--z-gate);
+  z-index: 1250;
   display: none;
   align-items: center;
   justify-content: center;
@@ -2087,7 +2140,6 @@ body.ready #app { display: flex; }
   border-radius: var(--r);
   box-shadow: var(--shadow-xl);
   width: min(400px, 100%);
-  max-height: calc(100vh - 40px);
   max-height: calc(100dvh - 40px);
   overflow-y: auto;
   padding: 24px;
@@ -2206,6 +2258,19 @@ body.ready #app { display: flex; }
 .gate-primary:hover:not(:disabled) {
   background: var(--amber-hover);
 }
+
+.gate-back {
+  background: none;
+  border: none;
+  color: var(--text-3);
+  font-size: 12px;
+  font-weight: 500;
+  padding: 8px;
+  cursor: pointer;
+  transition: color 0.12s var(--ease);
+}
+
+.gate-back:hover { color: var(--text); }
 
 @media (max-width: 480px) {
   .gate-actions { grid-template-columns: 1fr; }
