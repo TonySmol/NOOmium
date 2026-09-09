@@ -19,7 +19,7 @@
 <p align="center">
   <a href="https://tonysmol.github.io/NOOmium/"><img src="https://img.shields.io/badge/Открыть_NOOmium-в_браузере_или_Telegram-2ea44f?style=for-the-badge" alt="Открыть NOOmium"></a>
   &nbsp;
-  <sub>🇬🇧 <a href="README.en.md">English version</a></sub>
+  <sub>🇬🇧 <a href="README-en.md">English version</a></sub>
 </p>
 
 <p align="center">
