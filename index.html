@@ -2,7 +2,14 @@
 <html lang="ru">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<!-- F-41 (закрыто): maximum-scale/user-scalable убраны — зум доступен (WCAG 1.4.4) -->
+<!-- F-64 (закрыто): CSP — внешние скрипты только с доверенных CDN; инлайн-скрипты
+     зафиксированы sha256-хэшами; WASM-компиляция для onnxruntime разрешена точечно.
+     connect-src намеренно широкий (https:/wss:): хостинг модели HF редиректит на
+     разные CDN (cdn-lfs/cas-bridge), список релеев может расширяться. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'sha256-/UrPA1JDb6+zGHoApazCQq0iY0+VXVISuKjW32In0ls=' 'sha256-+FNrdD+v//Izu/1BOa7RXRAI3CNzJJ5rBkuiilmi0qU=' 'sha256-OiU/cDX1hkZXt8zR9Jax+87j9Ag3uxL9/QLBBoz+a5E=' 'wasm-unsafe-eval' blob: https://cdn.jsdelivr.net https://unpkg.com https://telegram.org; worker-src 'self' blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self' https: wss:; object-src 'none'; base-uri 'self'">
+<meta name="description" content="NOOmium — соцсеть смыслового поиска: мысли ищутся по значению, а не по словам. Приватно, офлайн-first, без серверов.">
 <meta name="theme-color" content="#0a0a0b">
 <title>NOOmium</title>
 
@@ -93,11 +100,11 @@
 
     <!-- Композер (иконка отправки вставляется из Composer.init) -->
     <div id="composer">
-      <textarea id="ed-ta" rows="1" data-i18n-ph="ed.placeholder" aria-label="Текст заметки"></textarea>
+      <textarea id="ed-ta" rows="1" data-i18n-ph="ed.placeholder" data-i18n-aria="ed.aria" aria-label="Текст заметки"></textarea>
       <div id="ed-foot">
-        <span id="ed-cnt">0 <span data-i18n="ed.chars">симв.</span></span>
+        <span id="ed-cnt" aria-live="polite">0</span>
         <div id="ed-acts">
-          <div id="mode-toggle" data-mode="private" role="radiogroup" aria-label="Режим видимости">
+          <div id="mode-toggle" data-mode="private" role="radiogroup" data-i18n-aria="ed.mode.aria" aria-label="Режим видимости">
             <div class="mt-thumb"></div>
             <div class="mt-opt on" data-v="private" data-i18n="btn.private" role="radio" aria-checked="true">Личное</div>
             <div class="mt-opt" data-v="world" data-i18n="btn.public" role="radio" aria-checked="false">Мир</div>
@@ -127,8 +134,8 @@
           </div>
         </div>
         <div id="base-ctrls">
-          <input id="base-q" data-i18n-ph="base.search" aria-label="Поиск по базе">
-          <select id="base-sort" aria-label="Сортировка">
+          <input id="base-q" data-i18n-ph="base.search" data-i18n-aria="base.search.aria" aria-label="Поиск по базе">
+          <select id="base-sort" data-i18n-aria="base.sort.aria" aria-label="Сортировка">
             <option value="new" data-i18n="base.sort.new">новые</option>
             <option value="old" data-i18n="base.sort.old">старые</option>
             <option value="az" data-i18n="base.sort.az">а-я</option>
@@ -145,7 +152,7 @@
   <div id="modal">
     <div id="modal-h">
       <div id="modal-t"></div>
-      <button id="modal-x" aria-label="Закрыть">✕</button>
+      <button id="modal-x" data-i18n-aria="btn.close" aria-label="Закрыть">✕</button>
     </div>
     <div id="modal-b"></div>
     <div id="modal-f"></div>
@@ -238,6 +245,12 @@
 </script>
 
 <!-- ═══ ПРИЛОЖЕНИЕ ═══ -->
+<!-- F-68 (закрыто): честное сообщение при выключенном JS вместо пустого экрана -->
+<noscript>
+  <div style="padding:24px;font-family:system-ui;color:#e8e8ea;background:#0a0a0b;min-height:100vh">
+    NOOmium — приложение на JavaScript. Включите JS в браузере и обновите страницу.
+  </div>
+</noscript>
 <script type="module" src="./app.js"></script>
 </body>
 </html>
