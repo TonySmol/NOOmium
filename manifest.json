@@ -2,7 +2,7 @@
   "name": "NOOmium",
   "short_name": "NOOmium",
   "description": "Соцсеть смыслов: мысли ищутся по значению, а не по словам",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "start_url": "./index.html",
   "scope": "./",
   "id": "./index.html",
