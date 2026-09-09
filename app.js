@@ -1,6 +1,6 @@
 /**
  * ═══════════════════════════════════════════════════════════════════
- * NOOmium — app.js · v1.1.3 (сборка 89)
+ * NOOmium — app.js · v1.2.0 (сборка 90)
  * Соцсеть смыслов: мысли ищутся по значению, а не по словам.
  * ═══════════════════════════════════════════════════════════════════
  *
@@ -40,13 +40,12 @@
  * 6. Тихие catch — только с Logger.warn.
  *
  * Оркестрация — BOOT.mount, он единственный. Полный контракт шины —
- * в РЕЕСТРЕ СОБЫТИЙ ниже. Версии: 1.1.3 · 1.1.2 · 1.1.0 «Большая
- * чистка» · 1.0.11 · 1.0.0 «Чистый лист».
+ * в РЕЕСТРЕ СОБЫТИЙ ниже.
  */
 
 'use strict';
 
-const APP_VERSION = '1.1.3';
+const APP_VERSION = '1.2.0';
 
 /**
  * ═══ РЕЕСТР СОБЫТИЙ ШИНЫ ═══
@@ -82,7 +81,6 @@ const APP_VERSION = '1.1.3';
  * influence:updated Influence → FeedView
  * mirror:fetch  Mirror → NetService             {uid, owner}
  * wipe:request  MenuView → Boot, Context(сброс) (локальная очистка + сетевой wipe)
- * gate:done     FirstRunGate → Onboarding (отложенный показ)
  * telegram:theme TelegramAdapter → (зарезервировано; тема применяется напрямую)
  *
  * view, seg, sendMode, context, feed, lists — ТОЛЬКО через Store.subscribe.
@@ -574,7 +572,6 @@ DI.register('I18n', function (Config, bus) {
     'toast.clip.bad': 'не удалось прочитать буфер',
 
     'onb.title': 'Как это работает',
-    'onb.dontshow': 'Больше не показывать',
     'onb.gotit': 'Понятно',
     'onb.what.t': 'NOOmium',
     'onb.what.d': 'Соцсеть смыслов: мысли ищутся не по словам и не по лайкам, а по значению. Каждая мысль превращается в вектор — точку в пространстве смыслов.',
@@ -824,7 +821,6 @@ DI.register('I18n', function (Config, bus) {
     'toast.clip.bad': 'could not read clipboard',
 
     'onb.title': 'How it works',
-    'onb.dontshow': "Don't show again",
     'onb.gotit': 'Got it',
     'onb.what.t': 'NOOmium',
     'onb.what.d': 'A social network of meaning: thoughts are found not by words or likes, but by sense. Each thought becomes a vector — a point in meaning-space.',
@@ -887,7 +883,7 @@ DI.register('I18n', function (Config, bus) {
 /**
  * ═══ CORE/Config ═══
  *
- * Конфигурация: localStorage 'noomium:cfg', схема v11 (миграции
+ * Конфигурация: localStorage 'noomium:cfg', схема v12 (миграции
  * чистят хвосты удалённых фич). Загрузка с проверкой типов:
  * значение битого типа не копируется — остаётся default. При битом
  * JSON — бэкап сырой строки в 'noomium:cfg.broken' (Logger
@@ -903,14 +899,13 @@ DI.register('I18n', function (Config, bus) {
 DI.register('Config', function () {
   const KEY = 'noomium:cfg';
   const BROKEN_KEY = 'noomium:cfg.broken';
-  const SCHEMA_VERSION = 11;
+  const SCHEMA_VERSION = 12;
 
   const defaults = Object.freeze({
     schemaVersion: SCHEMA_VERSION,
     room: 'noomium-main',
     theme: 'dark',
     lang: null,
-    onboarded: false,
     firstRunDone: false,
     logLevel: 'info',
 
@@ -1023,6 +1018,10 @@ DI.register('Config', function () {
       ['dim', 'maxAnswerTextLength', 'maxIncomingNotesPerPeer'].forEach(k => {
         delete s[k];
       });
+      return s;
+    },
+    12: s => {
+      delete s.onboarded;
       return s;
     },
   };
@@ -3004,12 +3003,34 @@ DI.register('Nostr', function (Config, bus, Logger) {
 
   /**
    * @param {Array<Object>} filters
-   * @param {Object} handlers - {onevent, onclose}
-   * @returns {Object|null}
+   * @param {Object} handlers - {onevent, oneose, onclose}
+   * @returns {Object|null} SubSink с close().
+   *
+   * Контракт nostr-tools@2.25: subscribeMany принимает ОДИН фильтр
+   * (Filter), а не массив; массив фильтров собирается в подписку
+   * через subscribeMap(entries). Передача массива в subscribeMany
+   * оборачивает фильтр в лишний массив — релеи отвечают
+   * «filter is not an object» и подписка не получает ничего.
    */
   function subscribe(filters, handlers) {
     if (!pool) return null;
-    return pool.subscribeMany(relays(), filters, handlers);
+
+    const urls = relays();
+    if (!urls.length) return null;
+    if (!Array.isArray(filters) || !filters.length) return null;
+
+    if (filters.length === 1) {
+      return pool.subscribeMany(urls, filters[0], handlers);
+    }
+
+    const entries = [];
+    for (const f of filters) {
+      for (const u of urls) {
+        entries.push({ url: u, filter: f });
+      }
+    }
+
+    return pool.subscribeMap(entries, handlers);
   }
 
   /**
@@ -3807,8 +3828,10 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
             await Nostr.publish(tpl);
             await DB.updatePublishState(item.uid, note.version);
             removeFromQueue('uids', item.uid);
-          } catch (_) {
+          } catch (e) {
 
+            Logger.warn('NetService: канон ' + item.uid.slice(0, 6)
+              + ' не опубликован (' + String(e && e.message || e) + '), ретрай');
           }
         }
 
@@ -3888,6 +3911,10 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
 
     if (hard) {
       reconnectAttempts = 0;
+    }
+
+    if (lastStatus !== 'connected') {
+      Logger.info('NetService: подключено');
     }
 
     setStatus('connected');
@@ -4914,7 +4941,7 @@ DI.register('Mirror', function (DB, Protocol, Notes, bus, Nostr, Logger) {
   /** @type {Set<string>} */
   const fetched = new Set();
 
-  /** ── Статистика снимка (фикс 1) ── */
+  /** Статистика снимка. */
   /** @type {{count: number, live: number, deleted: number, own: number, timer: number}|null} */
   let snap = null;
 
@@ -6561,19 +6588,15 @@ DI.register('HeaderStatus', function (bus, I18n, Embedder) {
 /**
  * ═══ UI/Onboarding ═══
  *
- * Онбординг: 8 секций механик + чекбокс «больше не показывать»
- * (только firstRun; из меню — showHelp() без чекбокса).
- *
- * Показ не ждёт модель бесконечно: модель готова ИЛИ 30с. Прогресс
- * не блокирует интерфейс, онбординг не блокирует знакомство с
- * приложением.
+ * Гайд «Как это работает»: 8 секций механик. Открытие —
+ * ТОЛЬКО вручную из настроек (MenuView → «Как это работает»);
+ * самостоятельно модалка не появляется никогда.
  */
-DI.register('Onboarding', function (Config, Modal, I18n, Embedder, bus) {
+DI.register('Onboarding', function (Modal, I18n) {
   /**
-   * @param {boolean} firstRun
-   * @returns {{el: Element, checkbox: HTMLInputElement|null}}
+   * @returns {{el: Element}}
    */
-  function buildBody(firstRun) {
+  function buildBody() {
 
     const el = document.createElement('div');
     el.className = 'onb-list';
@@ -6604,32 +6627,14 @@ DI.register('Onboarding', function (Config, Modal, I18n, Embedder, bus) {
       el.appendChild(s);
     });
 
-    let checkbox = null;
-
-    if (firstRun) {
-      const label = document.createElement('label');
-      label.className = 'onb-check';
-
-      checkbox = document.createElement('input');
-      checkbox.type = 'checkbox';
-
-      label.appendChild(checkbox);
-
-      const span = document.createElement('span');
-      span.textContent = I18n.t('onb.dontshow');
-      label.appendChild(span);
-
-      el.appendChild(label);
-    }
-
-    return { el, checkbox };
+    return { el };
   }
 
   /**
-   * @param {boolean} [firstRun]
+   * Показать гайд (вызов из настроек).
    */
-  function showHelp(firstRun) {
-    const { el, checkbox } = buildBody(!!firstRun);
+  function showHelp() {
+    const { el } = buildBody();
 
     Modal.open({
       title: I18n.t('onb.title'),
@@ -6638,61 +6643,14 @@ DI.register('Onboarding', function (Config, Modal, I18n, Embedder, bus) {
         text: I18n.t('onb.gotit'),
         primary: true,
         onClick: () => {
-          if (firstRun && checkbox && checkbox.checked) {
-            Config.set('onboarded', true);
-          }
           Modal.close();
         },
       }],
     });
   }
 
-  /**
-   * Инициализация: первый запуск → показ (модель готова ИЛИ 30с).
-   * Пока гейт первого запуска активен — онбординг НЕ открывается
-   * под ним и не крадёт фокус: показ откладывается до gate:done.
-   */
-  function init() {
-    if (Config.get('onboarded', false)) return;
-
-    let shown = false;
-    let waitingGate = false;
-
-    const show = () => {
-      if (shown) return;
-      const gate = document.getElementById('gate');
-      if (gate && gate.classList.contains('on')) {
-        waitingGate = true;
-        return;
-      }
-      shown = true;
-      showHelp(true);
-    };
-
-    bus.on('gate:done', () => {
-      if (waitingGate && !shown) {
-        setTimeout(() => {
-          if (!shown) {
-            shown = true;
-            showHelp(true);
-          }
-        }, 350);
-      }
-    });
-
-    const timer = setTimeout(show, 30000);
-
-    Embedder.load().then(() => {
-      clearTimeout(timer);
-      show();
-    }).catch(() => {
-      clearTimeout(timer);
-      show();
-    });
-  }
-
-  return { init, showHelp };
-}, ['Config', 'Modal', 'I18n', 'Embedder', 'EventBus']);
+  return { showHelp };
+}, ['Modal', 'I18n']);
 
 /**
  * ═══ UI/Composer ═══
@@ -9626,7 +9584,7 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboar
 
     body.appendChild(menuRow(I18n.t('menu.help'), '', () => {
       Modal.close();
-      Onboarding.showHelp(false);
+      Onboarding.showHelp();
     }));
 
     const themeVal = themeGlyph() + ' ' + I18n.t(Config.get('theme', 'dark') === 'dark' ? 'theme.dark' : 'theme.light');
@@ -9730,7 +9688,7 @@ DI.register('MenuView', function (Store, Config, Modal, Toast, I18n, bus, Onboar
  * строится сразу; Nostr.init нужен только для reveal ключа — кнопка
  * честно ждёт, ключ приходит из параллельного NetService.start).
  */
-DI.register('FirstRunGate', function (Config, Nostr, Account, Crypto, Toast, I18n, bus) {
+DI.register('FirstRunGate', function (Config, Nostr, Account, Crypto, Toast, I18n) {
   let root = null;
 
   function ensureRoot() {
@@ -9753,7 +9711,6 @@ DI.register('FirstRunGate', function (Config, Nostr, Account, Crypto, Toast, I18
         root = null;
       }, 300);
     }
-    try { bus.emit('gate:done', {}); } catch (_) {}
   }
 
   async function copyText(text) {
@@ -10136,7 +10093,7 @@ DI.register('FirstRunGate', function (Config, Nostr, Account, Crypto, Toast, I18
   }
 
   return { init };
-}, ['Config', 'Nostr', 'Account', 'Crypto', 'Toast', 'I18n', 'EventBus']);
+}, ['Config', 'Nostr', 'Account', 'Crypto', 'Toast', 'I18n']);
 
 /** ═══ СЛОЙ: PLATFORM ═══ */
 
@@ -10290,10 +10247,9 @@ DI.register('TelegramAdapter', function (Config, bus, Logger) {
 /**
  * Точка входа: порядок инициализации.
  *
- * FirstRunGate — после всех UI-модулей, до загрузки модели;
- * онбординг ПОСЛЕ гейта: новый юзер сначала получает ключ, потом
- * узнаёт механики. Первый показ онбординга не ждёт модель
- * бесконечно (30с страховка — в самом Onboarding).
+ * FirstRunGate — после всех UI-модулей, до загрузки модели.
+ * Гайд «Как это работает» сам не открывается — только кнопкой
+ * из настроек (MenuView).
  */
 DI.register('Boot', function () {
   function mount() {
@@ -10344,7 +10300,6 @@ DI.register('Boot', function () {
 
     DI.resolve('Embedder').load();
     NetService.start();
-    DI.resolve('Onboarding').init();
   }
 
   return { mount };
