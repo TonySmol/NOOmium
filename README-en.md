@@ -1,61 +1,229 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Status-active-success?style=for-the-badge" alt="Status">
-  <img src="https://img.shields.io/badge/Version-1.1.0-blueviolet?style=for-the-badge" alt="Version">
-  <img src="https://img.shields.io/badge/License-Apache%202.0-blue?style=for-the-badge" alt="License">
-  <img src="https://img.shields.io/badge/Platform-PWA%20%7C%20Telegram-lightgrey?style=for-the-badge" alt="Platform">
-  <img src="https://img.shields.io/badge/Model-Granite%20Embedding-orange?style=for-the-badge" alt="AI Model">
+  <img src="https://img.shields.io/badge/Version-1.2.0-blueviolet?style=for-the-badge" alt="Version">
+  <img src="https://img.shields.io/badge/Platform-PWA%20%7C%20Telegram-teal?style=for-the-badge" alt="Platform">
+  <img src="https://img.shields.io/badge/AI-on%20your%20device-orange?style=for-the-badge" alt="AI">
   <img src="https://img.shields.io/badge/Network-Nostr-9cf?style=for-the-badge" alt="Network">
+  <img src="https://img.shields.io/badge/Languages-RU%20%7C%20EN-9cf?style=for-the-badge" alt="Languages">
 </p>
 
 <h1 align="center">🧠 NOOmium</h1>
-<h3 align="center">A smart feed without the surveillance algorithm</h3>
+
+<h3 align="center">A notebook of thoughts that became a social network</h3>
 
 <p align="center">
-  <strong>Thoughts are found by meaning, not by keywords</strong>
+  <strong>The world's shared second brain.</strong> You write thoughts — the smart feed gathers what is close in meaning: yours and from the world.<br>
+  The pure essence of social networks: no feed of 30 channels, no doomscrolling, no noise.
 </p>
 
 <p align="center">
+  <a href="https://tonysmol.github.io/NOOmium/"><img src="https://img.shields.io/badge/Open_NOOmium-in_browser_or_Telegram-2ea44f?style=for-the-badge" alt="Open NOOmium"></a>
+  &nbsp;
   <sub>🇷🇺 <a href="README.md">Русская версия</a></sub>
 </p>
 
 <p align="center">
-  <a href="#-why-noomium">Why</a> •
-  <a href="#-principles">Principles</a> •
-  <a href="#-how-it-works">How it works</a> •
-  <a href="#-real-life-examples">Examples</a> •
-  <a href="#-security">Security</a> •
-  <a href="#-getting-started">Get started</a> •
-  <a href="#-faq">FAQ</a>
+  <img src="media/feed-dark-en.png" alt="NOOmium — a live feed of thoughts" width="840">
+</p>
+<p align="center"><sub>The live feed: fresh thoughts on top, a Telegram-channel repost with a “source” button below</sub></p>
+
+<p align="center">
+  <a href="#-manifesto">Manifesto</a> ·
+  <a href="#-what-noomium-is">What it is</a> ·
+  <a href="#-value-today">Value</a> ·
+  <a href="#-real-life-examples">Examples</a> ·
+  <a href="#-getting-started">Get started</a> ·
+  <a href="#-faq">FAQ</a> ·
+  <a href="#%EF%B8%8F-technical-part">Tech part</a>
 </p>
 
 ---
 
-## 📌 Why NOOmium
+## 🧭 Manifesto
 
-A conventional feed hooks you by **sensory anchors** — outrage, envy, fear of missing out. It doesn't care *what* you think; it cares that you don't leave. Every scroll is a monetized minute of your attention.
+Subscribed to 30 Telegram channels? That's **three hours of reading a day** — and half of it wasted: repeats, ads, "urgent" news you'll forget by evening.
 
-**NOOmium flips the task.** The feed doesn't guess what will hook you — it finds what is **close to your thought**. Literally: every thought becomes a point in meaning-space, and NOOmium shows what lies nearby.
+A conventional social network doesn't solve this problem — it **manufactures** it. The feed hooks you by the nerves: outrage, envy, fear of missing out. It doesn't care *what* you think. It cares that you don't leave. Every scroll is a monetized minute of your attention.
+
+**NOOmium is the pure essence of social networks.** Everything but the thoughts has been removed. No likes, no ratings, no infinite feed. Instead:
+
+- **You write** — thoughts pile up in a private notebook and stay yours forever.
+- **You read** — a smart feed: not "everything", but what resonates with your thoughts.
+- **You meet** — someone else's thought that is closer than a subscription: matched not by words, but by meaning.
 
 > You write *"the rain outside is calming"* — NOOmium surfaces a stranger's thought about the silence of a city at night. Not because the words matched. Because the **meaning** did.
 
-This is not another feed to doom-scroll. It is a **second brain** — a thinking tool that connects ideas by their essence, not their packaging. It works even when you're not reading: every thought you record becomes a vector, every search — geometry.
+Every thought here is a point in meaning-space. Your notebook is a **second brain, private**. The feed of everyone's thoughts is a **second brain, shared**. A worldwide one.
 
 ---
 
-## ✨ Principles
+## ✨ What NOOmium is
 
-| Principle | The essence |
-|-----------|-------------|
-| **Meaning > words** | Every thought is a vector in meaning-space. Search by proximity, not keywords — across language borders too: the model is multilingual |
-| **Privacy by Design** | Model, search, storage — local, in your browser. No server ever reads your thoughts |
-| **You are not a profile** | Cryptography instead of registration. Your key is you — not a row in someone else's database |
-| **The feed doesn't steer you** | Thresholds, modes, ranges — your settings, stored locally. No "improved relevance" at your expense |
-| **Offline is the norm** | Plane, subway, forest — notes and search always work; publishing catches up once you're back online |
-| **Yours stays yours** | Private thoughts are encrypted with your key. Relays see the fact of publication, never the content |
+| | What it does |
+|---|---|
+| 📝 **Notebook** | Thoughts up to 2,500 characters, private or public. Works offline: plane, subway, forest. Archive — export and import to JSON in one file |
+| 🧠 **Smart feed** | Built **by meaning**, not by chronology and not by an engagement algorithm. What counts as "similar" is your call (threshold and breadth of links — in settings). Segments: **Mine · World · Insights** |
+| 🌍 **World** | An open network of thoughts. Everyone has their own notebook; everyone shares one protocol. Thoughts have a family tree and a source. No owner, no "user database" |
+
+**A couple of gestures — and the feed is yours:**
+
+| Gesture | What happens |
+|---------|--------------|
+| **You write** | A thought becomes a vector — a point in meaning-space |
+| **You search** | Start typing — the feed filters by meaning instantly, before you even send |
+| **Pin 📌** | Click a thought — it becomes the context: the feed rebuilds and shows everything in tune, from your base and from the network |
+| **Drift** | Type while pinned — the context smoothly shifts toward your text. You can walk from someone else's thought to your own, step by step |
+| **Resonance ◆** | How many other people's thoughts grew out of yours. Your idea is no longer only yours |
+| **Genealogy ↳** | "Inspired by" leads back to the source, step by step. Thoughts have a family tree |
+| **Source ↩** | The original for thoughts forwarded from Telegram channels |
+| **Base** | All your notes: search, sorting, statistics |
+| **Deeper** | World history up to 90 days back — in one move |
 
 ---
 
-## ⚙️ How it works
+## 💰 Value today
+
+### If you read
+
+- You subscribe not to channels but **to meanings** — the feed assembles itself around what you think about.
+- Instead of three hours of scrolling thirty channels — **the concentrate**: only what resonates with you. Half of the "noise" is filtered out before it reaches the screen.
+- No need to open social networks and doomscroll: the essence is already in your feed. Opened — read your own — closed.
+- It's free: no server, subscription or ads — there is nothing for them to run on.
+
+### If you run a Telegram channel
+
+Channels already repost their posts here — with a link to the original. Why it pays off:
+
+- **Every post keeps working.** In a channel a post dies within a day — in NOOmium a thought is found by meaning months later: it reaches those thinking about the same thing *right now*.
+- **Organic inflow of subscribers.** A reader meets your thought in their feed → clicks "source ↩" → arrives at the channel already interested.
+- **Precise targeting.** A repost is shown only to those whose feed resonates with the topic — not "everyone". Promotion hits the target exactly, because everyone's feed is their own.
+- **Posts don't get lost.** From the channel, a thought spreads to readers' mirrors and stays findable — ads and repeats don't push it out.
+
+> The channel doesn't need to change anything: the same content — just a long life for every post, and subscribers who came for the meaning.
+
+---
+
+## 💡 Real-life examples
+
+### 1. "Rain" — search without matching words
+
+You wrote: *"The rain outside is calming. As if the city finally went quiet."*
+
+NOOmium surfaced from the world: *"I love going out at 3 a.m. — the streets are empty, and for the first time all day I can hear myself."* A stranger, another city, zero shared words. Shared meaning.
+
+### 2. Across the language border
+
+You write in Russian: *"can't focus — everything tears my attention apart"*.
+
+Among the finds — *deep work is about attention, not time*. The model is multilingual: it compared not the words, but the **meanings**. The second brain thinks in two languages at once.
+
+### 3. A channel post that outlives the channel's feed
+
+You run a markets channel and reposted a piece on "RWA volumes hit a record". A month later, someone who noted "curious where tokenized assets are heading" gets your post in their feed — by meaning, not chronology. They click "source ↩" — and subscribe. In the channel itself, the post would have drowned under a hundred news items by then.
+
+### 4. Subway — offline as the norm
+
+A tunnel. You write, edit, search by meaning — everything works: the model and the database are local. "To World" queues your thoughts. You surface at a station with network — the queue drains. You won't even notice.
+
+<p align="center">
+  <img src="media/feed-mobile.png" alt="NOOmium on a smartphone" width="330">
+</p>
+<p align="center"><sub>In your pocket: the same feed, the same offline</sub></p>
+
+<p align="center">
+  <img src="media/smart-feed-en.png" alt="NOOmium — smart feed in pinned mode" width="840">
+</p>
+<p align="center"><sub>Pin: pin a thought — the feed rebuilds by meaning. The “In tune · Serendipity · Glimpse” labels show how resonant each card is</sub></p>
+
+<p align="center">
+  <a href="https://tonysmol.github.io/NOOmium/"><img src="https://img.shields.io/badge/Try_it-no_registration_needed-2ea44f?style=for-the-badge" alt="Try NOOmium"></a>
+</p>
+
+---
+
+## 🚀 Getting started
+
+1. **Open NOOmium** — [in a browser](https://tonysmol.github.io/NOOmium/) or in Telegram. The key is generated for you: no sign-up, email or phone.
+2. **Wait for the model** (~120 MB, once; progress is in the header, then it's instant from cache).
+3. **Write your first thought.** Then click it — and watch the feed rebuild by meaning.
+4. **Save the key**: Menu → "Account & key" → Show → Copy. A new device needs only the key — the feed refills with your notes.
+5. **Set a password on the key** (same place): the key gets encrypted (ncryptsec), and login asks only for the password.
+
+Install as an app: in the browser — "Install app", the icon lands on your home screen (PWA). Interface — Russian or English, switchable in the menu.
+
+> ⚠️ **The key is unrecoverable.** This is not "forgot password — we'll email a link". This is cryptography. No one will recover it: not us, not the relays. The key is the account. Export it right away and keep it like a passport.
+
+---
+
+## ❓ FAQ
+
+<details>
+<summary><strong>Is it free? What does it cost?</strong></summary>
+
+There is nothing to charge for: no server, no subscription, no ads. The app is a static site, the network is public relays, the model downloads once from an open CDN.
+</details>
+
+<details>
+<summary><strong>Where are my notes stored?</strong></summary>
+
+In your browser (IndexedDB). Public copies spread across open relays — they cannot be removed from the world (that's how the protocol works). Private ones never leave your device in the open: they are encrypted with your key.
+</details>
+
+<details>
+<summary><strong>What if I lose the key?</strong></summary>
+
+No one will recover it. The key is the account — no second pair exists. That's why: export right after signup, optionally set a password on the key.
+</details>
+
+<details>
+<summary><strong>Does it work offline?</strong></summary>
+
+Yes, fully: create, edit, delete, meaning-based search. Publications queue up and drain once the network returns.
+</details>
+
+<details>
+<summary><strong>How is it different from the feed in Telegram/X?</strong></summary>
+
+There the platform's algorithm decides — here, proximity to your meaning. There, data lives on servers — here, with you. There, the goal is to hold attention — here, to connect thoughts.
+</details>
+
+<details>
+<summary><strong>Does it understand other languages?</strong></summary>
+
+Yes: the model is multilingual, search works across the language border — a thought in Russian finds one in English and vice versa. Interface: Russian / English.
+</details>
+
+<details>
+<summary><strong>Can I log in with my own Nostr key?</strong></summary>
+
+Yes: nsec, hex or ncryptsec. One key — one identity in Nostr.
+</details>
+
+<details>
+<summary><strong>How do I delete everything?</strong></summary>
+
+Menu → "Full reset": notes, cache, the model — everything is wiped from the browser, back to first-run state. Deleted public notes go out to the network as deletion facts — other users' mirrors clean them up themselves.
+</details>
+
+---
+
+## 🆕 What's new in 1.2.0
+
+- **Live transport.** Relay subscriptions rewritten: thoughts written on one device are visible on another; logging in with the key refills the feed. A failed publication no longer stays silent — the reason shows in the console.
+- **Onboarding doesn't pop up.** The "How it works" modal never opens on its own — only via a button in settings. Nobody read it, nobody will.
+- **Cleanup.** Dead code and patch-notes removed, comments — JSDoc only.
+
+History: `1.2.0 · 1.1.3 · 1.1.2 · 1.1.0`
+
+---
+
+---
+
+# 🛠️ Technical part
+
+> Below — for the curious. To use NOOmium you don't need any of this: it's just a website.
+
+### How it works
 
 ```mermaid
 flowchart LR
@@ -66,174 +234,58 @@ flowchart LR
     E --> F["Others' mirrors<br>find it by meaning"]
 ```
 
-| Action | What happens |
-|--------|--------------|
-| **You write** | A thought (up to 2,500 characters) becomes a vector — a point in meaning-space |
-| **You search** | Start typing — the feed filters by meaning instantly. "Private ↔ World" is the visibility switch when sending |
-| **Pin 📌** | Click a thought — it becomes the context: the feed shows everything in tune with it, from your base and from the network. A pinned thought becomes the "parent" of everything you write next |
-| **Drift** | Type while pinned — the context smoothly shifts toward your text. You can walk away from someone else's thought toward your own, step by step |
-| **Feed segments** | **Mine** — your thoughts · **World** — the network · **Insights** — broad semantic links: not "on the nose", but adjacent in meaning |
-| **Resonance ◆** | How many thoughts by others grew out of yours. Your idea is no longer only yours |
-| **Genealogy ↳** | "Inspired by" leads back to the source, step by step. Thoughts have a family tree |
-| **Source ↩** | The original for thoughts forwarded from Telegram channels |
-| **Base** | All your notes: search, sorting, statistics |
-| **Deep layer** | Load room history — up to 90 days back in one move |
+A thought is vectorized locally in a Web Worker and lives in three places: the browser (source of truth), the mirror (up to 2,000 other people's public thoughts, unused ones evicted), the Nostr network (state canon kind 30078, queries 21000/21001). Fresh — 7 days, history depth — 90 days. Incoming events are verified cryptographically (bip340): a forgery is dropped, whatever relay it came from.
 
----
+<details>
+<summary><strong>🔒 Security — details</strong></summary>
 
-## 💡 Real-life examples
+- **The model is on your device.** The AI runs locally in a Web Worker — texts go nowhere for vectorization. ~120 MB downloaded once, then from cache.
+- **Private is encrypted.** NIP-44 v2 (ECDH + ChaCha20-Poly1305) — only you can decrypt, on any device with your key.
+- **The key — optionally in a safe.** ncryptsec (NIP-49) with a password: the decrypted key lives only in session memory.
+- **No middleman server.** The network is the open Nostr protocol, 5 public relays. No owner, no single point of failure, no "user database".
+- **Signatures instead of trust.** Every incoming event is verified (bip340).
+- **CSP.** Content-Security-Policy with inline-script hashes — a successful XSS is nearly impossible.
+</details>
 
-### 1. "Rain" — search without matching words
+<details>
+<summary><strong>📖 NOOmium vocabulary</strong></summary>
 
-You wrote: *"The rain outside is calming. As if the city finally went quiet."*
-
-NOOmium surfaced from the network: *"I love stepping out at 3 a.m. — the streets are empty, and for the first time all day I can hear myself."* A stranger, another city, zero shared words. Shared meaning.
-
-### 2. Across the language border
-
-You write in Russian: *"I can't focus — everything keeps tearing my attention apart."*
-
-Among the finds: *deep work is about attention, not time*. The model is multilingual: it compared **meanings**, not words. Your second brain thinks in two languages at once.
-
-### 3. A family tree for ideas
-
-The thought about "the silence of a city at night" stuck with you — so you wrote your own, inspired by it. Your note remembers the kinship: the **↳ inspired-by** marker leads to the source, and the source has grown a **◆ 1**. A month later someone else finds your version — and the chain continues on its own. Thoughts in NOOmium are not posts in a vacuum; they are a family with a genealogy.
-
-### 4. The subway — offline as the norm
-
-A tunnel. You write, edit, search by meaning — everything works: the model and the database are local. "To World" quietly queues your thoughts. You surface at a station with signal — the queue drains, the canons are published. You won't even notice.
-
----
-
-## 🧭 Glossary
-
-| Term | What it means |
-|------|---------------|
+| Term | Meaning |
+|------|---------|
 | **Thought** | A note up to 2,500 characters: private or public |
 | **Pin** | Click a thought — it becomes the search context |
 | **Drift** | Smoothly shifting the context with your own text while pinned |
-| **Insights** | A feed segment with broad links (the range is configurable) |
+| **Insights** | Feed segment with broad meaning links (range is configurable) |
 | **Resonance ◆** | The number of authors whose thoughts grew out of yours |
-| **Genealogy ↳** | The "inspired by" chain back to the original |
-| **Mirror** | A local copy of others' public thoughts (up to 2,000; unused ones get evicted) |
+| **Genealogy ↳** | The "inspired by" chain back to the source |
+| **Mirror** | A local copy of other people's public thoughts (up to 2,000; unused ones evicted) |
 | **Canon** | The signed "official" version of a note on the Nostr network |
-| **Relay** | A public Nostr server-board. There are five; none is in charge |
-| **Key** | Your account: a pair of cryptographic keys. The only way in |
+| **Relay** | A public Nostr bulletin server. There are five, none is the main one |
+| **Key** | Your account: a cryptographic key pair. The only way in |
+</details>
 
----
-
-## 🛡 Security
-
-```mermaid
-flowchart TB
-    subgraph Device["🖥️ YOUR DEVICE"]
-        A["AI model<br>Granite-embedding 97M"]
-        B["Text vectorization<br>in a Web Worker"]
-        C["IndexedDB<br>notes + vectors + mirror"]
-        D["Private encryption<br>NIP-44 v2 (ECDH + ChaCha20)"]
-    end
-
-    subgraph Network["🌐 NOSTR NETWORK"]
-        E["Public relays"]
-        F["See: who, when"]
-        G["Don't see: content<br>private is encrypted"]
-        H["No server, no owner,<br>no user database"]
-    end
-
-    Device --> Network
-```
-
-### 🔒 Security details
-
-- **The model lives on your device.** The AI runs locally in a Web Worker — nobody reads your texts before vectorization. ~100 MB is downloaded once, then served from cache.
-
-- **Private is encrypted.** NIP-44 v2 (ECDH + ChaCha20-Poly1305) — only you can decrypt it, on any device holding your key.
-
-- **No middleman server.** The network is the open Nostr protocol over public relays. No central owner, no single point of failure, no "user base".
-
-- **Signatures instead of trust.** Every event from the network is verified cryptographically (bip340): forged or tampered notes are discarded, no matter which relay delivered them.
-
-- **The key on disk — optionally in a vault.** Since 1.1.0 you can store the key in an encrypted wrapper (ncryptsec, NIP-49) with a passphrase: on startup NOOmium asks for the passphrase, and the decrypted key lives only in session memory.
-
-- **CSP.** A strict Content-Security-Policy limits script sources — a successful XSS is nearly impossible.
-
-> ⚠️ **The key is unrecoverable.** This is not "forgot your password — we'll email a link". This is cryptography. Export your key under "Account & key" right after signup — and guard it like a passport.
-
----
-
-## 🚀 Getting started
-
-1. **Open NOOmium** in a browser or in Telegram (Mini App).
-2. **First launch:** the app generates a key. Or sign in with an existing Nostr key (nsec / hex / ncryptsec).
-3. **Install as an app:** Menu → "Install app" (PWA, an icon on your home screen).
-4. **Wait for the model** (~100 MB, once; progress is shown in the header, afterwards it loads instantly from cache).
-5. **Save your key:** "Account & key" → Show → Copy. Also make an archive: the same screen exports all your notes to JSON.
-
-**Requirements:** a modern browser (Chrome, Firefox, Safari). The internet is only needed for sync: notes, search and private data work offline.
-
----
-
-## 🎛 Make it yours
-
-| Setting | What it does |
-|---------|--------------|
-| **Relevance threshold** (50–95%) | The minimum semantic similarity required to enter the feed |
-| **Insights range** (5–30%) | How broad the links shown in "Insights" are |
-| **Theme** | Light / dark (in Telegram, the messenger's theme is picked up) |
-| **Language** | Russian / English — the interface is fully bilingual |
-| **Archive** | Export/import all notes to JSON — a safety net if relays wipe history |
-
----
-
-## ❓ FAQ
-
-**— Is it free? What does it cost?**
-There is nothing to pay for: no server, no subscription, no ads. The app is a static site, the network is public relays, the model downloads from an open CDN.
-
-**— What if I lose my key?**
-Nobody can recover it: not us, not the relays — nobody at all. The key is the account. That's why you export it right after signup.
-
-**— Does it work offline?**
-Fully: creating, editing, deleting, semantic search. Publications queue up and go out once the network returns.
-
-**— How is this different from a feed on X/Twitter?**
-There the platform's algorithm decides; here — proximity to your meaning. There the data lives on servers; here — with you. There the goal is to hold attention; here — to connect thoughts. See the principles table above.
-
-**— Does it understand other languages?**
-Yes: the model is multilingual, search works across language borders — a thought in English will find one in Russian, and vice versa.
-
-**— Can I sign in with my own Nostr key?**
-Yes: nsec, hex or ncryptsec. One key — one Nostr identity.
-
-**— How do I delete everything?**
-Menu → "Full reset": notes, cache, model — everything is wiped from the browser, back to first-launch state. Deleted public notes go out to the network as deletion facts — other users' mirrors clean them up on their own.
-
----
-
-## 🧩 Tech stack
+### Stack
 
 | Component | Technology |
 |-----------|------------|
 | **Platform** | PWA + Telegram Mini App |
-| **AI model** | granite-embedding-97m-multilingual-r2 (ONNX, q8) — locally in a Web Worker |
+| **AI model** | granite-embedding-97m-multilingual-r2 (ONNX, q8) — locally in a Web Worker, transformers.js 3.8.1 |
 | **Storage** | IndexedDB: notes, vectors, mirror |
-| **Network** | Nostr protocol: canons kind 30078 + queries 21000/21001 |
+| **Network** | Nostr: nostr-tools 2.25.2, state canons kind 30078, queries 21000/21001 |
 | **Encryption** | NIP-44 v2 (private) · NIP-49 ncryptsec (key) |
 | **Server** | None |
-| **Language** | JavaScript (ES modules, no build step) |
+| **Code** | Vanilla JavaScript, ES modules, no build: 37 modules across 8 layers, JSDoc comments |
 | **License** | Apache 2.0 |
 
----
+Deploy — 5 files, no build: copy to any static hosting.
 
-## 📎 Links
+### Links
 
-- 🌐 **Web version (PWA)** — installs as an app
-- 📱 **Telegram Mini App** — runs natively inside Telegram
-- 📂 **Source code** — open
+- 🌐 **App (PWA)** — <https://tonysmol.github.io/NOOmium/>
+- 📱 **Telegram Mini App** — <https://tonysmol.github.io/NOOmium/>
+- 📂 **Source code** — <https://tonysmol.github.io/NOOmium/>
 
----
-
-## 📄 License
+### License
 
 ```text
 Copyright © 2026 NOOmium
@@ -254,5 +306,6 @@ limitations under the License.
 ---
 
 <p align="center">
-  <strong>Made with ❤️ for those who value meaning over noise.</strong>
+  <strong>NOOmium — made for those who value meaning over noise.</strong><br>
+  <sub>🧠 Write thoughts. Read meanings. The second brain — yours and shared.</sub>
 </p>
