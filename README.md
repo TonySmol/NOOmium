@@ -1,6 +1,3 @@
-Вот профессиональный и стильный `README.md` для GitHub, оформленный по современным стандартам (с бейджами, эмодзи-акцентами и чёткой структурой).
-
-```markdown
 <p align="center">
   <img src="https://img.shields.io/badge/status-active-success.svg" alt="Status">
   <img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License">
@@ -120,4 +117,3 @@
 <p align="center">
   Сделано с ❤️ для тех, кто ценит смысл, а не шум.
 </p>
-```
