@@ -1,6 +1,6 @@
 /**
  * ═══════════════════════════════════════════════════════════════════
- * NOOmium — app.js · v1.2.0 (сборка 90)
+ * NOOmium — app.js · v1.2.1 (сборка 91)
  * Соцсеть смыслов: мысли ищутся по значению, а не по словам.
  * ═══════════════════════════════════════════════════════════════════
  *
@@ -45,7 +45,7 @@
 
 'use strict';
 
-const APP_VERSION = '1.2.0';
+const APP_VERSION = '1.2.1';
 
 /**
  * ═══ РЕЕСТР СОБЫТИЙ ШИНЫ ═══
@@ -4350,6 +4350,13 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
           seen.clear();
           peerQueryTimes.clear();
           resetOlderExhausted();
+
+          /** Смена ключа стирает зеркало (DB.reset в enterKey), а
+             lastSeen переживает reset в localStorage — подписка
+             «с lastSeen» вернула бы только события новее снапшота
+             прежнего аккаунта, и лента осталась бы пустой.
+             Обнуляем: повторная подписка пересоберёт свежий слой. */
+          Config.set('lastSeen', 0);
         }));
 
         busUnsubs.push(bus.on('sync:toggle', p => {
@@ -10283,6 +10290,12 @@ DI.register('Boot', function () {
     bus.on('wipe:request', async () => {
       const report = await NetService.publishWipeAll().catch(() => ({ published: 0, offline: true }));
       try { await DB.reset(); } catch (_) {}
+      /** Зеркало стёрто — lastSeen больше не «я всё видел до этой
+         метки». Обнуляем и переподключаемся: свежий слой комнаты
+         пересоберётся с релеев (свои заметки вернутся надгробиями
+         и не оживут, чужие — живыми канонами). */
+      try { DI.resolve('Config').set('lastSeen', 0); } catch (_) {}
+      try { NetService.resync(); } catch (_) {}
       Toast.show(report && report.offline ? 'warn' : 'ok',
         I18n.t(report && report.offline ? 'toast.wipe.offline' : 'toast.base.wiped'));
       DI.resolve('Store').setState({ view: 'stream' });
