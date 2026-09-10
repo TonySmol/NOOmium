@@ -1,5 +1,5 @@
 /* ═══════════════════════════════════════════════════════════════════
-   NOOmium — Design System «Quiet Room» v2.5 (v1.2.2)
+   NOOmium — Design System «Quiet Room» v2.6 (v1.2.3)
    Мысль важнее интерфейса: интерфейс почти невидим и вспыхивает
    янтарным только там, где живёт смысл.
 
@@ -97,6 +97,7 @@
   --teal-glow: rgba(20, 184, 166, 0.12);
   --rose: #f43f5e;
   --rose-glow: rgba(244, 63, 94, 0.12);
+  --rose-text: #fb7189;
   --green: #22c55e;
   --green-glow: rgba(34, 197, 94, 0.12);
 
@@ -149,6 +150,7 @@
 
   --rose: #e11d48;
   --rose-glow: rgba(225, 29, 72, 0.10);
+  --rose-text: #be123c;
 
   --green: #16a34a;
   --green-glow: rgba(22, 163, 74, 0.12);
@@ -1978,7 +1980,7 @@ body.ready #app { display: flex; }
 .menu-row:active:not(:disabled) { transform: scale(0.99); }
 
 .menu-row.danger {
-  color: var(--rose);
+  color: var(--rose-text);
   background: var(--rose-glow);
   border-color: transparent;
 }
