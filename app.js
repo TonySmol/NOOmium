@@ -1,6 +1,6 @@
 /**
  * ═══════════════════════════════════════════════════════════════════
- * NOOmium — app.js · v1.2.1 (сборка 91)
+ * NOOmium — app.js · v1.2.2 (сборка 92)
  * Соцсеть смыслов: мысли ищутся по значению, а не по словам.
  * ═══════════════════════════════════════════════════════════════════
  *
@@ -45,7 +45,7 @@
 
 'use strict';
 
-const APP_VERSION = '1.2.1';
+const APP_VERSION = '1.2.2';
 
 /**
  * ═══ РЕЕСТР СОБЫТИЙ ШИНЫ ═══
@@ -2171,6 +2171,210 @@ DI.register('DB', function (Config, bus, Logger) {
 /** ═══ СЛОЙ: AI ═══ */
 
 /**
+ * ═══ AI/SemanticClean ═══
+ *
+ * Семантическая чистка текста перед векторизацией (v1.0): эмбеддер
+ * Granite (CLS-pooling, instruction-blind) векторизует всё, что видит, —
+ * SEO-мусор (кластеры хештегов, «подпишись на канал», ссылки, npub-подписи)
+ * уводит вектор от смысла (замер: −0.035 косинуса на короткой заметке;
+ * чистка возвращает точно). Визуальный текст заметки НЕ меняется — чистится
+ * только копия для эмбеддинга. Лестница фолбэков full→fold→raw: векторизация
+ * не ломается ни при каких входах. Симметрична: применяется и к заметкам,
+ * и к поисковым запросам. Калибровка: 138/138 (calibrate.mjs).
+ * Один и тот же модуль — в приложении и в боте (publish-конвейер).
+ */
+
+const SemanticClean = (function () {
+  'use strict';
+
+  /** Минимальная длина смыслового остатка (симв.), иначе фолбек. */
+  const MIN_LEN = 24;
+  /** Минимум «словесных» токенов, иначе фолбек. */
+  const MIN_WORDS = 3;
+  /** Пороги fold-режима (тези — единственный контент). */
+  const FOLD_MIN_LEN = 8;
+  const FOLD_MIN_WORDS = 1;
+  /** Потолок текста для эмбеддинга (модель всё равно режет 512 токенов). */
+  const MAX_CHARS = 1500;
+
+  /** Nostr-сущности: любой токен с префиксом npub1/nsec1/... — целиком. */
+  const RE_NOSTR = /(?:npub|nsec|nprofile|nevent|naddr|note)1[^\s]+|nostr:[^\s]+/g;
+  /** URL (http/https/www/t.me/telegram). */
+  const RE_URL = /\b(?:https?:\/\/|www\.)[^\s<>"')\]]+|\b(?:t\.me|telegram\.me|tele\.link)\/[^\s<>"')\]]+/gi;
+  /** Хештег-токен (после отрезания URL и сущностей). */
+  const RE_TAG = /#[\p{L}\p{N}_]+/gu;
+  /** Строка состоит только из «украшений»: эмодзи/пунктуация/разделители, без букв и цифр. */
+  const RE_DECOR_ONLY = /^[\s\p{P}\p{S}\u2500-\u27BF\u2B00-\u2BFF◆●▪∙•~—–-]+$/u;
+  /** Есть ли буквы/цифры (для «пустой» проверки). */
+  const RE_HAS_WORD = /[\p{L}\p{N}]/u;
+  /** Ярлык-строка без содержания: «Подробнее:», «Источник:», «Читать:». */
+  const RE_LABEL_ONLY = /^[\p{L}\p{N}\s…-]{2,24}:\s*$/u;
+
+  /**
+   * Маркетинг/CTA-фразы (RU+EN). Убивает СТРОКУ целиком, если фраза
+   * найдена и строка короткая (<120 симв. — длинные абзацы с упоминанием
+   * «подписки» в смысле текста не трогаем).
+   */
+  const CTA_PATTERNS = [
+    /подпис\p{L}*\s+на\s+(?:наш|этот|мой|наший)?\s*(?:телеграм|тг|канал|профиль|рассыл)/iu,
+    /(?:подпиш\p{L}+|подписывай\p{L}*)/iu,
+    /(?:присоединя\p{L}+|вступай\p{L}*\s+в\s+(?:канал|групп))/iu,
+    /читай\p{L}*\s+(?:далее|продолжение|в\s+(?:нашем|источник|первоисточник))/iu,
+    /(?:полная|полный)\s+(?:версия|текст)\s+(?:по\s+ссылке|тут|здесь|в\s+канале)/iu,
+    /наш(?:ем|его)?\s+(?:телеграм|тг[\s-]?канал|дзен|профиль)/iu,
+    /оригинал\s+(?:по\s+ссылке|тут|здесь)|^источник\s*[.:]/iu,
+    /по\s+материал(?:ам|е)\s*[.:]/iu,
+    /(?:read|reading)\s+(?:more|the\s+full\s+story)/iu,
+    /full\s+(?:version|story|article)\s+(?:at|by|on)\s+(?:the\s+)?link/iu,
+    /subscribe\s+(?:to|for)|follow\s+us\s+(?:on|at)|join\s+(?:our|the)\s+(?:channel|telegram)/iu,
+    /(?:powered|published)\s+by\s+@?\w+|зеркало\s*:|опубликовано\s+через|(?:^|\s)via\s+@\w+/iu,
+    /репост\p{L}*\s*(?:это|этой)?\s*(?:заметки|поста)?|поделиться\s+(?:с\s+друзья|в\s+сет)/iu,
+    /bit\.ly|cutt\.ly|tinyurl|is\.gd|shorturl/iu
+  ];
+
+  /** Латиница/кириллица (для подсчёта букв вне тегов; /g обязателен). */
+  const RE_WORDCHAR = /[\p{L}\p{N}_]/gu;
+
+  /** NFC + вырезание невидимых символов. */
+  function normalize(text) {
+    let s = String(text || '');
+    try { s = s.normalize('NFC'); } catch (_) {}
+    return s
+      .replace(/[\u200B-\u200F\u202A-\u202E\u2060\uFEFF]/g, '')
+      .replace(/[\u0000-\u0008\u000B-\u001F\u007F]/g, '');
+  }
+
+  /** Строка — сплошной кластер хештегов? («#a #b, #c») */
+  function isTagCluster(line) {
+    const tags = line.match(RE_TAG);
+    if (!tags) return false;
+    let tagChars = 0;
+    for (const t of tags) tagChars += t.length;
+    const letters = line.replace(RE_TAG, '');
+    const letterChars = (letters.match(RE_WORDCHAR) || []).length;
+    // >70% буквосодержимого строки сидит в тегах → кластер
+    return tagChars > 0 && letterChars <= tagChars * 0.42;
+  }
+
+  /** Строка-мусор: только декор? */
+  function isDecorLine(line) {
+    const t = line.replace(RE_URL, '').replace(RE_NOSTR, '');
+    if (RE_HAS_WORD.test(t)) return false;
+    return RE_DECOR_ONLY.test(line) || !t.trim();
+  }
+
+  /** Строка с CTA-мусором (короткая маркетинговая)? */
+  function isCtaLine(line) {
+    if (line.length > 120) return false;
+    for (const re of CTA_PATTERNS) {
+      if (re.test(line)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Развернуть одиночные хештеги в слова: «#борщ» → «борщ».
+   * Используется в fallback-режиме fold (тег — тоже контент).
+   */
+  function unfoldTags(s) {
+    return s.replace(RE_TAG, m => m.slice(1));
+  }
+
+  /**
+   * Основной проход по строкам.
+   * @param {string} text
+   * @param {boolean} foldTags — развернуть теги в слова вместо удаления
+   * @returns {string}
+   */
+  function pass(text, foldTags) {
+    const lines = text.split(/\r?\n/);
+    const kept = [];
+
+    for (let rawLine of lines) {
+      let line = rawLine;
+
+      // 1) сущности, ссылки, ↩-маркеры источника — вон из строки
+      line = line.replace(RE_NOSTR, ' ');
+      line = line.replace(RE_URL, ' ');
+      line = line.replace(/[↩⤴]/g, ' ');
+
+      const trimmed = line.trim();
+
+      // 2) строки-мусор
+      if (!trimmed) continue;
+      if (isDecorLine(line)) continue;
+      if (isCtaLine(trimmed)) continue;
+      if (RE_LABEL_ONLY.test(trimmed)) continue;
+      if (!foldTags && isTagCluster(trimmed)) continue;
+
+      // 3) теги внутри содержательной строки → разворачиваем в слова
+      //    (в fold-режиме кластеры тоже разворачиваются — тег остаётся
+      //    контентом; в full кластеры уже отфильтрованы выше)
+      line = unfoldTags(line);
+
+      // 4) хвостовой мусор: обрубки «Читать д…», концевые стрелки
+      line = line.replace(/(?:^|\s)читать\s+д(?:альше|алее|\.\.\.|…)?\s*[→↪]?\s*$/iu, '');
+      line = line.replace(/\s*[→↪⤴]+\s*$/, '');
+
+      if (line.trim()) kept.push(line.trim());
+    }
+
+    let out = kept.join('\n');
+    // схлопнуть: 3+ перевода строк → 2; пробельные серии → 1
+    out = out.replace(/\n{3,}/g, '\n\n').replace(/[ \t]{2,}/g, ' ');
+    return out.trim();
+  }
+
+  /** «Достаточно ли смысла осталось»: длина + словесные токены. */
+  function meaningful(s, minLen, minWords) {
+    if (!s) return false;
+    const stripped = s.replace(RE_TAG, ' ');
+    if (stripped.length < minLen) return false;
+    const words = (stripped.match(/[\p{L}\p{N}]{2,}/gu) || []).length;
+    return words >= minWords;
+  }
+
+  /** Обрезка до MAX_CHARS по границе слова/строки. */
+  function cap(s) {
+    if (s.length <= MAX_CHARS) return s;
+    const cut = s.slice(0, MAX_CHARS);
+    const nl = cut.lastIndexOf('\n');
+    const sp = cut.lastIndexOf(' ');
+    const at = Math.max(nl, sp);
+    return (at > MAX_CHARS * 0.6 ? cut.slice(0, at) : cut).trim() + '…';
+  }
+
+  /**
+   * Главная функция.
+   * @param {string} text — исходный текст заметки/запроса (не мутируется)
+   * @returns {{text: string, mode: 'full'|'fold'|'raw'}}
+   */
+  function clean(text) {
+    const src = String(text || '');
+    if (!src.trim()) return { text: '', mode: 'raw' };
+
+    const norm = normalize(src);
+
+    // full — агрессивная чистка (кластеры тегов и мусор удалены;
+    // одиночные теги в содержательных строках развёрнуты в слова)
+    let out = pass(norm, false);
+    if (meaningful(out, MIN_LEN, MIN_WORDS)) return { text: cap(out), mode: 'full' };
+
+    // fold — щадящая: теги-кластеры тоже разворачиваются в слова
+    out = pass(norm, true);
+    if (meaningful(out, FOLD_MIN_LEN, FOLD_MIN_WORDS)) return { text: cap(out), mode: 'fold' };
+
+    // raw — никогда не ломаем векторизацию
+    return { text: cap(norm), mode: 'raw' };
+  }
+
+  return {
+    clean,
+    version: '1.0',
+  };
+})();
+
+/**
  * ═══ AI/Embedder ═══
  *
  * Эмбеддер Granite R2: Web Worker (Blob, module) + transformers.js,
@@ -3929,19 +4133,35 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   let lastSeenTimer = 0;
   let lastSeenPending = 0;
 
+  /** v92: поколение сети/аккаунта. Растёт на stop() и account:changed.
+   *  Таймер trackLastSeen чужого поколения гаснет без записи — lastSeen
+   *  не может «отравиться» после входа ключом или сброса базы (фикс
+   *  пустой ленты на новом устройстве). */
+  let netGen = 0;
+
   function trackLastSeen(ev) {
     if (!ev || typeof ev.created_at !== 'number') return;
     if (ev.created_at > lastSeenPending) {
       lastSeenPending = ev.created_at;
     }
     if (lastSeenTimer) return;
+    const myGen = netGen;
     lastSeenTimer = setTimeout(() => {
       lastSeenTimer = 0;
+      if (myGen !== netGen) return; // эпоха сменилась — не пишем
       const prev = Config.get('lastSeen', 0);
       if (lastSeenPending > prev) {
         Config.set('lastSeen', lastSeenPending);
       }
+      lastSeenPending = 0;
     }, 2000);
+  }
+
+  /** v92: погасить таймеры lastSeen и поднять поколение. */
+  function bumpNetGen() {
+    netGen++;
+    if (lastSeenTimer) { clearTimeout(lastSeenTimer); lastSeenTimer = 0; }
+    lastSeenPending = 0;
   }
 
   /**
@@ -4315,15 +4535,30 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
 
     ensureOnlineListener();
 
-    startPromise = Nostr.init()
-      .then(() => DB.ready())
+    const myGen = netGen; // v92: старт отменяется stop()/сменой ключа
+
+    const p = Nostr.init()
       .then(() => {
+        if (myGen !== netGen) return; // v92: отменён — не подписываемся
+        return DB.ready();
+      })
+      .then(() => {
+        if (myGen !== netGen) return; // v92
         const Notes = DI.resolve('Notes');
         return Notes.init();
       })
       .then(() => {
+        if (myGen !== netGen) {  // v92: поздний старт после stop()
+          started = false;
+          return;
+        }
         started = true;
         reconnectAttempts = 0;
+
+        /** v92: свежая эпоха — свежий дедуп (страховка от «проглоченного»
+            account:changed при входе ключом до завершения старта). */
+        seen.clear();
+        peerQueryTimes.clear();
 
         busUnsubs.forEach(u => {
           try { u(); } catch (_) {}
@@ -4356,6 +4591,14 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
              «с lastSeen» вернула бы только события новее снапшота
              прежнего аккаунта, и лента осталась бы пустой.
              Обнуляем: повторная подписка пересоберёт свежий слой. */
+          bumpNetGen(); // v92: гасим отложенный таймер lastSeen (фикс пустой ленты)
+          Config.set('lastSeen', 0);
+        }));
+
+        busUnsubs.push(bus.on('wipe:request', () => {
+          /** v92: «Стереть базу» — та же защита от отложенного
+             trackLastSeen, что и при смене ключа. */
+          bumpNetGen();
           Config.set('lastSeen', 0);
         }));
 
@@ -4413,10 +4656,10 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
           if (!started) start();
         }, 10000);
       }).finally(() => {
-        startPromise = null;
+        if (startPromise === p) startPromise = null; // v92: не трогаем чужой
       });
-
-    return startPromise;
+    startPromise = p;
+    return p;
   }
 
   /**
@@ -4445,6 +4688,9 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
    * @param {boolean} full
    */
   function stop(full) {
+    /** v92: старт, висящий в полёте, отменяем поднятием поколения;
+     *  таймеры lastSeen гасим — они принадлежали старой эпохе. */
+    bumpNetGen();
     started = false;
 
     if (subscription && typeof subscription.close === 'function') {
@@ -4493,12 +4739,13 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     olderBusy = false;
     olderExhaustedAt = null;
 
-    if (full) {
-      seen.clear();
-      peerQueryTimes.clear();
-    }
+    /** v92: дедуп чистится всегда — новая эпоха подписок должна
+        увидеть события заново (enterKey вызывает stop(false)). */
+    seen.clear();
+    peerQueryTimes.clear();
 
     setStatus('disconnected');
+    startPromise = null; // v92: отложенный start() строит свежую цепочку
   }
 
   /**
@@ -4662,7 +4909,8 @@ DI.register('Notes', function (DB, Embedder, bus, Logger, Utils) {
     const t = (text || '').trim();
     if (!t) throw new Error('empty');
 
-    const vector = await Embedder.embed(t);
+    // v92: вектор — по смысловой части (SemanticClean), показ — полный текст
+    const vector = await Embedder.embed(SemanticClean.clean(t).text);
 
     const now = Date.now();
     const note = {
@@ -4701,7 +4949,8 @@ DI.register('Notes', function (DB, Embedder, bus, Logger, Utils) {
     const note = await DB.getNote(uid);
     if (!note) throw new Error('not found');
 
-    const vector = await Embedder.embed(t);
+    // v92: вектор — по смысловой части (SemanticClean), показ — полный текст
+    const vector = await Embedder.embed(SemanticClean.clean(t).text);
     note.text = t;
     note.vector = vector ? Array.from(vector) : null;
     note.version = nextVersion();
@@ -4882,7 +5131,8 @@ DI.register('Notes', function (DB, Embedder, bus, Logger, Utils) {
 
       if (!n || (n.vector && n.vector.length) || !n.text) continue;
 
-      const v = await Embedder.embed(n.text);
+      // v92: вектор — по смысловой части (SemanticClean), показ — полный текст
+      const v = await Embedder.embed(SemanticClean.clean(n.text).text);
       if (!v) continue;
 
       let fresh;
@@ -5199,7 +5449,9 @@ DI.register('Context', function (Store, Embedder, Config, Utils, bus) {
       return;
     }
 
-    Embedder.embed(t).then(v => {
+    // v92: чистка запроса симметрична чистке заметок — косинус
+    // восстанавливается до точного значения «чистой пары»
+    Embedder.embed(SemanticClean.clean(t).text).then(v => {
       if (inputText.trim() === t) {
         inputVector = v;
         push();
@@ -5870,6 +6122,11 @@ DI.register('Account', function (Config, Nostr, Crypto, DB, bus, Logger, Toast, 
       const pk = Nostr.setKey(sk);
 
       await DB.reset();
+
+      /** v92: обнуляем у ИСТОЧНИКА смены ключа — покрывает случай,
+         когда account:changed обработан не был (NetService ещё
+         достартовывал: хендлеры не зарегистрированы). */
+      Config.set('lastSeen', 0);
 
       Config.set('keyExported', false);
 
