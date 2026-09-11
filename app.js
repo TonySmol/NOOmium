@@ -1,6 +1,6 @@
 /**
  * ═══════════════════════════════════════════════════════════════════
- * NOOmium — app.js · v1.2.4 (сборка 94)
+ * NOOmium — app.js · v1.2.5 (сборка 95)
  * Соцсеть смыслов: мысли ищутся по значению, а не по словам.
  * ═══════════════════════════════════════════════════════════════════
  *
@@ -9,7 +9,9 @@
  * фикс, SimplePool, 5 публичных релеев): каноны состояний kind 30078,
  * запросы 21000, ответы 21001 (v94: ПОИСК тоже анонсируется в сеть —
  * чужие клиенты ищут у себя и отвечают ссылками, заметки подтягиваются
- * точечными батч-подписками), приватные каноны — NIP-44 v2,
+ * точечными батч-подписками; v95: отвечают и срезом зеркала — ссылка
+ * несёт настоящего владельца; v95: пустая выдача сама копает релей
+ * вглубь страницами fetchOlder), приватные каноны — NIP-44 v2,
  * шифрование ключа на устройстве — NIP-49. Эмбеддинг — локальная
  * модель Granite (ONNX, q8, CLS-pooling, normalize) в Web Worker
  * (transformers.js@3.8.1 фикс). Хранилище — IndexedDB noomium_v3
@@ -47,7 +49,7 @@
 
 'use strict';
 
-const APP_VERSION = '1.2.4';
+const APP_VERSION = '1.2.5';
 
 /**
  * ═══ РЕЕСТР СОБЫТИЙ ШИНЫ ═══
@@ -63,6 +65,8 @@ const APP_VERSION = '1.2.4';
  * net:answer    NetService → Mirror            {queryId, uid, owner, score}
  * net:ask       NetService → FeedView          {queryId, window} — v94:
  *               поиск анонсирован в сеть, ждём ответы window мс
+ * net:deep      NetService → FeedView          {active} — v95:
+ *               глубокий поиск: пустая выдача копает релей вглубь
  * net:resync    NetService → Mirror            (сброс fetched-дедупа)
  *
  * sync:status   NetService → AccountView       {phase: 'off'|'active'|'idle'}
@@ -425,6 +429,8 @@ DI.register('I18n', function (Config, bus) {
     'seg.world': 'Мир',
     'seg.seren': 'Озарения',
     'seg.world.ask': 'Спрашиваю сеть…',
+    'seg.world.deep': 'Копаю глубже в релей…',
+    'seg.warm': 'Готовлю модель поиска…',
 
     'ctx.pinned': 'пин',
     'ctx.drift': 'дрейф от',
@@ -675,6 +681,8 @@ DI.register('I18n', function (Config, bus) {
     'seg.world': 'World',
     'seg.seren': 'Insights',
     'seg.world.ask': 'Asking the network…',
+    'seg.world.deep': 'Digging deeper into the relay…',
+    'seg.warm': 'Warming up the search model…',
 
     'ctx.pinned': 'pinned',
     'ctx.drift': 'drift from',
@@ -939,6 +947,8 @@ DI.register('Config', function () {
     maxResponses: 8,
     responseWindow: 6000,
     searchAskNet: true,
+    searchDeepPages: 6,
+    searchDeepMin: 3,
     fetchBatchWindow: 400,
     fetchBatchMax: 24,
     centroidCount: 12,
@@ -3804,14 +3814,23 @@ DI.register('Protocol', function (Config, Vec, Vault, Nostr, Utils) {
    * @returns {Object}
    */
   function answerEvent(note, score, queryId) {
+    const tags = [
+      ['t', Config.get('room', 'noomium-main')],
+      ['e', queryId],
+      ['uid', note.uid],
+    ];
+
+    /** v95: зеркальный ответ — ссылка на чужую заметку несёт её
+        настоящего владельца. Старые клиенты тег игнорируют (у них
+        owner = отвечающий), новые подтягивают канон от автора. */
+    if (note.owner && typeof note.owner === 'string') {
+      tags.push(['owner', note.owner]);
+    }
+
     return {
       kind: Config.get('kAnswer', 21001),
       created_at: Math.floor(Date.now() / 1000),
-      tags: [
-        ['t', Config.get('room', 'noomium-main')],
-        ['e', queryId],
-        ['uid', note.uid],
-      ],
+      tags,
       content: JSON.stringify({ score }),
     };
   }
@@ -3825,6 +3844,7 @@ DI.register('Protocol', function (Config, Vec, Vault, Nostr, Utils) {
 
     const eTag = findTag(ev.tags, 'e');
     const uidTag = findTag(ev.tags, 'uid');
+    const ownerTag = findTag(ev.tags, 'owner');
     if (!eTag || !uidTag || !uidTag[1]) return null;
 
     let data = null;
@@ -3832,10 +3852,17 @@ DI.register('Protocol', function (Config, Vec, Vault, Nostr, Utils) {
       data = JSON.parse(ev.content);
     } catch (_) {}
 
+    /** v95: владелец заметки из тега (зеркальный ответ), фоллбек —
+        отвечающий (свои заметки, ответы старых клиентов). */
+    const owner = ownerTag && typeof ownerTag[1] === 'string'
+      && /^[0-9a-f]{64}$/.test(ownerTag[1])
+      ? ownerTag[1]
+      : ev.pubkey;
+
     return {
       queryId: eTag[1],
       uid: uidTag[1],
-      owner: ev.pubkey,
+      owner,
       score: data && typeof data.score === 'number' ? data.score : 0,
     };
   }
@@ -3898,6 +3925,12 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   let olderBusy = false;
   /** @type {number|null} */
   let olderExhaustedAt = null;
+
+  /** v95: глубокий поиск — состояние (пустая выдача копает релей). */
+  let deepBusy = false;
+  let deepSig = '';
+  let deepLastAt = 0;
+  let deepTimer = null;
 
   const QUEUE_KEY = 'noomium:queue';
 
@@ -4097,6 +4130,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
    */
 
   let centroidTimer = 0;
+  let centroidsBuiltAt = 0;
 
   function rebuildCentroids() {
     if (centroidTimer) return;
@@ -4107,8 +4141,24 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   }
 
   function rebuildCentroidsNow() {
-    DB.allNotes().then(notes => {
-      const vecs = notes.filter(n => n.visibility === 'public' && n.vector).map(n => n.vector);
+    /** v95: центроиды из своих публичных + зеркала — префильтр не
+        отбрасывает запросы, на которые есть ответы в срезе. Не чаще
+        раза в 10с: массовый синк/деф не гоняет kmeans подряд. */
+    const now = Date.now();
+    if (now - centroidsBuiltAt < 10000) return;
+    centroidsBuiltAt = now;
+
+    Promise.all([DB.allNotes(), DB.allMirror()]).then(([notes, mirror]) => {
+      const vecs = [];
+      for (const n of notes) {
+        if (n && n.visibility === 'public' && n.vector) vecs.push(n.vector);
+      }
+      for (const m of mirror) {
+        if (m && m.visibility === 'public' && !m.deleted && m.vec && m.text) {
+          vecs.push(m.vec);
+        }
+      }
+
       if (!vecs.length) {
         centroids = [];
         return;
@@ -4261,29 +4311,56 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
 
     if (!passesPrefilter(q.vector)) return;
 
-    DB.allNotes().then(notes => {
-      const candidates = notes.filter(n => n.visibility === 'public' && n.vector);
-      if (!candidates.length) return null;
+    /** v95: «выключенный синк = ничего не отправлять в сеть» —
+        распространено и на ответы чужим запросам. */
+    if (!Config.get('syncEnabled', true)) return;
 
-      const byId = new Map(candidates.map(n => [n.uid, n]));
-      const items = candidates.map(n => ({ id: n.uid, vector: n.vector }));
+    /** v95: отвечаем своими заметками И срезом зеркала — каждый
+        онлайн-клиент делится всем, что видел на релеях. Ответ на
+        чужую заметку несёт её настоящего владельца (owner-тег). */
+    Promise.all([DB.allNotes(), DB.allMirror()])
+      .then(([notes, mirror]) => {
+        const ownUids = new Set();
+        for (const n of notes) {
+          if (n && n.uid) ownUids.add(n.uid);
+        }
 
-      return Ranker.cosineBatch(q.vector, items).then(scored => {
-        const top = scored
-          .filter(s => s.score >= Config.get('threshold', 0.81))
-          .slice(0, q.maxResponses || Config.get('maxResponses', 8));
+        const byId = new Map();
+        const candidates = [];
 
-        top.forEach((s, i) => {
-          const note = byId.get(s.id);
-          if (!note) return;
+        for (const n of notes) {
+          if (!n || n.visibility !== 'public' || !n.vector || !n.text) continue;
+          if (byId.has(n.uid)) continue;
+          byId.set(n.uid, { uid: n.uid, owner: null });
+          candidates.push({ id: n.uid, vector: n.vector });
+        }
 
-          setTimeout(() => {
-            Nostr.publish(Protocol.answerEvent(note, s.score, q.queryId))
-              .catch(e => Logger.warn('NetService: не отправить ответ', String(e && e.message || e)));
-          }, i * 250);
+        for (const m of mirror) {
+          if (!m || m.visibility !== 'public' || !m.vec || !m.text || m.deleted) continue;
+          if (ownUids.has(m.uid) || byId.has(m.uid)) continue;
+          byId.set(m.uid, { uid: m.uid, owner: m.owner });
+          candidates.push({ id: m.uid, vector: m.vec });
+        }
+
+        if (!candidates.length) return null;
+
+        return Ranker.cosineBatch(q.vector, candidates).then(scored => {
+          const top = scored
+            .filter(s => s.score >= Config.get('threshold', 0.81))
+            .slice(0, q.maxResponses || Config.get('maxResponses', 8));
+
+          top.forEach((s, i) => {
+            const note = byId.get(s.id);
+            if (!note) return;
+
+            setTimeout(() => {
+              Nostr.publish(Protocol.answerEvent(note, s.score, q.queryId))
+                .catch(e => Logger.warn('NetService: не отправить ответ', String(e && e.message || e)));
+            }, i * 250);
+          });
         });
-      });
-    }).catch(e => Logger.warn('NetService: ошибка обработки запроса', String(e && e.message || e)));
+      })
+      .catch(e => Logger.warn('NetService: ошибка обработки запроса', String(e && e.message || e)));
   }
 
   /**
@@ -4515,6 +4592,95 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   }
 
   /**
+   * v95: глубокий поиск — если локальная выдача пуста, клиент сам
+   * копает релей вглубь страницами fetchOlder (до searchDeepPages),
+   * пока не найдёт или не упрётся в дно (90 дней истории). Даёт
+   * «максимально возможную выдачу» даже когда никто не онлайн:
+   * свежий клиент не зависит от чужих срезов. Дебаунс 1.2с —
+   * ждём стабилизации контекста и первого пересчёта лент.
+   */
+  function scheduleDeepSearch() {
+    if (deepTimer) clearTimeout(deepTimer);
+    deepTimer = setTimeout(() => {
+      deepTimer = null;
+      maybeDeepSearch();
+    }, 1200);
+  }
+
+  /**
+   * @param {string} sig
+   * @param {Object} ctx
+   * @returns {boolean}
+   */
+  function sameCtx(sig, ctx) {
+    return !!ctx
+      && sig === ctx.source + '|' + (ctx.uid || '') + '|' + (ctx.text || '');
+  }
+
+  /**
+   * Один проход глубокого поиска: страницы вглубь, после каждой —
+   * пауза на переранжирование ленты; нашли — стоп; дно — стоп;
+   * сменился контекст — стоп. Повтор того же запроса — не чаще
+   * раза в 20с (длинный набор текста не должен долбить релеи).
+   */
+  async function maybeDeepSearch() {
+    const maxPages = Math.max(0, Math.floor(Config.get('searchDeepPages', 6)));
+    if (!maxPages || deepBusy) return;
+
+    const ctx = Store.get('context');
+    if (!ctx || !ctx.vector) return;
+    if (ctx.source !== 'input' && ctx.source !== 'pin' && ctx.source !== 'drift') return;
+
+    const sig = ctx.source + '|' + (ctx.uid || '') + '|' + (ctx.text || '');
+    const now = Date.now();
+
+    if (sig === deepSig && now - deepLastAt < 20000) return;
+
+    deepSig = sig;
+    deepLastAt = now;
+
+    const st = Store.getState();
+    const minFound = Math.max(1, Math.floor(Config.get('searchDeepMin', 3)));
+    if (st.lists.local.length + st.lists.world.length >= minFound) {
+      return; // релевантной выдачи достаточно — глубина не нужна
+      // (серендипити ≠ «нашлось»: порог 0.74–0.81 — соседние смыслы,
+      // не ответ на запрос; e2e-мусор в свежем слое не глушит глубину)
+    }
+
+    deepBusy = true;
+    emitDeep(true);
+
+    Logger.info('NetService: глубокий поиск — копаю вглубь (до ' + maxPages + ' стр.)');
+
+    try {
+      for (let page = 0; page < maxPages; page++) {
+        if (!sameCtx(sig, Store.get('context'))) break;
+
+        const got = await fetchOlder();
+        if (!got) break; // дно или транспорт не готов
+
+        await new Promise(r => setTimeout(r, 900)); // лента переранжируется
+
+        const s2 = Store.getState();
+        if (s2.lists.local.length + s2.lists.world.length >= minFound) {
+          Logger.info('NetService: глубокий поиск — нашёл, страница ' + (page + 1));
+          break;
+        }
+      }
+    } finally {
+      deepBusy = false;
+      emitDeep(false);
+    }
+  }
+
+  /**
+   * @param {boolean} active
+   */
+  function emitDeep(active) {
+    try { bus.emit('net:deep', { active }); } catch (_) {}
+  }
+
+  /**
    * Слушатели online/offline.
    */
   function ensureOnlineListener() {
@@ -4620,7 +4786,9 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
           if (p && p.uid) queueDeleted(p.uid, p.version);
         }));
 
-        busUnsubs.push(bus.on('db:change', () => rebuildCentroids()));
+        busUnsubs.push(bus.on('db:change', rebuildCentroids));
+        /** v95: зеркало тоже влияет на центроиды (префильтр ответов). */
+        busUnsubs.push(bus.on('db:mirror', rebuildCentroids));
 
         busUnsubs.push(bus.on('account:changed', () => {
           queue = { uids: [], deleted: [] };
@@ -4664,6 +4832,7 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
         contextUnsub = Store.subscribe(s => s.context, () => {
           maybeSendQuery();
           resetOlderExhausted();
+          scheduleDeepSearch();
         });
 
         startHeartbeat();
@@ -4751,6 +4920,13 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
       fetchTimer = null;
     }
     fetchTargets.clear();
+
+    if (deepTimer) {
+      clearTimeout(deepTimer);
+      deepTimer = null;
+    }
+    deepBusy = false;
+    emitDeep(false);
 
     fetchSubs.forEach(sub => {
       if (sub && typeof sub.close === 'function') {
@@ -7346,6 +7522,9 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
   let segBtns = [];
   let askBtn = null;
   let askTimer = 0;
+  let askActive = false;
+  let deepActive = false;
+  let lastRenderSig = null;
   let unsubs = [];
   let rafPending = false;
   let tickerTimer = null;
@@ -7843,12 +8022,6 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
   function render(isLoadMore) {
     if (!feedEl) return;
 
-    const anchor = takeAnchor();
-
-    if (!isLoadMore) {
-      visibleCount = pageForCurrentScroll();
-    }
-
     const state = Store.getState();
     const ctx = state.context;
     const isPinnedMode = ctx.source === 'pin';
@@ -7857,7 +8030,23 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
     const isRanked = isPinnedMode || isTyping || isDrift;
     const hasVector = !!ctx.vector;
 
-    segBar.classList.toggle('on', isTyping && hasVector);
+    /** v95: смена запроса (пин/дрейф/ввод/сегмент) — лента всегда
+        сверху (полный обзор выдачи с первой карточки); фоновые
+        обновления — якорь, позиция не прыгает. */
+    const renderSig = (ctx.source || '-') + '|' + (ctx.uid || '') + '|'
+      + (ctx.text || '') + '|' + state.seg;
+    const contextSwitch = lastRenderSig !== null && renderSig !== lastRenderSig;
+    lastRenderSig = renderSig;
+
+    const anchor = contextSwitch ? null : takeAnchor();
+
+    if (contextSwitch) {
+      visibleCount = PAGE;
+    } else if (!isLoadMore) {
+      visibleCount = pageForCurrentScroll();
+    }
+
+    segBar.classList.toggle('on', isTyping);
     ctxBanner.classList.toggle('on', isPinnedMode || isDrift);
 
     if (isPinnedMode || isDrift) {
@@ -7883,6 +8072,8 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
         .sort((a, b) => (b.score || 0) - (a.score || 0));
     } else if (isTyping && hasVector) {
       notes = state.lists[state.seg] || [];
+    } else if (isTyping) {
+      notes = []; // v95: вектор ещё считается — честное состояние ниже
     } else {
       notes = state.feed;
     }
@@ -7903,8 +8094,10 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
         emptyT.textContent = I18n.t('empty.world.t');
       } else if (isTyping && hasVector) {
         emptyT.textContent = (state.seg === 'world' && askBtn && askBtn.classList.contains('ask'))
-          ? I18n.t('seg.world.ask')
+          ? I18n.t(deepActive ? 'seg.world.deep' : 'seg.world.ask')
           : I18n.t('empty.' + state.seg + '.t');
+      } else if (isTyping) {
+        emptyT.textContent = I18n.t('seg.warm');
       } else {
         emptyT.textContent = I18n.t('empty.local.t');
       }
@@ -7927,7 +8120,11 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
       markShownThrottled(page.map(n => n.uid));
     }
 
-    applyAnchor(anchor);
+    if (contextSwitch) {
+      feedEl.scrollTop = 0;
+    } else {
+      applyAnchor(anchor);
+    }
   }
 
   /** ── Скролл: пагинация + глубина ── */
@@ -7989,6 +8186,14 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
     return arrEq(a.local, b.local) && arrEq(a.world, b.world) && arrEq(a.seren, b.seren);
   };
 
+  /** v95: единый пульс «Мира» — сетевой опрос или глубокий поиск. */
+  function syncAskBtn() {
+    if (!askBtn) return;
+    const on = askActive || deepActive;
+    askBtn.classList.toggle('ask', on);
+    askBtn.title = on ? I18n.t(deepActive ? 'seg.world.deep' : 'seg.world.ask') : '';
+  }
+
   function init() {
     bind();
     if (!feedEl) return;
@@ -8002,23 +8207,31 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
     unsubs.push(bus.on('db:mirror', scheduleRender));
     unsubs.push(bus.on('influence:updated', scheduleRender));
 
-    /** v94: сетевой опрос — пульс «Мира», пока ждём ответы. */
+    /** v94: сетевой опрос — пульс «Мира», пока ждём ответы.
+     *  v95: глубокий поиск — тот же пульс, пока копаем релей. */
     unsubs.push(bus.on('net:ask', p => {
       if (!askBtn || !p) return;
 
       const w = typeof p.window === 'number' && p.window > 0 ? p.window : 6000;
 
-      askBtn.classList.add('ask');
-      askBtn.title = I18n.t('seg.world.ask');
+      askActive = true;
+      syncAskBtn();
       scheduleRender();
 
       if (askTimer) clearTimeout(askTimer);
       askTimer = setTimeout(() => {
         askTimer = 0;
-        askBtn.classList.remove('ask');
-        askBtn.title = '';
+        askActive = false;
+        syncAskBtn();
         scheduleRender();
       }, w);
+    }));
+
+    unsubs.push(bus.on('net:deep', p => {
+      if (!p) return;
+      deepActive = !!p.active;
+      syncAskBtn();
+      scheduleRender();
     }));
 
     feedEl.addEventListener('scroll', onScroll, { passive: true });
@@ -8055,6 +8268,10 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
       clearTimeout(askTimer);
       askTimer = 0;
     }
+
+    askActive = false;
+    deepActive = false;
+    lastRenderSig = null;
   }
 
   return { init, destroy, render };
