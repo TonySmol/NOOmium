@@ -1,13 +1,15 @@
 /**
  * ═══════════════════════════════════════════════════════════════════
- * NOOmium — app.js · v1.2.3 (сборка 93)
+ * NOOmium — app.js · v1.2.4 (сборка 94)
  * Соцсеть смыслов: мысли ищутся по значению, а не по словам.
  * ═══════════════════════════════════════════════════════════════════
  *
  * Один файл, без сборки: статическое офлайн-first PWA, совместимое с
  * Telegram Mini App. Транспорт и криптография — Nostr (nostr-tools@2.25.2
  * фикс, SimplePool, 5 публичных релеев): каноны состояний kind 30078,
- * запросы 21000, ответы 21001, приватные каноны — NIP-44 v2,
+ * запросы 21000, ответы 21001 (v94: ПОИСК тоже анонсируется в сеть —
+ * чужие клиенты ищут у себя и отвечают ссылками, заметки подтягиваются
+ * точечными батч-подписками), приватные каноны — NIP-44 v2,
  * шифрование ключа на устройстве — NIP-49. Эмбеддинг — локальная
  * модель Granite (ONNX, q8, CLS-pooling, normalize) в Web Worker
  * (transformers.js@3.8.1 фикс). Хранилище — IndexedDB noomium_v3
@@ -45,7 +47,7 @@
 
 'use strict';
 
-const APP_VERSION = '1.2.3';
+const APP_VERSION = '1.2.4';
 
 /**
  * ═══ РЕЕСТР СОБЫТИЙ ШИНЫ ═══
@@ -59,6 +61,8 @@ const APP_VERSION = '1.2.3';
  *               reconnecting|failed|disconnected}
  * net:canon     NetService → Mirror            (raw Nostr event kind 30078)
  * net:answer    NetService → Mirror            {queryId, uid, owner, score}
+ * net:ask       NetService → FeedView          {queryId, window} — v94:
+ *               поиск анонсирован в сеть, ждём ответы window мс
  * net:resync    NetService → Mirror            (сброс fetched-дедупа)
  *
  * sync:status   NetService → AccountView       {phase: 'off'|'active'|'idle'}
@@ -79,7 +83,8 @@ const APP_VERSION = '1.2.3';
  *               Context(сброс пина/ввода) {pubkey}
  * i18n:change   I18n → все UI-модули            {lang}
  * influence:updated Influence → FeedView
- * mirror:fetch  Mirror → NetService             {uid, owner}
+ * mirror:fetch  Mirror → NetService             {uid, owner} — v94: копится
+ *               в батч (окно fetchBatchWindow), одна подписка на серию
  * wipe:request  MenuView → Boot, Context(сброс) (локальная очистка + сетевой wipe)
  * telegram:theme TelegramAdapter → (зарезервировано; тема применяется напрямую)
  *
@@ -419,6 +424,7 @@ DI.register('I18n', function (Config, bus) {
     'seg.local': 'Моё',
     'seg.world': 'Мир',
     'seg.seren': 'Озарения',
+    'seg.world.ask': 'Спрашиваю сеть…',
 
     'ctx.pinned': 'пин',
     'ctx.drift': 'дрейф от',
@@ -668,6 +674,7 @@ DI.register('I18n', function (Config, bus) {
     'seg.local': 'Mine',
     'seg.world': 'World',
     'seg.seren': 'Insights',
+    'seg.world.ask': 'Asking the network…',
 
     'ctx.pinned': 'pinned',
     'ctx.drift': 'drift from',
@@ -931,6 +938,9 @@ DI.register('Config', function () {
     queryRateLimit: 3000,
     maxResponses: 8,
     responseWindow: 6000,
+    searchAskNet: true,
+    fetchBatchWindow: 400,
+    fetchBatchMax: 24,
     centroidCount: 12,
     peerTTL: 60000,
     heartbeat: 30000,
@@ -3847,6 +3857,11 @@ DI.register('Protocol', function (Config, Vec, Vault, Nostr, Utils) {
  *
  * Движение сети. Модель «общая свежесть + личная глубина».
  *
+ * v94: ПОИСК (input) анонсируется в релей как kQuery — чужие
+ * клиенты ищут у себя, отвечают ссылками (kAnswer), заметки
+ * подтягиваются точечными батч-подписками и после локального
+ * переранжирования честными векторами встают в ленту «Мир».
+ *
  * deleted-каноны публикуются с minAck (deleteMinAck из Config,
  * по умолчанию 3 из 5): удаление считается доставленным только
  * при N подтверждениях. Недобор → reject → запись ОСТАЁТСЯ в
@@ -3858,7 +3873,10 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   let startPromise = null;
   let subscription = null;
   let selfSubscription = null;
-  let fetchSubscription = null;
+  /** v94: точечная подтяжка ответов — батч: накопитель + подписки. */
+  const fetchSubs = new Set();
+  const fetchTargets = new Map();
+  let fetchTimer = null;
   let hbTimer = null;
   let lastQueryVec = null;
   let lastQueryTime = 0;
@@ -4269,17 +4287,27 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   }
 
   /**
-   * Отправка запроса при контексте.
+   * Отправка запроса при контексте. v94: ПОИСК (input) тоже
+   * анонсируется в сеть — свежий клиент иначе видел бы только свой
+   * срез релея. Гейты нового пути: searchAskNet (конфиг) и
+   * syncEnabled — выключенный синк = «ничего не отправлять в
+   * сеть»; pin/drift работают как раньше.
    */
   function maybeSendQuery() {
     const ctx = Store.get('context');
+    const isSearch = ctx.source === 'input';
 
-    if ((ctx.source !== 'pin' && ctx.source !== 'drift') || !ctx.vector) {
+    if ((ctx.source !== 'pin' && ctx.source !== 'drift' && !isSearch) || !ctx.vector) {
       lastQueryVec = null;
       return;
     }
 
     if (!canPublish()) {
+      lastQueryVec = null;
+      return;
+    }
+
+    if (isSearch && (!Config.get('searchAskNet', true) || !Config.get('syncEnabled', true))) {
       lastQueryVec = null;
       return;
     }
@@ -4300,7 +4328,10 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
 
     Nostr.publish(tpl)
       .then(ev => {
-        Logger.info('NetService: запрос ' + ev.id.slice(0, 8) + '…');
+        Logger.info('NetService: запрос ' + ev.id.slice(0, 8) + '…' + (isSearch ? ' (поиск)' : ''));
+        if (isSearch) {
+          try { bus.emit('net:ask', { queryId: ev.id, window: Config.get('responseWindow', 6000) }); } catch (_) {}
+        }
       })
       .catch(e => {
         lastQueryVec = null;
@@ -4715,10 +4746,18 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
     }
     selfSubscription = null;
 
-    if (fetchSubscription && typeof fetchSubscription.close === 'function') {
-      try { fetchSubscription.close(); } catch (_) {}
+    if (fetchTimer) {
+      clearTimeout(fetchTimer);
+      fetchTimer = null;
     }
-    fetchSubscription = null;
+    fetchTargets.clear();
+
+    fetchSubs.forEach(sub => {
+      if (sub && typeof sub.close === 'function') {
+        try { sub.close(); } catch (_) {}
+      }
+    });
+    fetchSubs.clear();
 
     if (hbTimer) {
       clearInterval(hbTimer);
@@ -4789,38 +4828,70 @@ DI.register('NetService', function (Nostr, Protocol, DB, Ranker, Vec, Store, Con
   }
 
   /**
-   * Подтяжка цели по ответу-ссылке.
+   * Подтяжка цели по ответу-ссылке. v94: серия ответов (сетевой
+   * поиск) накапливается окно fetchBatchWindow и уходит ОДНОЙ
+   * подпиской с N фильтрами (OR) — раньше каждый новый ответ
+   * закрывал подписку предыдущего, и из серии доставалась только
+   * последняя заметка. Чанки по fetchBatchMax фильтров.
    * @param {Object} p - {uid, owner}
    */
   function handleMirrorFetch(p) {
     if (!p || !p.uid || !p.owner) return;
     if (!Nostr.isReady()) return;
 
-    if (fetchSubscription && typeof fetchSubscription.close === 'function') {
-      try { fetchSubscription.close(); } catch (_) {}
-    }
+    fetchTargets.set(p.owner + '|' + p.uid, { owner: p.owner, uid: p.uid });
 
-    fetchSubscription = Nostr.subscribe(
-      [{ authors: [p.owner], kinds: [kCanon()], '#d': [p.uid] }],
-      {
+    if (fetchTimer) return;
+
+    fetchTimer = setTimeout(() => {
+      fetchTimer = null;
+      flushFetchTargets();
+    }, Config.get('fetchBatchWindow', 400));
+  }
+
+  /**
+   * Слив накопителя ответов в батч-подписку.
+   */
+  function flushFetchTargets() {
+    if (!fetchTargets.size) return;
+
+    if (!Nostr.isReady()) return; // транспорт не готов — цели ждут след. батч
+
+    const targets = Array.from(fetchTargets.values());
+    fetchTargets.clear();
+
+    const chunkSize = Math.max(1, Config.get('fetchBatchMax', 24));
+
+    for (let i = 0; i < targets.length; i += chunkSize) {
+      const chunk = targets.slice(i, i + chunkSize);
+      const filters = chunk.map(t => ({ authors: [t.owner], kinds: [kCanon()], '#d': [t.uid] }));
+
+      const sub = Nostr.subscribe(filters, {
         onevent: ev => {
           if (!ev || !ev.id) return;
           try { bus.emit('net:canon', ev); } catch (_) {}
-          if (fetchSubscription && typeof fetchSubscription.close === 'function') {
-            try { fetchSubscription.close(); } catch (_) {}
-            fetchSubscription = null;
-          }
         },
         onclose: () => {
           setTimeout(() => {
-            if (fetchSubscription) {
-              try { fetchSubscription.close(); } catch (_) {}
-              fetchSubscription = null;
+            if (sub && typeof sub.close === 'function') {
+              try { sub.close(); } catch (_) {}
             }
+            fetchSubs.delete(sub);
           }, 10000);
         },
+      });
+
+      if (sub) {
+        fetchSubs.add(sub);
+
+        // страховка: точечная подписка живёт не дольше 30с
+        setTimeout(() => {
+          if (fetchSubs.delete(sub)) {
+            try { sub.close(); } catch (_) {}
+          }
+        }, 30000);
       }
-    );
+    }
   }
 
   return {
@@ -5204,7 +5275,8 @@ DI.register('Notes', function (DB, Embedder, bus, Logger, Utils) {
  * строкой лога.
  *
  * net:answer → fetchTarget (дедуп 500) → mirror:fetch → NetService
- * точечная подписка.
+ * точечная подписка (v94: ответы копятся в батч — одна подписка
+ * на серию ответов, фильтры OR).
  */
 DI.register('Mirror', function (DB, Protocol, Notes, bus, Nostr, Logger) {
   /** @type {Set<string>} */
@@ -7272,6 +7344,8 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
   let feedEl, emptyEl, emptyT, segBar, ctxBanner, ctxSrc, ctxTxt, ctxX;
   let cLocal, cWorld, cSeren;
   let segBtns = [];
+  let askBtn = null;
+  let askTimer = 0;
   let unsubs = [];
   let rafPending = false;
   let tickerTimer = null;
@@ -7294,6 +7368,7 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
     cWorld = document.getElementById('c-world');
     cSeren = document.getElementById('c-seren');
     segBtns = Array.from(document.querySelectorAll('.seg-b'));
+    askBtn = segBtns.find(b => b.getAttribute('data-k') === 'world') || null;
   }
 
   /**
@@ -7824,9 +7899,15 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
     if (!notes.length) {
       emptyEl.classList.add('on');
 
-      emptyT.textContent = (isPinnedMode || isDrift)
-        ? I18n.t('empty.world.t')
-        : (isTyping && hasVector ? I18n.t('empty.' + state.seg + '.t') : I18n.t('empty.local.t'));
+      if (isPinnedMode || isDrift) {
+        emptyT.textContent = I18n.t('empty.world.t');
+      } else if (isTyping && hasVector) {
+        emptyT.textContent = (state.seg === 'world' && askBtn && askBtn.classList.contains('ask'))
+          ? I18n.t('seg.world.ask')
+          : I18n.t('empty.' + state.seg + '.t');
+      } else {
+        emptyT.textContent = I18n.t('empty.local.t');
+      }
     } else {
       emptyEl.classList.remove('on');
 
@@ -7921,6 +8002,25 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
     unsubs.push(bus.on('db:mirror', scheduleRender));
     unsubs.push(bus.on('influence:updated', scheduleRender));
 
+    /** v94: сетевой опрос — пульс «Мира», пока ждём ответы. */
+    unsubs.push(bus.on('net:ask', p => {
+      if (!askBtn || !p) return;
+
+      const w = typeof p.window === 'number' && p.window > 0 ? p.window : 6000;
+
+      askBtn.classList.add('ask');
+      askBtn.title = I18n.t('seg.world.ask');
+      scheduleRender();
+
+      if (askTimer) clearTimeout(askTimer);
+      askTimer = setTimeout(() => {
+        askTimer = 0;
+        askBtn.classList.remove('ask');
+        askBtn.title = '';
+        scheduleRender();
+      }, w);
+    }));
+
     feedEl.addEventListener('scroll', onScroll, { passive: true });
 
     segBtns.forEach(b => {
@@ -7949,6 +8049,11 @@ DI.register('FeedView', function (Store, Context, I18n, Utils, Config, bus, Infl
     if (tickerTimer) {
       clearInterval(tickerTimer);
       tickerTimer = null;
+    }
+
+    if (askTimer) {
+      clearTimeout(askTimer);
+      askTimer = 0;
     }
   }
 
