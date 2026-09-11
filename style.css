@@ -529,6 +529,22 @@ body.ready #app { display: flex; }
   color: var(--amber);
 }
 
+/* v94: сетевой опрос — «Мир» пульсирует, пока сеть ищет заметки */
+.seg-b.ask {
+  color: var(--text-2);
+}
+
+.seg-b.ask .cnt {
+  background: var(--amber-glow);
+  color: var(--amber);
+  animation: seg-ask 1.15s var(--ease) infinite;
+}
+
+@keyframes seg-ask {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+
 /* ═══ 8. ЛЕНТА ═══ */
 
 #feed-wrap {
