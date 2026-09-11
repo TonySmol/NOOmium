@@ -1,6 +1,6 @@
 /**
  * ═══════════════════════════════════════════════════════════════════
- * NOOmium — app.js · v1.2.5 (сборка 95)
+ * NOOmium — app.js · v1.2.5.test (сборка 95)
  * Соцсеть смыслов: мысли ищутся по значению, а не по словам.
  * ═══════════════════════════════════════════════════════════════════
  *
@@ -918,7 +918,7 @@ DI.register('Config', function () {
 
   const defaults = Object.freeze({
     schemaVersion: SCHEMA_VERSION,
-    room: 'noomium-main',
+    room: 'noomium-main-test_1',
     theme: 'dark',
     lang: null,
     firstRunDone: false,
